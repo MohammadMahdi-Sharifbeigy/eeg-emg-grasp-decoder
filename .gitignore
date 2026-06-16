@@ -51,3 +51,6 @@ checkpoints/
 *.log
 runs/
 wandb/
+
+#Claude
+.claude/

@@ -38,8 +38,11 @@ class EEGKinCCA:
         eeg_aligned = cca.transform(val_eeg)     # (T, 16)
     """
 
-    def __init__(self, n_components: int = 16) -> None:
+    def __init__(self, n_components: int = 16, max_fit_samples: int = 500_000,
+                 random_state: int = 42) -> None:
         self.n_components = n_components
+        self.max_fit_samples = max_fit_samples
+        self.random_state = random_state
         self._cca: CCA | None = None
 
     def fit(
@@ -54,16 +57,38 @@ class EEGKinCCA:
             kin_arrays: list of (T_i, 13) k_t kinematic arrays (same split)
 
         All arrays must have the same number of samples T_i per pair.
-        Arrays from different series are concatenated before fitting.
+        Arrays from different series are concatenated before fitting. If the
+        total exceeds ``max_fit_samples``, a random subset is drawn — CCA
+        weights converge on a fraction of the data and the full set (tens of
+        millions of rows) would exhaust memory (sklearn copies X and y to
+        float64 internally).
         """
-        eeg_concat = np.concatenate(eeg_arrays, axis=0).astype(np.float64)
-        kin_concat = np.concatenate(kin_arrays, axis=0).astype(np.float64)
+        lengths = [e.shape[0] for e in eeg_arrays]
+        for i, (n_e, k) in enumerate(zip(lengths, kin_arrays)):
+            if n_e != k.shape[0]:
+                raise ValueError(
+                    f"EEG and kin sample counts differ in series {i}: "
+                    f"{n_e} vs {k.shape[0]}"
+                )
 
-        if eeg_concat.shape[0] != kin_concat.shape[0]:
-            raise ValueError(
-                f"EEG and kin sample counts differ: "
-                f"{eeg_concat.shape[0]} vs {kin_concat.shape[0]}"
-            )
+        n_total = int(np.sum(lengths))
+        if self.max_fit_samples and n_total > self.max_fit_samples:
+            # Sample per-array (proportional) and only materialise the subset,
+            # so we never build the full (n_total, 32) concatenation in memory.
+            rng = np.random.default_rng(self.random_state)
+            eeg_parts, kin_parts = [], []
+            for eeg_i, kin_i, n_i in zip(eeg_arrays, kin_arrays, lengths):
+                take = max(1, round(self.max_fit_samples * n_i / n_total))
+                take = min(take, n_i)
+                sel = rng.choice(n_i, size=take, replace=False)
+                sel.sort()
+                eeg_parts.append(eeg_i[sel])
+                kin_parts.append(kin_i[sel])
+            eeg_concat = np.concatenate(eeg_parts, axis=0).astype(np.float64)
+            kin_concat = np.concatenate(kin_parts, axis=0).astype(np.float64)
+        else:
+            eeg_concat = np.concatenate(eeg_arrays, axis=0).astype(np.float64)
+            kin_concat = np.concatenate(kin_arrays, axis=0).astype(np.float64)
 
         # sklearn CCA (canonical mode) requires n_components <= min(n, p, q)
         max_components = min(eeg_concat.shape[0], eeg_concat.shape[1], kin_concat.shape[1])
@@ -150,4 +175,8 @@ class EEGKinCCA:
 
 def make_cca_from_config(cfg: dict) -> EEGKinCCA:
     """Build EEGKinCCA from preprocessing.cca config section."""
-    return EEGKinCCA(n_components=cfg.get("n_components", 16))
+    return EEGKinCCA(
+        n_components=cfg.get("n_components", 16),
+        max_fit_samples=cfg.get("max_fit_samples", 500_000),
+        random_state=cfg.get("random_state", 42),
+    )
