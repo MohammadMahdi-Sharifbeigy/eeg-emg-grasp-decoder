@@ -31,12 +31,16 @@ preprocessing:
     downsample_factor: 8  # 4000 -> 500 Hz
 
   kinematics:
-    sg_window: 11         # Savitzky-Golay window (samples)
-    sg_poly: 3            # Savitzky-Golay polynomial order
-    normalize: true       # per-feature z-score over training set
+    include_velocity: false   # if true, output is (T, 26) = k_t + velocity
+    velocity_method: sg       # 'sg' (Savitzky-Golay) | 'bw' (Butterworth diff)
+    sg_window: 11             # SG window length (samples, must be odd)
+    sg_poly: 3                # SG polynomial order
+    bw_cutoff: 20.0           # LP cutoff Hz before diff (used when method='bw')
+    bw_order: 4               # Butterworth order (used when method='bw')
+    normalize: true           # per-feature z-score over training set
 
   cca:
-    n_components: 16      # canonical components (EEG 32 -> 16)
+    n_components: 13      # canonical components; bounded by min(n_eeg, n_kin)=min(32,13)=13
 
 model:
   transformer:
