@@ -1,0 +1,53 @@
+# Data — too large, not tracked
+data/
+
+# Literature & review
+data/review/
+
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# Environments
+.venv/
+venv/
+env/
+.env
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoint
+
+# Large files (safety net)
+*.mat
+*.zip
+*.avi
+*.mp4
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.suo
+*.user
+
+# Model checkpoints (put in data/ anyway)
+checkpoints/
+*.pt
+*.pth
+*.ckpt
+
+# Logs
+*.log
+runs/
+wandb/
