@@ -1,0 +1,72 @@
+data:
+  raw_dir: data/way-eeg/raw
+  cache_dir: data/cache
+  participants: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  window_size: 500        # samples at 500 Hz = 1 s
+  stride: 50              # 100 ms between windows
+  fs_eeg: 500             # Hz
+  fs_emg: 4000            # Hz (raw); downsampled to fs_eeg after preprocess
+  fs_kin: 500             # Hz
+  n_eeg_channels: 32
+  n_emg_channels: 5
+  n_kin_raw: 36           # raw kin cols in hs.kin.sig
+  n_kin_features: 13      # k_t dimension after extraction
+
+preprocessing:
+  eeg:
+    bp_low: 0.1           # Hz, bandpass lower bound
+    bp_high: 40.0         # Hz, bandpass upper bound
+    filter_order: 4
+    notch_freq: 50.0      # Hz, power-line
+    asr_window_ms: 500    # ms, ASR sliding window
+    asr_std_thresh: 5.0   # sigma, ASR rejection threshold
+    delta_low: 0.1        # Hz, delta-band lower bound
+    delta_high: 2.0       # Hz, delta-band upper bound
+
+  emg:
+    bp_low: 30.0          # Hz
+    bp_high: 300.0        # Hz
+    filter_order: 4
+    lp_cutoff: 10.0       # Hz, low-pass for envelope
+    downsample_factor: 8  # 4000 -> 500 Hz
+
+  kinematics:
+    sg_window: 11         # Savitzky-Golay window (samples)
+    sg_poly: 3            # Savitzky-Golay polynomial order
+    normalize: true       # per-feature z-score over training set
+
+  cca:
+    n_components: 16      # canonical components (EEG 32 -> 16)
+
+model:
+  transformer:
+    n_layers: 4
+    n_heads: 8
+    d_model: 256
+    d_k: 32               # key/query dim per head
+    d_v: 32               # value dim per head
+    ffn_dim: 1024
+    dropout: 0.2
+
+  gat:
+    n_layers: 2
+    n_muscles: 5          # nodes = EMG channels
+    hidden_dim: 256
+    jk_out_dim: 512       # after Jumping Knowledge concat of 2 layers
+
+  decoder:
+    out_channels: 5       # predicted EMG channels
+
+training:
+  optimizer: adam
+  lr: 0.001
+  lr_patience: 50         # epochs without val improvement before halving
+  lr_factor: 0.5
+  batch_size: 32
+  early_stop_patience: 30 # epochs
+  grad_clip_norm: 1.0
+  max_epochs: 500
+  loss_lambda: 0.9        # weight of MSE vs SoftDTW
+  soft_dtw_gamma: 0.1     # SoftDTW smoothing parameter
+  losocv: true            # leave-one-subject-out cross-validation
+  seed: 42
