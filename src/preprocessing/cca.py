@@ -19,7 +19,9 @@ This is different from PCA/ICA — the projection is supervised by kinematics.
 from __future__ import annotations
 
 import numpy as np
+import torch
 from sklearn.cross_decomposition import CCA
+from torch import Tensor
 
 
 class EEGKinCCA:
@@ -167,6 +169,81 @@ class EEGKinCCA:
         # Derive rotation matrices sklearn needs for transform()
         self._cca.x_rotations_ = self._cca.x_weights_
         self._cca.y_rotations_ = self._cca.y_weights_
+
+
+    def torch_projector(self, device: torch.device | str = "cpu") -> "TorchCCA":
+        """Export the fitted projection as an on-device TorchCCA.
+
+        sklearn's CCA.transform reduces to an affine map followed by a matmul:
+            X_scores = ((X - x_mean_) / x_std_) @ x_rotations_
+        Replicating it in torch keeps the whole batch on the GPU and removes
+        the per-batch CPU round-trip (.cpu().numpy() -> sklearn -> .to(device)).
+
+        Args:
+            device: Device to place the projection tensors on.
+
+        Returns:
+            TorchCCA with mean/std/rotation tensors on ``device``.
+        """
+        if self._cca is None:
+            raise RuntimeError("EEGKinCCA must be fit before export.")
+
+        # sklearn renamed these to private (_x_mean) around 1.3; support both.
+        def _attr(*names):
+            for n in names:
+                if hasattr(self._cca, n):
+                    return getattr(self._cca, n)
+            raise AttributeError(f"CCA missing all of {names}")
+
+        x_mean = np.asarray(_attr("_x_mean", "x_mean_"), dtype=np.float32).reshape(-1)
+        x_std = np.asarray(_attr("_x_std", "x_std_"), dtype=np.float32).reshape(-1)
+        x_rot = np.asarray(self._cca.x_rotations_, dtype=np.float32)  # (n_eeg, k)
+        return TorchCCA(x_mean, x_std, x_rot, device=device)
+
+
+class TorchCCA:
+    """On-device EEG -> canonical projection (matmul only, no autograd needed).
+
+    Mirrors EEGKinCCA.transform but runs entirely in torch so it can sit inside
+    the GPU training loop. Not an nn.Module: the projection is a fixed,
+    pre-fitted transform, so its tensors are plain buffers.
+    """
+
+    def __init__(
+        self,
+        x_mean: np.ndarray,
+        x_std: np.ndarray,
+        x_rotations: np.ndarray,
+        device: torch.device | str = "cpu",
+    ) -> None:
+        self.device = torch.device(device)
+        self.x_mean = torch.as_tensor(x_mean, dtype=torch.float32, device=self.device)
+        self.x_std = torch.as_tensor(x_std, dtype=torch.float32, device=self.device)
+        self.x_rotations = torch.as_tensor(
+            x_rotations, dtype=torch.float32, device=self.device
+        )
+        self.n_components = self.x_rotations.shape[1]
+
+    def to(self, device: torch.device | str) -> "TorchCCA":
+        """Move projection tensors to ``device`` in place."""
+        self.device = torch.device(device)
+        self.x_mean = self.x_mean.to(self.device)
+        self.x_std = self.x_std.to(self.device)
+        self.x_rotations = self.x_rotations.to(self.device)
+        return self
+
+    @torch.no_grad()
+    def transform(self, eeg: Tensor) -> Tensor:
+        """Project EEG into canonical space on-device.
+
+        Args:
+            eeg: Tensor of shape (..., n_eeg) on any device.
+
+        Returns:
+            Tensor of shape (..., n_components) on this projector's device.
+        """
+        eeg = eeg.to(self.device, dtype=torch.float32)
+        return ((eeg - self.x_mean) / self.x_std) @ self.x_rotations
 
 
 # ---------------------------------------------------------------------------
