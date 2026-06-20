@@ -26,7 +26,9 @@ import torch.nn as nn
 from torch import Tensor
 
 # Large finite stand-in for +inf on the DP boundary (keeps softmin grad finite).
-_BIG = 1.0e8
+# NOTE: must be < float16 max (~65504), but the DP always runs in float32
+# so 1e9 is fine there; we only need float16-safety if dtype is ever float16.
+_BIG = 1.0e9
 
 
 def _soft_min(a: Tensor, b: Tensor, c: Tensor, gamma: float) -> Tensor:
@@ -68,10 +70,14 @@ def soft_dtw(pred: Tensor, target: Tensor, gamma: float = 0.1) -> Tensor:
 
     B, T, _ = pred.shape
     device, dtype = pred.device, pred.dtype
-    D = _squared_euclidean(pred, target)                  # (B, T, T)
+
+    # The DP accumulates large sentinel values and logsumexp — keep it in
+    # float32 even when AMP has downcast inputs to float16 (_BIG=1e9 overflows
+    # float16 max of ~65504 and introduces NaNs in the gradient).
+    D = _squared_euclidean(pred, target).float()          # (B, T, T) fp32
 
     # R is 1-indexed with a padded border: shape (B, T+1, T+1).
-    R = torch.full((B, T + 1, T + 1), _BIG, device=device, dtype=dtype)
+    R = torch.full((B, T + 1, T + 1), _BIG, device=device, dtype=torch.float32)
     R[:, 0, 0] = 0.0
 
     # Fill along anti-diagonals d = i + j, for i, j in 1..T.
@@ -87,7 +93,9 @@ def soft_dtw(pred: Tensor, target: Tensor, gamma: float = 0.1) -> Tensor:
         cost = D[:, i - 1, j - 1]    # D is 0-indexed
         R[:, i, j] = cost + _soft_min(r0, r1, r2, gamma)
 
-    return R[:, T, T]
+    # Cast back so the scalar loss matches the caller's dtype (e.g. float16
+    # under AMP) — autograd handles the upcast transparently.
+    return R[:, T, T].to(dtype)
 
 
 class SoftDTWLoss(nn.Module):

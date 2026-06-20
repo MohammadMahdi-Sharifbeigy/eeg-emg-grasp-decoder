@@ -120,6 +120,11 @@ class WAYEEGDataset(Dataset):
         # Built lazily in _build_index
         self._windows: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
         self._build_index()
+        # Drop the preprocessing closure after indexing: it is only needed
+        # during _build_index and is never called from __getitem__.
+        # Keeping it would make the dataset unpicklable under Windows
+        # multiprocessing (spawn), breaking DataLoader with num_workers > 0.
+        self.preprocess_fn = None
 
     # ------------------------------------------------------------------
     # Index construction
