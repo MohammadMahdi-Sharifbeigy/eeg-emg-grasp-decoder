@@ -134,6 +134,43 @@ def delta_band(
     return sosfiltfilt(sos, eeg, axis=0).astype(np.float32)
 
 
+def select_channels(
+    eeg: np.ndarray,
+    channel_names: list[str],
+    target_channels: list[str] | None = None,
+) -> tuple[np.ndarray, list[str]]:
+    """Select a specific subset of EEG channels.
+
+    Args:
+        eeg: ndarray (T, C) float32
+        channel_names: list of C channel strings
+        target_channels: list of channels to keep. Defaults to:
+                         FC1, FC2, FC3, FC4, C3, C4, CZ, CP1, CP2, CP3, CP4, CP5, CP6, CPZ
+
+    Returns:
+        (filtered_eeg, filtered_channel_names)
+    """
+    if target_channels is None:
+        return eeg, channel_names
+
+
+    # Use case-insensitive matching in case dataset names are e.g., "Cz" instead of "CZ"
+    names_lower = [str(n).lower().strip() for n in channel_names]
+    indices = []
+    found_names = []
+
+    for ch in target_channels:
+        ch_lower = ch.lower().strip()
+        if ch_lower in names_lower:
+            idx = names_lower.index(ch_lower)
+            indices.append(idx)
+            found_names.append(channel_names[idx])
+        else:
+            raise ValueError(f"Target channel '{ch}' not found in provided channel_names: {channel_names}")
+
+    return eeg[:, indices].astype(np.float32), found_names
+
+
 # ---------------------------------------------------------------------------
 # Full pipeline
 # ---------------------------------------------------------------------------
@@ -151,11 +188,13 @@ def preprocess_eeg(
     asr_baseline_sec: float = 30.0,
     delta_low: float = 0.1,
     delta_high: float = 2.0,
+    channel_names: list[str] | None = None,
+    target_channels: list[str] | None = None,
 ) -> np.ndarray:
     """Apply full EEG preprocessing pipeline to one continuous HS series.
 
     Steps (method1.tex order):
-      BP 0.1–40 Hz → notch 50 Hz → ASR → CAR → delta 0.1–2 Hz
+      Channel selection (optional) → BP 0.1–40 Hz → notch 50 Hz → ASR → CAR → delta 0.1–2 Hz
 
     Args:
         eeg: ndarray (T, 32) float32, raw µV from load_hs()
@@ -163,8 +202,12 @@ def preprocess_eeg(
         ... (see individual step parameters above)
 
     Returns:
-        ndarray (T, 32) float32, delta-band EEG ready for CCA / windowing
+        ndarray (T, C) float32
+        Delta-band EEG ready for CCA / windowing.
     """
+    if channel_names is not None:
+        eeg, channel_names = select_channels(eeg, channel_names, target_channels)
+
     eeg = bandpass(eeg, fs, bp_low, bp_high, filter_order)
     eeg = notch(eeg, fs, notch_freq, notch_quality)
     eeg = asr(eeg, fs, asr_window_ms, asr_std_thresh, asr_baseline_sec)
@@ -173,7 +216,9 @@ def preprocess_eeg(
     return eeg
 
 
-def preprocess_eeg_from_config(eeg: np.ndarray, fs: float, cfg: dict) -> np.ndarray:
+def preprocess_eeg_from_config(
+    eeg: np.ndarray, fs: float, cfg: dict, channel_names: list[str] | None = None
+) -> np.ndarray:
     """Convenience wrapper accepting a config dict (preprocessing.eeg section).
 
     Example cfg:
@@ -194,4 +239,6 @@ def preprocess_eeg_from_config(eeg: np.ndarray, fs: float, cfg: dict) -> np.ndar
         asr_baseline_sec=cfg.get("asr_baseline_sec", 30.0),
         delta_low=cfg.get("delta_low", 0.1),
         delta_high=cfg.get("delta_high", 2.0),
+        channel_names=channel_names,
+        target_channels=cfg.get("target_channels"),
     )

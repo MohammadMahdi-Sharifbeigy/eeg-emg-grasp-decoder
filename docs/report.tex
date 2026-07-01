@@ -1,0 +1,762 @@
+\documentclass[12pt, a4paper]{article}
+
+% ─── Packages ────────────────────────────────────────────────────────────────
+\usepackage[a4paper, top=2.5cm, bottom=2.5cm, left=2.5cm, right=2.5cm]{geometry}
+\usepackage{amsmath, amssymb, amsfonts}
+\usepackage{bm}
+\usepackage{graphicx}
+\usepackage{xcolor}
+\usepackage{booktabs}
+\usepackage{array}
+\usepackage{multirow}
+\usepackage{hyperref}
+\usepackage{caption}
+\usepackage{subcaption}
+\usepackage{setspace}
+\usepackage{parskip}
+\usepackage{enumitem}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{abstract}
+\usepackage[numbers, sort&compress]{natbib}
+\usepackage{microtype}
+\usepackage{float}
+\usepackage[section]{placeins}
+
+% TikZ
+\usepackage{tikz}
+\usepackage{pgfplots}
+\pgfplotsset{compat=1.18}
+\usetikzlibrary{
+	shapes.geometric, shapes.misc, shapes.arrows,
+	arrows.meta, positioning, fit, calc,
+	backgrounds, decorations.pathreplacing,
+	matrix, chains, shadows.blur
+}
+
+% ─── Colours ─────────────────────────────────────────────────────────────────
+\definecolor{darkblue}{RGB}{31,56,100}
+\definecolor{midblue}{RGB}{46,95,163}
+\definecolor{lightblue}{RGB}{173,210,240}
+\definecolor{accentgreen}{RGB}{0,128,96}
+\definecolor{accentorange}{RGB}{210,100,20}
+\definecolor{accentpurple}{RGB}{120,60,160}
+\definecolor{lightgray}{RGB}{245,245,245}
+\definecolor{midgray}{RGB}{180,180,180}
+\definecolor{blockA}{RGB}{214,234,248}
+\definecolor{blockB}{RGB}{212,239,223}
+\definecolor{blockC}{RGB}{252,235,212}
+\definecolor{blockD}{RGB}{235,218,252}
+\definecolor{blockE}{RGB}{252,212,212}
+
+% ─── Hyperref ────────────────────────────────────────────────────────────────
+\hypersetup{
+	colorlinks=true, linkcolor=midblue, citecolor=accentgreen,
+	urlcolor=midblue, pdftitle={Multi-Method EMG Prediction from EEG on WAY-EEG-GAL}
+}
+
+% ─── Typography ──────────────────────────────────────────────────────────────
+\setstretch{1.25}
+\titleformat{\section}{\large\bfseries\color{darkblue}}{\thesection}{1em}{}
+\titleformat{\subsection}{\normalsize\bfseries\color{midblue}}{\thesubsection}{1em}{}
+\titleformat{\subsubsection}{\normalsize\bfseries\color{midblue}}{\thesubsubsection}{1em}{}
+
+\setlength{\headheight}{13.6pt}
+\addtolength{\topmargin}{-1.6pt}
+\pagestyle{fancy}
+\fancyhf{}
+\rhead{\small\textcolor{midgray}{Multi-Method EEG-to-EMG Prediction on WAY-EEG-GAL}}
+\lhead{\small\textcolor{midgray}{\thepage}}
+\renewcommand{\headrulewidth}{0.4pt}
+
+% ─── Math operators ──────────────────────────────────────────────────────────
+\DeclareMathOperator{\Cov}{Cov}
+\DeclareMathOperator{\Var}{Var}
+\DeclareMathOperator{\MSE}{MSE}
+\DeclareMathOperator{\softmax}{softmax}
+\newcommand{\R}{\mathbb{R}}
+
+% ─────────────────────────────────────────────────────────────────────────────
+\begin{document}
+	
+	% ─── TITLE ───────────────────────────────────────────────────────────────────
+	\begin{center}
+		{\LARGE\bfseries\color{darkblue}
+			Predicting EMG Envelopes from EEG and Kinematic Signals:}\\[14pt]
+		{\large\itshape\color{midblue}
+			A Research Article Proposal}\\[20pt]
+		{\normalsize
+			\textbf{\href{mailto:sharifbeigymohammad@gmail.com}{MohammadMahdi SharifBeigi}}\\[4pt]
+			\textit{Computational Neuroscience Team 6}}\\[16pt]
+	\end{center}
+	
+	\vspace{6pt}
+	\hrule height 1pt
+	\vspace{14pt}
+	
+	% ─── ABSTRACT ────────────────────────────────────────────────────────────────
+	\begin{abstract}
+		\noindent
+		Electromyography (EMG)-based prosthetic control fails in cases of
+		high-level amputation or severe paralysis where functional muscles are
+		absent. Brain-derived signals from electroencephalography (EEG) offer
+		a complementary pathway. This article presents a \textbf{multi-method
+		comparative study} for continuous prediction of EMG envelopes from
+		scalp EEG and kinematic measurements during grasp-and-lift tasks,
+		validated on the \textbf{WAY-EEG-GAL} dataset (3,936 trials, 12
+		participants, 32-channel EEG, 5-channel EMG, 3D kinematics, 6-axis
+		force/torque). We propose and compare four architectures of
+		increasing complexity:
+		
+		\textbf{Method~1 (KG-GT):} A Kinematic-Guided Graph-Transformer
+		combining CCA-based EEG--kinematic alignment, a Transformer encoder,
+		and a kinematic-conditioned GAT with a hybrid MSE~+~SoftDTW loss.
+		
+		\textbf{Method~2 (NNMF-KG-GT):} Enhances Method~1 by replacing the
+		anatomically fixed graph structure with Non-Negative Matrix
+		Factorisation (NNMF)-derived muscle synergy weights, providing
+		biologically interpretable, data-driven inter-muscle connectivity.
+		
+		\textbf{Method~3 (PTL-Net):} A Phase-Targeted Lightweight Network
+		that focuses on Load and Hold movement phases, uses correlation-based
+		channel selection (6 channels: C3, C4, Cz, CP3, CP4, Fz), and
+		performs multi-task prediction of EMG envelopes, Grip Force, and
+		object weight classification---demonstrating direct clinical
+		applicability for adaptive prosthetic control.
+		
+		\textbf{Method~4 (USPT):} A Unified Synergy-Phase-Transformer that
+		integrates all innovations from Methods~1--3 into a single framework
+		with NNMF-initialised kinematic-guided GAT, phase-aware Transformer
+		encoding, triple-head decoding, and phase-weighted loss.
+		
+		\vspace{4pt}
+		\noindent\textbf{Keywords:} EEG, EMG prediction, WAY-EEG-GAL,
+		NNMF, muscle synergy, graph attention network, Transformer,
+		phase-targeted decoding, multi-task learning, prosthetic control.
+	\end{abstract}
+	
+	\hrule height 0.5pt
+	\vspace{10pt}
+	
+	\tableofcontents
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Introduction}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	The ability to decode motor intent from neural signals and translate it into
+	reliable control of external devices is a foundational challenge in neural
+	engineering. Two principal peripheral modalities have historically dominated
+	prosthetic control: surface electromyography (sEMG), which measures the
+	electrical activity of muscles, and joint kinematics, which captures the
+	positional state of limbs. While both are effective for able-bodied
+	individuals and low-level amputees, their availability becomes severely
+	restricted in cases of high-level limb loss, spinal cord injury, or
+	progressive neuromuscular disease.
+	
+	Electroencephalography (EEG) offers a non-invasive, low-cost alternative by
+	capturing oscillatory cortical activity through scalp-mounted electrodes.
+	Motor-related cortical areas exhibit characteristic modulations in the
+	mu~($8$--$13$~Hz) and beta~($13$--$30$~Hz) frequency bands during movement
+	preparation and execution, as well as slow cortical potentials in the delta
+	band ($0.1$--$3$~Hz) that track the continuous dynamics of movement.
+	
+	The core scientific question addressed here is: \textit{to what extent can
+		the continuous EMG envelope be accurately predicted from scalp EEG
+		recordings, and can the simultaneous inclusion of kinematic measurements,
+		muscle synergy decomposition, and phase-targeted processing further
+		improve this prediction?}
+	
+	This work makes the following contributions:
+	\begin{itemize}[itemsep=2pt]
+		\item A novel \textbf{CCA-based EEG--kinematic alignment} stage (Method~1) and a \textbf{Corticomuscular Coherence (CMC)-based EEG--EMG connectivity} feature extraction (Method~4) that provide a biologically-grounded projection before deep learning.
+		\item A \textbf{time-lagged windowing strategy} to account for physiological delays between cortical planning, muscle activation, and limb kinematics~\cite{esi_gal_2025}.
+		\item A \textbf{Transformer encoder} that explicitly models the nonlinear,
+		multi-lag temporal coupling between cortical activity and muscle
+		activation (Methods~1, 2, 4).
+		\item A \textbf{Kinematic-Guided GAT} whose attention coefficients are
+		dynamically conditioned on the instantaneous kinematic state, enabling
+		task-phase-dependent muscle synergy modelling (Methods~1, 2, 4).
+		\item Integration of \textbf{NNMF-derived muscle synergy} weights as
+		data-driven graph adjacency priors, inspired by multimodal approaches
+		to motor dynamics~\cite{pierella2020} (Methods~2, 4).
+		\item A \textbf{phase-targeted, channel-selected, multi-task} architecture
+		that predicts EMG envelopes, Grip Force, and object weight class
+		simultaneously from only 6 EEG channels during Load and Hold phases
+		(Methods~3, 4).
+		\item A \textbf{Unified Synergy-Phase-Transformer (USPT)} combining
+		all innovations with phase-weighted loss and staged training (Method~4).
+		\item A \textbf{hybrid MSE~+~SoftDTW loss} function that penalises both
+		amplitude error and temporal misalignment (all methods).
+		\item Comprehensive validation on the richly multimodal
+		\textbf{WAY-EEG-GAL} dataset across 12 subjects and systematically
+		varied grasp conditions.
+	\end{itemize}
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Background and Related Work}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\subsection{The WAY-EEG-GAL Dataset}
+	
+	The WAY-EEG-GAL dataset~\cite{luciw2014} contains 3,936 grasp-and-lift (GAL)
+	trials from 12 right-handed participants. The participant grasped a small
+	instrumented object with the thumb and index finger, lifted it approximately
+	5~cm, held it at a target position, and replaced it. Object weight was varied
+	between 165, 330, and 660~g; contact surface was varied between sandpaper,
+	suede, and silk---in an unpredictable manner---enforcing systematic changes
+	in fingertip force coordination. Simultaneous recordings include:
+	\begin{itemize}[itemsep=2pt]
+		\item \textbf{EEG:} 32 channels (ActiCap), sampled at 500~Hz.
+		\item \textbf{EMG:} 5 channels (anterior deltoid, brachioradialis, flexor
+		digitorum, extensor digitorum, first dorsal interosseus), sampled at
+		4,000~Hz.
+		\item \textbf{Kinematics:} Four Polhemus FASTRAK 3D position/orientation
+		sensors (object, index finger, thumb, wrist), sampled at 500~Hz.
+		\item \textbf{Force/torque:} Two ATI Nano-17 6-axis sensors at both contact
+		plates.
+	\end{itemize}
+	Sixteen behaviourally relevant events were extracted per trial, and all
+	participants were confirmed to adapt grip coordination to the prevailing
+	weight and friction~\cite{luciw2014}.
+	
+	\subsection{Unscented Kalman Filtering Approaches}
+	
+	Nakagome et al.~\cite{nakagome2017} demonstrated offline continuous decoding of
+	lower-limb EMG envelopes during over-ground walking on multiple terrains from
+	delta-band ($0.1$--$3$~Hz) EEG using a first-order Unscented Kalman
+	Filter~(UKF).  Across six subjects the mean Pearson correlation was
+	$r = 0.236$, with $79.3\%$ of results exceeding $\mathrm{SNR} = 0$~dB.
+	
+	Sburlea, Butturini, and M\"{u}ller-Putz~\cite{sburlea2021} extended the UKF
+	approach to upper-limb grasping (31 subjects, 33 grasping conditions) using
+	low-frequency EEG ($0.1$--$2$~Hz), a multivariate autoregressive (MVAR) state
+	model, and partial least squares (PLS) neural tuning, achieving median
+	$r = 0.20$ and $\mathrm{nMAE} = 28.6\%$.
+	
+	The UKF state-transition equation is:
+	\begin{equation}
+		\bm{x}_n = \sum_{i=1}^{m} \bm{A}_i(n)\,\bm{x}_{n-i} + \bm{e}_n,
+		\label{eq:ukf_state}
+	\end{equation}
+	where $\bm{x}_n \in \R^d$ is the EMG envelope state, $\bm{A}_i(n)$ are
+	$d\!\times\!d$ coefficient matrices, and $\bm{e}_n$ is Gaussian noise.
+	The observation model is:
+	\begin{equation}
+		\bm{y}_k = \bm{H}\,\bm{x}_k + \bm{v}_{k-1},
+		\label{eq:ukf_obs}
+	\end{equation}
+	where $\bm{H}$ is the PLS-estimated neural tuning matrix and $\bm{v}$ is
+	measurement noise. The UKF propagates sigma points through
+	Eq.~\eqref{eq:ukf_state} to estimate state statistics nonlinearly.
+	However, the \emph{fixed linear} observation model $\bm{H}$ and the
+	Gaussian noise assumptions limit performance ceiling for complex grasping.
+	
+	\subsection{Deep Sequence Learning: CNN-LSTM}
+	
+	Jain et al.~\cite{jain2025} proposed \textit{RawSeq2SeqNet}, a CNN-LSTM
+	architecture for reconstructing biceps brachii EMG from 19-channel EEG during
+	elbow flexion-extension (single subject). The key innovation was a hybrid
+	training loss:
+	\begin{equation}
+		\mathcal{L} = 0.9 \cdot \MSE + 0.1 \cdot \mathrm{SoftDTW}(\gamma=0.2),
+		\label{eq:jain_loss}
+	\end{equation}
+	achieving $R^2 = 0.364$ and Pearson $r = 0.795$ on the held-out test set, with
+	mean inference time $2.11$~ms per 2-second window. The SoftDTW component
+	tolerates the physiological cortico-muscular conduction delay
+	($\approx 10$--$30$~ms) during training.
+	
+	\subsection{Graph-Based Architectures with Muscle Synergy}
+	
+	Li et al.~\cite{li2025} introduced \textit{MSGAT-LSTM} for continuous wrist
+	kinematics prediction from sparse sEMG, using a GAT with edge weights
+	derived from cosine similarity of EMG feature vectors, grounded in muscle
+	synergy (MS) theory. The cosine similarity between nodes $i$ and $j$ after
+	shared linear transform $\bm{W}$ is:
+	\begin{equation}
+		\alpha_{ij} = \frac{\sum_{k=1}^{F'} m_{ik}\,m_{jk}}
+		{\|\bm{M}_i\|\,\|\bm{M}_j\|},
+		\label{eq:cosine}
+	\end{equation}
+	with normalised edge weights:
+	\begin{equation}
+		e_{ij} = \frac{\exp(\mathrm{LeakyReLU}(\alpha_{ij}))}
+		{\sum_{j'} \exp(\mathrm{LeakyReLU}(\alpha_{ij'}))}.
+		\label{eq:gat_edge}
+	\end{equation}
+	On NinaPro DB2 (12 subjects), MSGAT-LSTM achieved $R^2 = 0.960$ and
+	$\mathrm{RMSE} = 0.098$~rad using only 10 sparse electrodes, reducing
+	training time by $\approx 13\%$ relative to GCN-LSTM.
+	
+	\subsection{Non-Negative Matrix Factorisation for Muscle Synergy}
+	
+	Pierella et~al.~\cite{pierella2020} demonstrated a multimodal approach to
+	capturing post-stroke motor recovery dynamics by integrating EEG, EMG, and
+	kinematic data. A central analytical tool was \textbf{Non-Negative Matrix
+	Factorisation (NNMF)}~\cite{lee1999}, which decomposes the multi-muscle EMG
+	activation matrix $\bm{V} \in \R_{\geq 0}^{T \times M}$ into a small
+	number $r$ of synergy modules:
+	\begin{equation}
+		\bm{V} \approx \bm{W}\,\bm{H},
+		\qquad \bm{W} \in \R_{\geq 0}^{T \times r},\;
+		\bm{H} \in \R_{\geq 0}^{r \times M},
+		\label{eq:bg_nnmf}
+	\end{equation}
+	where $\bm{W}$ encodes temporal activation profiles and $\bm{H}$ encodes
+	muscle recruitment weights for each synergy. The non-negativity constraint
+	ensures physiological interpretability: muscles can only be activated, not
+	inhibited, by a synergy module.
+	
+	Pierella et~al.\ showed that the number of synergies, their composition,
+	and their temporal activation patterns change during post-stroke
+	rehabilitation, tracking recovery of motor coordination at the spinal level.
+	Tresch et~al.~\cite{tresch2006} provided foundational evidence that the
+	central nervous system controls movement through a small set of
+	muscle synergies, validating NNMF as a principled decomposition for
+	motor neuroscience.
+	
+	\paragraph{Gap.}
+	Despite the established utility of NNMF for synergy analysis, no prior
+	EEG-to-EMG prediction study has used NNMF-derived synergy weights as
+	structural priors for graph-based neural network architectures. This gap
+	is addressed by Methods~2 and~4 in the present work.
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Research Gaps and Motivation}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	The literature review reveals eight specific gaps:
+	
+	\begin{enumerate}[label=\textbf{G\arabic*.}, leftmargin=*, itemsep=4pt]
+		\item \textbf{Limited expressivity.} UKF imposes linear, Gaussian
+		assumptions on the EEG--EMG mapping; deep architectures with
+		transformer-level capacity are needed.
+		\item \textbf{Single-subject scope.} RawSeq2SeqNet was validated on one
+		participant; the WAY-EEG-GAL dataset provides 12 participants and 3,936
+		trials.
+		\item \textbf{Underutilisation of kinematics.} No existing EEG-to-EMG
+		predictor leverages the rich kinematic data (3D finger positions, grip
+		aperture, load/grip force) available in WAY-EEG-GAL as a structural
+		constraint.
+		\item \textbf{No synergy structure in EEG decoding.} The muscle-synergy
+		graph principle proven in MSGAT-LSTM has never been applied to the
+		EEG-to-EMG direction.
+		\item \textbf{Temporal misalignment.} With the exception of Jain et al.,
+		prior EEG-to-EMG methods use MSE/MAE loss functions sensitive to
+		cortico-muscular conduction delays.
+		\item \textbf{No NNMF-derived priors for graph construction.} Existing
+		graph-based architectures use either anatomically fixed or learned-from-scratch
+		graph topologies. NNMF-derived synergy weights---validated by decades of
+		motor neuroscience research~\cite{tresch2006, pierella2020}---have
+		never been used to initialise the adjacency matrix of a GAT for
+		EEG-to-EMG prediction.
+		\item \textbf{Full-window prediction ignores phase-specific coupling.}
+		All prior methods predict EMG uniformly across the entire trial window.
+		However, the EEG--EMG relationship is strongest during Load and Hold
+		phases, where sustained cortical drive maintains isometric contraction.
+		Reach and Replace phases have weaker coupling and higher artefact
+		contamination.
+		\item \textbf{No multi-task or classification from EEG.} No EEG-to-EMG
+		study simultaneously predicts EMG envelopes, grip force, and object
+		weight class. Multi-task learning can improve representation quality
+		through shared features, and weight classification directly demonstrates
+		clinical applicability for adaptive prosthetic grip control.
+	\end{enumerate}
+	
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Methods Overview}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	This work proposes four methods of increasing complexity, each addressing
+	a progressively larger subset of the identified research gaps. Table~\ref{tab:methods_overview}
+	summarises the four methods.
+	
+	\begin{table}[H]
+		\centering
+		\caption{Overview of the four proposed methods.}
+		\label{tab:methods_overview}
+		\renewcommand{\arraystretch}{1.4}
+		\begin{tabular}{clp{5.5cm}c}
+			\toprule
+			\textbf{Method} & \textbf{Name} & \textbf{Key Innovation} & \textbf{Gaps Addressed} \\
+			\midrule
+			1 & KG-GT &
+			CCA + Transformer + Kinematic-Guided GAT + SoftDTW &
+			G1--G5 \\
+			2 & NNMF-KG-GT &
+			Method~1 + NNMF-derived synergy graph adjacency &
+			G1--G6 \\
+			3 & PTL-Net &
+			Phase targeting + channel selection + multi-task (EMG + Force + weight class) &
+			G7--G8 \\
+			4 & USPT &
+			Unified: NNMF + phase embeddings + channel selection + CMC + KG-GAT + triple-head &
+			G1--G9 \\
+			\bottomrule
+		\end{tabular}
+	\end{table}
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Method~1: Kinematic-Guided Graph-Transformer (KG-GT)}
+	\label{sec:method1}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\input{method1}
+	
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Method~2: NNMF-Enhanced KG-GT}
+	\label{sec:method2}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\input{method2}
+	
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Method~3: Phase-Targeted Lightweight Network (PTL-Net)}
+	\label{sec:method3}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\input{method3}
+	
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Method~4: Unified Synergy-Phase-Transformer (USPT)}
+	\label{sec:method4}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\input{method4}
+	
+	\newpage
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Comparative Analysis}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\subsection{Baseline and Cross-Method Comparison}
+	
+	\begin{table}[H]
+		\centering
+		\caption{Comparison of all proposed methods with baseline approaches.
+			Expected performance ranges are based on the reviewed literature and
+			architectural analysis.}
+		\label{tab:comparison}
+		\renewcommand{\arraystretch}{1.3}
+		\begin{tabular}{llcccc}
+			\toprule
+			\textbf{Method} & \textbf{Input} &
+			\textbf{Expected $r$} & \textbf{Expected $R^2$} &
+			\textbf{Params} & \textbf{Multi-task} \\
+			\midrule
+			UKF~\cite{sburlea2021} & EEG (delta) &
+			$\approx 0.20$ & --- & Minimal & No \\
+			CNN-LSTM~\cite{jain2025} & EEG &
+			$\approx 0.50$ & $\approx 0.35$ & $\sim$500K & No \\
+			\midrule
+			\textbf{M1: KG-GT} & EEG + Kin &
+			$>0.55$ & $>0.45$ & $\sim$2M & No \\
+			\textbf{M2: NNMF-KG-GT} & EEG + Kin + NNMF &
+			$>0.60$ & $>0.50$ & $\sim$2M & No \\
+			\textbf{M3: PTL-Net} & 6-ch EEG (phase) &
+			$>0.65$ & $>0.55$ & $\sim$300K & Yes \\
+			\textbf{M4: USPT} & 6-ch EEG + Kin + NNMF &
+			$>0.75$ & $>0.65$ & $\sim$1.5M & Yes \\
+			\bottomrule
+		\end{tabular}
+	\end{table}
+	
+	\subsection{Feature and Complexity Comparison}
+	
+	\begin{table}[H]
+		\centering
+		\caption{Architectural feature comparison across all four methods.}
+		\label{tab:feature_comp}
+		\renewcommand{\arraystretch}{1.3}
+		\begin{tabular}{lcccc}
+			\toprule
+			\textbf{Feature} & \textbf{M1} & \textbf{M2} & \textbf{M3} & \textbf{M4} \\
+			\midrule
+			EEG-Kinematic CCA alignment  & \checkmark & \checkmark & $\times$   & $\times$ \\
+			EEG-EMG CMC synchronisation  & $\times$   & $\times$   & $\times$   & \checkmark \\
+			Transformer encoder  & \checkmark & \checkmark & \checkmark & \checkmark \\
+			Kinematic-guided GAT & \checkmark & \checkmark & $\times$   & \checkmark \\
+			NNMF synergy graph   & $\times$   & \checkmark & $\times$   & \checkmark \\
+			Phase targeting      & $\times$   & $\times$   & \checkmark & \checkmark \\
+			Channel selection    & $\times$   & $\times$   & \checkmark & \checkmark \\
+			Multi-task (Force)   & $\times$   & $\times$   & \checkmark & \checkmark \\
+			Weight classifier    & $\times$   & $\times$   & \checkmark & \checkmark \\
+			SoftDTW loss         & \checkmark & \checkmark & $\times$   & \checkmark \\
+			Phase-weighted loss  & $\times$   & $\times$   & $\times$   & \checkmark \\
+			\bottomrule
+		\end{tabular}
+	\end{table}
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Theoretical Justification for Superior Performance}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	\subsection{Superiority Over UKF}
+	
+	\begin{enumerate}[leftmargin=*, itemsep=4pt]
+		\item \textbf{Non-parametric expressivity.} The UKF's MVAR state model
+		(Eq.~\ref{eq:ukf_state}) is linear in the state history and imposes a
+		Gaussian noise structure. Transformer self-attention is a universal
+		function approximator over sequences, capable of representing arbitrary
+		multi-lag nonlinear mappings between cortical oscillations and multi-muscle
+		co-activation.
+		
+		\item \textbf{No Gaussian assumption.} EEG amplitude distributions near
+		movement onset are non-Gaussian. The UKF's statistical guarantees
+		degrade; Transformer-based models impose no distributional assumptions on
+		intermediate representations.
+		
+		\item \textbf{Kinematic integration.} The UKF uses EEG as the sole input.
+		The WAY-EEG-GAL dataset provides grip aperture, load force, grip force,
+		and 3D finger positions that encode the phase and biomechanical state of
+		the grasp. The CCA stage and kinematic-guided GAT make full use of this
+		information.
+		
+		\item \textbf{Muscle synergy modelling.} The UKF treats EMG channels
+		independently (or through a fixed linear MVAR). The proposed GAT
+		explicitly encodes the coordinated relationships between all five muscles,
+		consistent with the Discrete Event Sensory Control (DESC) policy
+		governing the GAL task.
+		
+		\item \textbf{NNMF-derived structure (Methods~2, 4).} NNMF provides
+		data-driven synergy priors validated by motor neuroscience, replacing
+		the UKF's assumption of channel independence.
+	\end{enumerate}
+	
+	\subsection{Superiority Over CNN-LSTM}
+	
+	\begin{enumerate}[leftmargin=*, itemsep=4pt]
+		\item \textbf{Multi-muscle, multi-condition scope.} RawSeq2SeqNet was
+		validated on a single biceps brachii channel in a uniplanar task on one
+		subject. All four proposed methods target all five muscles across 3,936
+		trials with varying weight and friction.
+		
+		\item \textbf{Kinematic augmentation.} RawSeq2SeqNet uses raw EEG channels
+		without task-variable guidance. CCA provides a task-relevant low-dimensional
+		projection maximally correlated with kinematic measurements.
+		
+		\item \textbf{Anatomical priors.} The CNN in RawSeq2SeqNet treats the 19
+		EEG channels as an unstructured feature map. The proposed GAT encodes
+		known anatomical synergies (e.g., flexor-extensor antagonism; FD--FDI
+		co-activation during precision grasp).
+		
+		\item \textbf{Full-context temporal attention.} The Transformer attends to
+		arbitrary lags within the window simultaneously. The LSTM in RawSeq2SeqNet
+		processes sequences with exponential temporal decay (vanishing gradient),
+		limiting its effective receptive field.
+		
+		\item \textbf{Phase-aware processing (Methods~3, 4).} By focusing on
+		Load and Hold phases and using correlation-based channel selection,
+		PTL-Net and USPT eliminate input noise from irrelevant phases and
+		channels, improving the signal-to-noise ratio of the prediction.
+		
+		\item \textbf{Multi-task learning (Methods~3, 4).} Simultaneous prediction
+		of EMG, Grip Force, and weight class provides shared-feature regularisation
+		and demonstrates clinical applicability beyond single-output regression.
+	\end{enumerate}
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Expected Results}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	Based on the architectural design and prior literature, we state the following
+	empirical hypotheses:
+	
+	\begin{enumerate}[label=\textbf{H\arabic*.}, leftmargin=*, itemsep=4pt]
+		\item Method~4 (USPT) will achieve the highest overall Pearson $r > 0.75$
+		across all five EMG channels and 12 subjects, followed by Method~3
+		($r > 0.65$), Method~2 ($r > 0.60$), and Method~1 ($r > 0.55$).
+		\item Prediction accuracy will be highest for the flexor digitorum and
+		first dorsal interosseus (the primary precision grasp muscles),
+		consistent with their strong kinematic correlation during the Load phase.
+		\item Phase-specific analysis will show significantly higher $r$ and $R^2$
+		during Load and Hold phases compared to Reach and Replace, validating
+		the phase-targeting strategy of Methods~3 and~4.
+		\item The NNMF-derived synergy graph (Methods~2, 4) will produce
+		consistently higher $r$ than the anatomically fixed graph (Method~1),
+		with synergy similarity index $\mathrm{SSI} > 0.80$ across subjects.
+		\item The weight classifier (Methods~3, 4) will achieve $> 85\%$
+		accuracy and $F_1 > 0.83$ across three weight classes, demonstrating
+		the feasibility of EEG-based adaptive prosthetic grip control.
+		\item The SoftDTW component will reduce DTW temporal distance by at least
+		$15\%$ relative to MSE-only training, without degrading nRMSE.
+		\item Method~3 (PTL-Net) will have the lowest computational cost
+		($< 30\%$ of Method~1 FLOPs) while maintaining competitive accuracy,
+		demonstrating the efficiency of phase-targeted channel selection.
+	\end{enumerate}
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Discussion}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	The four-method comparative framework presented here systematically
+	investigates the contribution of each architectural innovation to
+	EEG-to-EMG prediction quality.
+	
+	\paragraph{Method~1 (KG-GT)} establishes the baseline deep-learning
+	architecture with CCA alignment, Transformer encoding, and
+	kinematic-conditioned GAT. The kinematic conditioning of GAT attention
+	is a theoretical contribution beyond existing graph-based EMG predictors:
+	$\alpha_{ij}^t$ is recomputed at every time step from $\bm{k}_t$, making
+	inter-muscle synergy representation dynamic and context-dependent.
+	
+	\paragraph{Method~2 (NNMF-KG-GT)} replaces anatomical graph assumptions
+	with data-driven NNMF synergy weights, connecting decades of motor
+	neuroscience research~\cite{tresch2006, pierella2020} to modern
+	graph neural networks. The cosine similarity of NNMF loadings provides
+	a principled initialisation that biases the GAT towards physiologically
+	meaningful muscle coordination patterns.
+	
+	\paragraph{Method~3 (PTL-Net)} demonstrates that simpler, targeted
+	approaches can be highly effective. By exploiting phase-specific
+	EEG--EMG coupling and reducing input dimensionality through channel
+	selection, PTL-Net achieves competitive accuracy with dramatically lower
+	computational cost. The multi-task architecture (EMG + Force + weight
+	class) directly addresses prosthetic application requirements.
+	
+	\paragraph{Method~4 (USPT)} combines all innovations into a unified
+	framework, with phase embeddings, NNMF-initialised GAT, and
+	phase-weighted loss. The staged training protocol ensures stable
+	convergence of this complex architecture.
+	
+	The perturbation trials of WAY-EEG-GAL provide a unique test of motor
+	adaptation decoding. EEG channels Pz and C4 are known from the original
+	paper to show significant alpha and beta power changes approximately 200~ms
+	after unexpected weight changes~\cite{luciw2014}. If USPT achieves
+	measurably different prediction accuracy on these trials relative to stable
+	trials, it would indicate that the architecture is capturing the EEG correlates
+	of sensorimotor adaptation---a clinically significant capability for prosthetic
+	devices that must respond to objects with varying properties.
+	
+	\paragraph{Limitations.}
+	(1)~CCA assumes a stationary linear EEG--kinematic relationship; adaptive CCA
+	or online recalibration should be explored for non-stationary real-world use.
+	(2)~The graph structure is currently defined either anatomically or via NNMF;
+	end-to-end graph learning may discover unexpected synergistic relationships.
+	(3)~All experiments are offline; real-time implementation introduces latency
+	constraints on window length and model complexity.
+	(4)~The recommended channel set (C3, C4, Cz, CP3, CP4, Fz) is based on
+	general sensorimotor topography; subject-specific channel optimisation may
+	further improve individual performance.
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\section{Conclusion}
+	% ═════════════════════════════════════════════════════════════════════════════
+	
+	This article proposes a multi-method comparative framework for continuous
+	prediction of EMG envelopes from scalp EEG and kinematic data during
+	grasp-and-lift tasks on the WAY-EEG-GAL dataset. Four architectures of
+	increasing complexity address eight identified research gaps:
+	
+	\textbf{Method~1 (KG-GT)} combines CCA-based EEG--kinematic alignment,
+	Transformer-based nonlinear temporal encoding, kinematic-conditioned dynamic
+	GAT, and hybrid MSE--SoftDTW training loss.
+	
+	\textbf{Method~2 (NNMF-KG-GT)} enhances Method~1 with NNMF-derived muscle
+	synergy weights for data-driven, biologically interpretable graph
+	initialisation.
+	
+	\textbf{Method~3 (PTL-Net)} achieves competitive performance with reduced
+	computational cost by targeting Load and Hold phases, selecting 6 optimal
+	EEG channels, and performing multi-task prediction of EMG, Grip Force, and
+	object weight class.
+	
+	\textbf{Method~4 (USPT)} unifies all innovations into a single framework
+	with phase-aware Transformer encoding, NNMF-initialised kinematic-guided
+	GAT, triple-head decoding, and phase-weighted loss.
+	
+	Theoretical arguments and prior empirical results support the expectation
+	of substantially improved accuracy over both UKF-based state estimators and
+	conventional CNN-LSTM architectures across multi-muscle, multi-condition
+	grasping tasks. The weight classification capability of Methods~3 and~4
+	directly demonstrates clinical applicability for adaptive prosthetic control.
+	
+	% ═════════════════════════════════════════════════════════════════════════════
+	\bibliographystyle{ieeetr}
+	\begin{thebibliography}{99}
+		
+		\bibitem{luciw2014}
+		M.~D. Luciw, E.~Jarocka, and B.~B. Edin,
+		``Multi-channel EEG recordings during 3,936 grasp and lift trials with
+		varying weight and friction,''
+		\textit{Scientific Data}, vol.~1, p.~140047, 2014.
+		
+		\bibitem{nakagome2017}
+		S.~Nakagome, T.~P. Luu, J.~A. Brantley, and J.~L. Contreras-Vidal,
+		``Prediction of EMG envelopes of multiple terrains over-ground walking
+		from EEG signals using an Unscented Kalman Filter,''
+		in \textit{Proc.\ IEEE Int.\ Conf.\ Syst., Man, Cybern.\ (SMC)}, 2017.
+		
+		\bibitem{sburlea2021}
+		A.~I. Sburlea, N.~Butturini, and G.~R. M\"{u}ller-Putz,
+		``Predicting EMG envelopes of grasping movements from EEG recordings
+		using Unscented Kalman Filtering,''
+		in \textit{Proc.\ Annu.\ Meeting Austrian Soc.\ Biomed.\ Eng.}, 2021.
+		
+		\bibitem{jain2025}
+		P.~Jain, V.~Bharadiya, U.~Chittimalla, Y.~Anand, and M.~Rao,
+		``EEG-Based Surface EMG Reconstruction Using Deep Sequence Learning for
+		Upper Limb Motor Activity,'' 2025.
+		
+		\bibitem{li2025}
+		M.~Li, Z.~Wei, Z.-Q. Zhang, S.~Ma, and S.~Q. Xie,
+		``Continuous Joint Kinematics Prediction Using GAT-LSTM Framework Based
+		on Muscle Synergy and Sparse sEMG,''
+		\textit{IEEE Trans.\ Neural Syst.\ Rehabil.\ Eng.}, vol.~33, pp.~1763--1773,
+		2025.
+		
+		\bibitem{cuturi2017}
+		M.~Cuturi and M.~Blondel,
+		``Soft-DTW: A differentiable loss function for time-series,''
+		in \textit{Proc.\ 34th Int.\ Conf.\ Mach.\ Learn.\ (ICML)},
+		vol.~70, pp.~894--903, 2017.
+		
+		\bibitem{vaswani2017}
+		A.~Vaswani et al.,
+		``Attention is all you need,''
+		in \textit{Adv.\ Neural Inf.\ Process.\ Syst.\ (NeurIPS)}, vol.~30, 2017.
+		
+		\bibitem{velickovic2018}
+		P.~Veli\v{c}kovi\'{c} et al.,
+		``Graph Attention Networks,''
+		in \textit{Proc.\ Int.\ Conf.\ Learn.\ Represent.\ (ICLR)}, 2018.
+		
+		\bibitem{pierella2020}
+		C.~Pierella, E.~Pirondini, N.~Kinany, M.~Coscia, C.~Giang,
+		J.~Miehlbradt, C.~Magnin, P.~Nicolo, S.~Dalise, G.~Sgherri,
+		C.~Chisari, D.~Van~De~Ville, A.~Guggisberg, and S.~Micera,
+		``A multimodal approach to capture post-stroke temporal dynamics
+		of recovery,''
+		\textit{J.\ Neural Eng.}, vol.~17, no.~4, p.~045002, 2020.
+		
+		\bibitem{lee1999}
+		D.~D. Lee and H.~S. Seung,
+		``Learning the parts of objects by non-negative matrix factorization,''
+		\textit{Nature}, vol.~401, no.~6755, pp.~788--791, 1999.
+		
+		\bibitem{tresch2006}
+		M.~C. Tresch, V.~C.~K. Cheung, and A.~d'Avella,
+		``Matrix factorization algorithms for the identification of muscle
+		synergies: Evaluation on simulated and experimental data sets,''
+		\textit{J.\ Neurophysiol.}, vol.~95, no.~4, pp.~2199--2212, 2006.
+		
+		\bibitem{cmc_paper}
+		``Coherence-based connectivity analysis of EEG and EMG signals during reach-to-grasp movement involving two weights.''
+		
+		\bibitem{esi_gal_2025}
+		``Various time-lagged and window sizes are analyzed for hand kinematics prediction: ESI-GAL EEG Source Imaging-based Kinematics Parameter Estimation for Grasp and Lift Task,'' 2025.
+		
+	\end{thebibliography}
+	
+\end{document}

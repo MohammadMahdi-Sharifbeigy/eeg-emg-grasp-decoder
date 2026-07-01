@@ -8,6 +8,7 @@ from .transformer import (
     TransformerEncoderLayer,
     build_transformer_from_config,
 )
+from .transformer_regressor import TransformerRegressor, build_transformer_regressor
 
 __all__ = [
     "SinusoidalPositionalEncoding",
@@ -16,4 +17,6 @@ __all__ = [
     "TransformerEncoderLayer",
     "TransformerEncoder",
     "build_transformer_from_config",
+    "TransformerRegressor",
+    "build_transformer_regressor",
 ]

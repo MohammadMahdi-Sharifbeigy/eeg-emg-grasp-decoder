@@ -1,9 +1,9 @@
 data:
   raw_dir: data/way-eeg/raw
   cache_dir: data/cache
-  participants: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]
+  participants: [1, 2, 3]             # Reduced to 1 subject for lighter memory footprint
   window_size: 500        # samples at 500 Hz = 1 s
-  stride: 50              # 100 ms between windows
+  stride: 15             # 100 ms between windows
   fs_eeg: 500             # Hz
   fs_emg: 4000            # Hz (raw); downsampled to fs_eeg after preprocess
   fs_kin: 500             # Hz
@@ -22,6 +22,7 @@ preprocessing:
     asr_std_thresh: 5.0   # sigma, ASR rejection threshold
     delta_low: 0.1        # Hz, delta-band lower bound
     delta_high: 2.0       # Hz, delta-band upper bound
+    target_channels: ["FC1", "FC2", "C3", "Cz", "C4", "CP1", "CP2", "CP6"]
 
   emg:
     bp_low: 30.0          # Hz
@@ -40,16 +41,16 @@ preprocessing:
     normalize: true           # per-feature z-score over training set
 
   cca:
-    n_components: 13      # canonical components; bounded by min(n_eeg, n_kin)=min(32,13)=13
+    n_components: 8       # canonical components; bounded by min(n_eeg, n_kin)=min(8,13)=8
 
 model:
   transformer:
-    n_layers: 4
-    n_heads: 8
-    d_model: 256
-    d_k: 32               # key/query dim per head
-    d_v: 32               # value dim per head
-    ffn_dim: 1024
+    n_layers: 4          # Reduced from 4
+    n_heads: 8            # Reduced from 8
+    d_model: 64           # Reduced from 256
+    d_k: 32               # Reduced from 32
+    d_v: 32               # Reduced from 32
+    ffn_dim: 256         # Reduced from 1024
     dropout: 0.2
 
   gat:
@@ -63,14 +64,14 @@ model:
 
 training:
   optimizer: adam
-  lr: 0.001
+  lr: 0.0001
   lr_patience: 50         # epochs without val improvement before halving
   lr_factor: 0.5
-  batch_size: 32
+  batch_size: 32         # Reduced from 128 to save VRAM
   early_stop_patience: 30 # epochs
   grad_clip_norm: 1.0
   max_epochs: 500
-  loss_lambda: 0.9        # weight of MSE vs SoftDTW
+  loss_lambda: 1.0        # weight of MSE vs SoftDTW. Set to 1.0 to disable slow Python SoftDTW!
   soft_dtw_gamma: 0.1     # SoftDTW smoothing parameter
   losocv: true            # leave-one-subject-out cross-validation
   seed: 42
