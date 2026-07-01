@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -20,7 +20,15 @@ from torch.utils.data import DataLoader
 
 logger = logging.getLogger(__name__)
 
-PrepareBatch = Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+ModelInputs = dict[str, Any] | torch.Tensor
+PrepareBatch = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], tuple[ModelInputs, torch.Tensor]]
+
+
+def _forward_model(model: nn.Module, inputs: ModelInputs) -> torch.Tensor:
+    """Call the model with either a tensor input or a keyword-input dict."""
+    if isinstance(inputs, dict):
+        return model(**inputs)
+    return model(inputs)
 
 
 @dataclass
@@ -65,10 +73,10 @@ def collect_predictions(
     amp = use_amp and device.type == "cuda"
 
     preds, targets = [], []
-    for eeg, _kin, emg in loader:
-        x, y = prepare_batch(eeg, emg)
+    for eeg, kin, emg in loader:
+        model_inputs, y = prepare_batch(eeg, kin, emg)
         with torch.amp.autocast(device_type=amp_device, enabled=amp):
-            pred = model(x)
+            pred = _forward_model(model, model_inputs)
         preds.append(pred.float().cpu().numpy().reshape(-1, n_channels))
         targets.append(y.float().cpu().numpy().reshape(-1, n_channels))
 

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import numpy as np
 import torch
@@ -108,14 +108,24 @@ def prepare_batch_factory(
     emg_std: torch.Tensor,
     device: torch.device,
     n_cca: int,
-) -> Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]:
-    """Create the current train/eval batch-preparation function."""
+) -> Callable[[torch.Tensor, torch.Tensor, torch.Tensor], tuple[dict[str, Any], torch.Tensor]]:
+    """Create the shared train/eval batch-preparation function.
 
-    def prepare_batch(eeg: torch.Tensor, emg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
+    Returns a model-input dictionary so transformer-only and transformer+GAT
+    variants can share the same training loop. Callers that do not need
+    kinematics can ignore the extra ``kin`` entry.
+    """
+
+    def prepare_batch(
+        eeg: torch.Tensor,
+        kin: torch.Tensor,
+        emg: torch.Tensor,
+    ) -> tuple[dict[str, Any], torch.Tensor]:
         batch_size, window_size, n_features = eeg.shape
         flat = eeg.reshape(-1, n_features).to(device, non_blocking=True)
         proj = cca_projector.transform(flat).reshape(batch_size, window_size, n_cca)
+        kin_device = kin.to(device, non_blocking=True)
         emg_norm = (emg.to(device, non_blocking=True) - emg_mean) / emg_std
-        return proj, emg_norm
+        return {"eeg": proj, "kin": kin_device}, emg_norm
 
     return prepare_batch

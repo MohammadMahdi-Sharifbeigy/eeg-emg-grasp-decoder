@@ -19,8 +19,9 @@ class TransformerRegressor(nn.Module):
         )
         self.head = nn.Linear(self.encoder.d_model, out_channels)
 
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.encoder(x)
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        del kin
+        h = self.encoder(eeg)
         return self.head(h)
 
 

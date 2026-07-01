@@ -28,7 +28,7 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Callable
+from typing import Any, Callable
 
 import torch
 import torch.nn as nn
@@ -42,7 +42,15 @@ except ImportError:
 
 logger = logging.getLogger(__name__)
 
-PrepareBatch = Callable[[torch.Tensor, torch.Tensor], tuple[torch.Tensor, torch.Tensor]]
+ModelInputs = dict[str, Any] | torch.Tensor
+PrepareBatch = Callable[[torch.Tensor, torch.Tensor, torch.Tensor], tuple[ModelInputs, torch.Tensor]]
+
+
+def _forward_model(model: nn.Module, inputs: ModelInputs) -> torch.Tensor:
+    """Call the model with either a tensor input or a keyword-input dict."""
+    if isinstance(inputs, dict):
+        return model(**inputs)
+    return model(inputs)
 
 
 # ---------------------------------------------------------------------------
@@ -195,11 +203,11 @@ def _run_epoch(
     else:
         bar = loader
 
-    for batch_idx, (eeg, _kin, emg) in enumerate(bar, start=1):
-        x, y = prepare_batch(eeg, emg)
+    for batch_idx, (eeg, kin, emg) in enumerate(bar, start=1):
+        model_inputs, y = prepare_batch(eeg, kin, emg)
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=amp_device, enabled=use_amp):
-                pred = model(x)
+                pred = _forward_model(model, model_inputs)
                 loss = loss_fn(pred, y)
 
             if train:

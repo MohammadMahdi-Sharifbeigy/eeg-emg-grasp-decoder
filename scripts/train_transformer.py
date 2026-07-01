@@ -61,7 +61,7 @@ import yaml
 from torch.utils.data import DataLoader
 
 from src.losses import build_loss_from_config
-from src.models import build_transformer_regressor
+from src.models import build_kg_gt_from_config, build_transformer_regressor
 from src.pipelines import (
     build_dataset as build_shared_dataset,
     fit_cca_and_emg_stats,
@@ -146,14 +146,18 @@ def config_panel(cfg: dict) -> Panel:
     table.add_column(style="dim", justify="right")
     table.add_column(style="white")
     data = cfg.get("data", {})
-    model = cfg.get("model", {}).get("transformer", {})
+    model_cfg = cfg.get("model", {})
+    transformer = model_cfg.get("transformer", {})
+    gat = model_cfg.get("gat", {})
     train = cfg.get("training", {})
     cca = cfg.get("preprocessing", {}).get("cca", {})
     rows = [
+        ("model type", str(model_cfg.get("type", "transformer_regressor"))),
         ("participants", str(data.get("participants", "all"))),
         ("window / stride", f"{data.get('window_size')} / {data.get('stride')} samples"),
         ("CCA components", str(cca.get("n_components"))),
-        ("Transformer", f"L={model.get('n_layers')}  H={model.get('n_heads')}  d={model.get('d_model')}"),
+        ("Transformer", f"L={transformer.get('n_layers')}  H={transformer.get('n_heads')}  d={transformer.get('d_model')}"),
+        ("GAT", f"L={gat.get('n_layers')}  heads={gat.get('heads')}  node={gat.get('node_dim')}"),
         ("batch size", str(train.get("batch_size"))),
         ("max epochs", str(train.get("max_epochs"))),
         ("lr", str(train.get("lr"))),
@@ -173,6 +177,20 @@ def model_panel(model: nn.Module) -> Panel:
     table.add_column()
     table.add_row("Trainable params", f"{n_params:,}")
     return Panel(Columns([table, syntax]), title="[bold green]Model Architecture[/bold green]", border_style="green", padding=(1, 2))
+
+
+def build_model(cfg: dict, input_dim: int, device: torch.device) -> nn.Module:
+    """Instantiate the selected EEG-to-EMG model variant."""
+    model_type = cfg["model"].get("type", "transformer_regressor")
+    if model_type == "transformer_regressor":
+        return build_transformer_regressor(cfg, input_dim=input_dim).to(device)
+    if model_type in {"kg_gt", "kg_gt_kinematic"}:
+        return build_kg_gt_from_config(
+            cfg,
+            input_dim=input_dim,
+            kin_dim=cfg["data"].get("n_kin_features", 13),
+        ).to(device)
+    raise ValueError(f"unsupported model.type={model_type!r}")
 
 
 def loss_history_table(history: dict, best_val: float, early_stop_patience: int, epochs_no_improve: int) -> Table:
@@ -319,7 +337,7 @@ def main() -> None:
     CONSOLE.print(Rule("[bold green]§3  Model[/bold green]"))
     CONSOLE.print()
 
-    model = build_transformer_regressor(cfg, input_dim=n_cca).to(device)
+    model = build_model(cfg, input_dim=n_cca, device=device)
     CONSOLE.print(model_panel(model))
     CONSOLE.print()
 
@@ -362,7 +380,8 @@ def main() -> None:
     CONSOLE.print()
     CONSOLE.print(loss_history_table(result.history, result.best_val, train_config.early_stop_patience, 0))
 
-    inference_ckpt = str(ROOT / "outputs" / "transformer_best.pt")
+    model_type = cfg["model"].get("type", "transformer_regressor")
+    inference_ckpt = str(ROOT / "outputs" / f"{model_type}_best.pt")
     save_checkpoint(inference_ckpt, model, train_config, result.best_val)
 
     CONSOLE.print()
