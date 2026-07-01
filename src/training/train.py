@@ -115,6 +115,8 @@ class TrainConfig:
     early_stop_patience: int = 30
     max_epochs: int = 500
     use_amp: bool = True
+    gradient_accumulation_steps: int = 1
+    log_memory_every: int = 50
     # --- checkpoint settings ---
     checkpoint_dir: str = "outputs/checkpoints"
     checkpoint_every: int = 1   # save last.pt every N epochs (1 = every epoch)
@@ -135,6 +137,8 @@ class TrainConfig:
             early_stop_patience=cfg.get("early_stop_patience", 30),
             max_epochs=max_epochs if max_epochs is not None else cfg.get("max_epochs", 500),
             use_amp=cfg.get("use_amp", True),
+            gradient_accumulation_steps=max(1, cfg.get("gradient_accumulation_steps", 1)),
+            log_memory_every=max(1, cfg.get("log_memory_every", 50)),
             checkpoint_dir=cfg.get("checkpoint_dir", "outputs/checkpoints"),
             checkpoint_every=cfg.get("checkpoint_every", 1),
         )
@@ -163,6 +167,7 @@ def _run_epoch(
     scaler: "torch.amp.GradScaler | None",
     grad_clip: float,
     use_amp: bool,
+    gradient_accumulation_steps: int,
     epoch: int,
     phase: str,
 ) -> float:
@@ -176,6 +181,8 @@ def _run_epoch(
     amp_device = "cuda" if device.type == "cuda" else "cpu"
 
     total, n = 0.0, 0
+    if train:
+        optimizer.zero_grad(set_to_none=True)
 
     if _TQDM_AVAILABLE:
         bar = tqdm(
@@ -188,7 +195,7 @@ def _run_epoch(
     else:
         bar = loader
 
-    for eeg, _kin, emg in bar:
+    for batch_idx, (eeg, _kin, emg) in enumerate(bar, start=1):
         x, y = prepare_batch(eeg, emg)
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=amp_device, enabled=use_amp):
@@ -196,17 +203,26 @@ def _run_epoch(
                 loss = loss_fn(pred, y)
 
             if train:
-                optimizer.zero_grad(set_to_none=True)
+                loss_for_backward = loss / gradient_accumulation_steps
                 if scaler is not None and scaler.is_enabled():
-                    scaler.scale(loss).backward()
-                    scaler.unscale_(optimizer)
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                    scaler.step(optimizer)
-                    scaler.update()
+                    scaler.scale(loss_for_backward).backward()
                 else:
-                    loss.backward()
-                    nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                    optimizer.step()
+                    loss_for_backward.backward()
+
+                should_step = (
+                    batch_idx % gradient_accumulation_steps == 0
+                    or batch_idx == len(loader)
+                )
+                if should_step:
+                    if scaler is not None and scaler.is_enabled():
+                        scaler.unscale_(optimizer)
+                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                        optimizer.step()
+                    optimizer.zero_grad(set_to_none=True)
 
         bs = eeg.size(0)
         batch_loss = loss.item()
@@ -368,11 +384,13 @@ def train_model(
         tr = _run_epoch(
             model, train_loader, prepare_batch, loss_fn, device,
             optimizer, scaler, cfg.grad_clip_norm, use_amp,
+            cfg.gradient_accumulation_steps,
             epoch=ep, phase="train",
         )
         vl = _run_epoch(
             model, val_loader, prepare_batch, loss_fn, device,
             None, None, cfg.grad_clip_norm, use_amp,
+            1,
             epoch=ep, phase="val",
         )
         scheduler.step(vl)
@@ -467,4 +485,4 @@ def load_checkpoint(path: str, model: nn.Module, device: torch.device) -> float:
     best_val = ckpt.get("best_val", float("inf"))
     logger.info("loaded checkpoint <- %s  (best_val=%.4f)", path, best_val)
     print(f"Loaded checkpoint <- {path}  (best_val={best_val:.4f})")
-    return best_val
+    return best_val

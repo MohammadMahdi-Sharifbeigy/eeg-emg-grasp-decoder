@@ -113,9 +113,9 @@ def prepare_batch_factory(
 
     def prepare_batch(eeg: torch.Tensor, emg: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         batch_size, window_size, n_features = eeg.shape
-        flat = eeg.reshape(-1, n_features).to(device)
+        flat = eeg.reshape(-1, n_features).to(device, non_blocking=True)
         proj = cca_projector.transform(flat).reshape(batch_size, window_size, n_cca)
-        emg_norm = (emg.to(device) - emg_mean) / emg_std
+        emg_norm = (emg.to(device, non_blocking=True) - emg_mean) / emg_std
         return proj, emg_norm
 
     return prepare_batch

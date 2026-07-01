@@ -2,8 +2,8 @@ data:
   raw_dir: data/way-eeg/raw
   cache_dir: data/cache
   participants: [1, 2, 3]             # Reduced to 1 subject for lighter memory footprint
-  window_size: 500        # samples at 500 Hz = 1 s
-  stride: 15             # 100 ms between windows
+  window_size: 250        # samples at 500 Hz = 0.5 s, lower sequence cost for current GPU
+  stride: 50             # 100 ms between windows, far fewer overlapping windows than stride 15
   fs_eeg: 500             # Hz
   fs_emg: 4000            # Hz (raw); downsampled to fs_eeg after preprocess
   fs_kin: 500             # Hz
@@ -42,6 +42,8 @@ preprocessing:
 
   cca:
     n_components: 8       # canonical components; bounded by min(n_eeg, n_kin)=min(8,13)=8
+    max_fit_samples: 100000
+    random_state: 42
 
 model:
   transformer:
@@ -67,11 +69,20 @@ training:
   lr: 0.0001
   lr_patience: 50         # epochs without val improvement before halving
   lr_factor: 0.5
-  batch_size: 32         # Reduced from 128 to save VRAM
+  batch_size: 16         # Safer true micro-batch for current GPU
+  gradient_accumulation_steps: 2  # Effective batch size 32 with lower peak VRAM
   early_stop_patience: 30 # epochs
   grad_clip_norm: 1.0
   max_epochs: 500
   loss_lambda: 1.0        # weight of MSE vs SoftDTW. Set to 1.0 to disable slow Python SoftDTW!
   soft_dtw_gamma: 0.1     # SoftDTW smoothing parameter
+  use_amp: true
+  log_memory_every: 50
   losocv: true            # leave-one-subject-out cross-validation
   seed: 42
+
+runtime:
+  num_workers: 2
+  pin_memory: true
+  persistent_workers: true
+  prefetch_factor: 2

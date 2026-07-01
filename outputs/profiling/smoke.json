@@ -1,0 +1,19 @@
+{
+  "device": "cpu",
+  "max_batches": 1,
+  "peak_allocated_bytes": 0,
+  "avg_prepare_s": 0.01421810000010737,
+  "avg_forward_s": 0.1997849999997925,
+  "avg_total_s": 0.21400309999989986,
+  "samples_per_second": 74.76527209188787,
+  "timings": [
+    {
+      "batch_idx": 0,
+      "prepare_s": 0.01421810000010737,
+      "forward_s": 0.1997849999997925,
+      "total_s": 0.21400309999989986,
+      "loss": 1.3147786855697632,
+      "batch_size": 16
+    }
+  ]
+}
