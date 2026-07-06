@@ -42,6 +42,7 @@ Thumbs.db
 *.user
 
 # Model checkpoints (put in data/ anyway)
+results/
 checkpoints/
 *.pt
 *.pth
