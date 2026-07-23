@@ -30,7 +30,7 @@ class SinusoidalPositionalEncoding(nn.Module):
         PE[p, 2i+1] = cos(p / 10000^(2i/d))
     """
 
-    def __init__(self, d_model: int, max_len: int = 5000, dropout: float = 0.0) -> None:
+    def __init__(self, d_model: int, max_len: int = 10000, dropout: float = 0.0) -> None:
         super().__init__()
         self.dropout = nn.Dropout(p=dropout)
 

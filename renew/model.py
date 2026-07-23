@@ -2,7 +2,7 @@ import torch
 import torch.nn.functional as F
 import torch.nn as nn
 class LearnablePositionalEncoding(nn.Module):
-    def __init__(self, d_model, max_len=1000):
+    def __init__(self, d_model, max_len=10000):
         super().__init__()
         self.pos_emb = nn.Parameter(torch.randn(1, max_len, d_model) * 0.02)
 

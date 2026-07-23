@@ -47,7 +47,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 try:
-    from tqdm.auto import tqdm
+    from tqdm import tqdm
     _TQDM_AVAILABLE = True
 except ImportError:
     _TQDM_AVAILABLE = False
@@ -801,7 +801,7 @@ def run_kfold_cross_validation(notebook_cfg, train_ds, batch_size, prepare_batch
         writer.writerow(["Fold", "Epoch", "Train_Loss", "Val_Loss"])
 
     all_fold_results = []
-    sample_eeg, sample_kin, _ = train_ds[0]
+    sample_eeg, sample_kin, sample_emg = train_ds[0]
 
     # Wrap the fold loop in a tqdm notebook progress bar!
     fold_iterator = tqdm(kf.split(train_ds), total=k_folds, desc="K-Fold Progress")
@@ -818,8 +818,17 @@ def run_kfold_cross_validation(notebook_cfg, train_ds, batch_size, prepare_batch
         fold_train_loader = DataLoader(fold_train_subset, batch_size=batch_size, shuffle=True, drop_last=True)
         fold_val_loader = DataLoader(fold_val_subset, batch_size=batch_size, shuffle=False)
 
-        # 2. Build Model
-        fold_model = build_model_from_config(notebook_cfg, input_dim=sample_eeg.shape[-1], kin_dim=sample_kin.shape[-1]).to(device)
+        # 2. Build Model (Infer dims dynamically after prepare_batch)
+        dummy_eeg = torch.as_tensor(sample_eeg).unsqueeze(0)
+        dummy_kin = torch.as_tensor(sample_kin).unsqueeze(0)
+        dummy_emg = torch.as_tensor(sample_emg).unsqueeze(0)
+        batch_inputs, _ = prepare_batch(dummy_eeg, dummy_kin, dummy_emg)
+        
+        fold_model = build_model_from_config(
+            notebook_cfg, 
+            input_dim=batch_inputs["eeg"].shape[-1], 
+            kin_dim=batch_inputs["kin"].shape[-1]
+        ).to(device)
         
         # 3. Setup Config
         

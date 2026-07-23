@@ -498,8 +498,10 @@ def collect_predictions(
         model_inputs, y = prepare_batch(eeg, kin, emg)
         with torch.amp.autocast(device_type=amp_device, enabled=amp):
             pred = _forward_model(model, model_inputs)
-        preds.append(pred.float().cpu().numpy().reshape(-1, n_channels))
-        targets.append(y.float().cpu().numpy().reshape(-1, n_channels))
+        
+        c = y.shape[-1]
+        preds.append(pred.float().cpu().numpy().reshape(-1, c))
+        targets.append(y.float().cpu().numpy().reshape(-1, c))
 
     return np.concatenate(preds), np.concatenate(targets)
 
