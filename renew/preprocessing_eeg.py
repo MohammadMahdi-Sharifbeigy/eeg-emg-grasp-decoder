@@ -113,11 +113,18 @@ def _eeg_ica(
     ica.fit(raw)
 
     if method == 'auto':
-        # Auto-detect EOG/ECG artifact components
-        eog_indices, eog_scores = ica.find_bads_eog(raw, threshold=2.0, verbose=False)
-        # If ECG channels available (WAY-EEG-GAL doesn't have separate ECG)
-        # ecg_indices, ecg_scores = ica.find_bads_ecg(raw, threshold=2.0, verbose=False)
-        ica.exclude = list(set(eog_indices))
+        try:
+            # Auto-detect EOG/ECG artifact components
+            eog_indices, eog_scores = ica.find_bads_eog(raw, threshold=2.0, verbose=False)
+            ica.exclude = list(set(eog_indices))
+        except RuntimeError:
+            # Fallback if no EOG channel is found
+            if 'Fp1' in raw.ch_names:
+                eog_indices, eog_scores = ica.find_bads_eog(raw, ch_name='Fp1', threshold=2.0, verbose=False)
+                ica.exclude = list(set(eog_indices))
+            else:
+                var_per_comp = ica.get_sources(raw).get_data().var(axis=1)
+                ica.exclude = np.argsort(var_per_comp)[-2:].tolist()
         ica.apply(raw, verbose=False)
     elif method == 'manual':
         # Plot ICA components — user manually selects in notebook

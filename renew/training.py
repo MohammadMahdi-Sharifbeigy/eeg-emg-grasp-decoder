@@ -35,7 +35,7 @@ import csv
 from pathlib import Path
 from sklearn.model_selection import KFold
 from torch.utils.data import Subset, DataLoader
-from tqdm.auto import tqdm
+from tqdm import tqdm
 from .dataset import WAYEEGDataset
 from .preprocessing_eeg import preprocess_eeg_from_config
 from .preprocessing_emg_kin import preprocess_emg_from_config, preprocess_kinematics_from_config
@@ -450,7 +450,8 @@ def train_model(
             f"{gpu_mem}"
             f"{flag}"
         )
-        logger.info(summary)
+        if ep % 10 == 0:
+            logger.info(summary)
 
         # Periodic crash-safe checkpoint
         if ep % cfg.checkpoint_every == 0:
@@ -759,13 +760,17 @@ def unique_series_arrays(ds):
     return eegs, kins, emgs
 
 
-def prepare_batch_factory(emg_mean, emg_std, kin_mean, kin_std, device):       
+def prepare_batch_factory(emg_mean, emg_std, kin_mean, kin_std, device, drop_kin_indices=None):
     def prepare_batch(eeg, kin, emg):                                                                
         eeg = eeg.to(device, non_blocking=True)
         kin = kin.to(device, non_blocking=True)
         emg = emg.to(device, non_blocking=True)
         
         kin_norm = (kin - kin_mean) / kin_std
+        if drop_kin_indices is not None:
+            keep_idx = [i for i in range(kin_norm.shape[-1]) if i not in drop_kin_indices]
+            kin_norm = kin_norm[..., keep_idx]
+            
         emg_norm = (emg - emg_mean) / emg_std
         return {"eeg": eeg, "kin": kin_norm}, emg_norm
     return prepare_batch 

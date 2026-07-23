@@ -148,12 +148,12 @@ class EMGNormalizer:
 # ============================================================================
 
 # Column indices in raw 36-col kin signal (0-indexed)
-_KIN_WRIST = slice(9, 12)      # Px4, Py4, Pz4 — wrist position  (mm)
-_KIN_INDEX = slice(3, 6)       # Px2, Py2, Pz2 — index fingertip (mm)
-_KIN_THUMB = slice(6, 9)       # Px3, Py3, Pz3 — thumb tip       (mm)
-_KIN_FX1   = 12                # load force index plate           (N)
-_KIN_FZ1   = 15                # grip force index plate           (N)
-_EPS = 1e-8
+_KIN_WRIST = [21, 25, 29]      # Px4, Py4, Pz4 — wrist position  (mm)
+_KIN_INDEX = [19, 23, 27]      # Px2, Py2, Pz2 — index fingertip (mm)
+_KIN_THUMB = [20, 24, 28]      # Px3, Py3, Pz3 — thumb tip       (mm)
+_KIN_FX1, _KIN_FY1, _KIN_FZ1 = 12, 14, 16   # force plate 1 (index)
+_KIN_FZ2 = 17                                  # force plate 2 (thumb, Z only)
+_EPS = 1.0
 
 
 def extract_kt_raw(kin: np.ndarray) -> np.ndarray:
@@ -162,13 +162,16 @@ def extract_kt_raw(kin: np.ndarray) -> np.ndarray:
     Returns:
         (T, 13): [p_wrist(3), p_index(3), p_thumb(3), d_grip(1), F_L(1), F_G(1), rho_GL(1)]
     """
-    p_wrist = kin[:, _KIN_WRIST]
-    p_index = kin[:, _KIN_INDEX]
-    p_thumb = kin[:, _KIN_THUMB]
-    d_grip  = np.linalg.norm(p_index - p_thumb, axis=1, keepdims=True)
-    F_L     = kin[:, _KIN_FX1: _KIN_FX1 + 1]
-    F_G     = np.abs(kin[:, _KIN_FZ1: _KIN_FZ1 + 1])
-    rho_GL  = F_G / (np.abs(F_L) + _EPS)
+    p_wrist = kin[:, _KIN_WRIST]                                        # (T, 3)
+    p_index = kin[:, _KIN_INDEX]                                        # (T, 3)
+    p_thumb = kin[:, _KIN_THUMB]                                        # (T, 3)
+    d_grip  = np.linalg.norm(p_index - p_thumb, axis=1, keepdims=True)  # (T, 1)
+    F_vec = kin[:, [_KIN_FX1, _KIN_FY1, _KIN_FZ1]]                      # FX1, FY1, FZ1
+    F_L = np.linalg.norm(F_vec, axis=1, keepdims=True)                  # sqrt(FX1²+FY1²+FZ1²)
+    fz1     = np.abs(kin[:, _KIN_FZ1: _KIN_FZ1 + 1])                    # (T, 1)
+    fz2     = np.abs(kin[:, _KIN_FZ2: _KIN_FZ2 + 1])                    # (T, 1)
+    F_G     = (fz1 + fz2) / 2                                           # (T, 1)
+    rho_GL  = F_G / (F_L + _EPS)                                        # (T, 1)
     return np.concatenate(
         [p_wrist, p_index, p_thumb, d_grip, F_L, F_G, rho_GL], axis=1
     ).astype(np.float32)

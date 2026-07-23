@@ -24,7 +24,7 @@ import torch.nn as nn
 from torch.utils.data import DataLoader
 
 try:
-    from tqdm.auto import tqdm
+    from tqdm import tqdm
     _TQDM_AVAILABLE = True
 except ImportError:
     _TQDM_AVAILABLE = False
@@ -390,7 +390,8 @@ def train_model(
             f"{gpu_mem}"
             f"{flag}"
         )
-        logger.info(summary)
+        if ep % 10 == 0:
+            logger.info(summary)
 
         if ep % cfg.checkpoint_every == 0:
             _save_training_checkpoint(
@@ -530,7 +531,7 @@ def compute_metrics(
     return EvalMetrics(rmse=rmse, mae=mae, pearson=pearson, channel_names=channel_names)
 
 
-def prepare_batch_factory(device: torch.device):
+def prepare_batch_factory(device: torch.device, drop_kin_indices=None):
     """Create a prepare_batch function that moves batches to device.
 
     The returned callable expects (eeg, kin, emg) tensors from the DataLoader
@@ -540,6 +541,9 @@ def prepare_batch_factory(device: torch.device):
         eeg = eeg.to(device, dtype=torch.float32)
         kin = kin.to(device, dtype=torch.float32)
         emg = emg.to(device, dtype=torch.float32)
+        if drop_kin_indices is not None:
+            keep_idx = [i for i in range(kin.shape[-1]) if i not in drop_kin_indices]
+            kin = kin[..., keep_idx]
         return {"eeg": eeg, "kin": kin}, emg
 
     return prepare_batch
