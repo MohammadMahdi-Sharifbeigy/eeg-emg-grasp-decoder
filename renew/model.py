@@ -124,6 +124,7 @@ class HybridKGGTModel(nn.Module):
         d_model = mc.get("d_model", 64)
         out_ch  = mc["decoder"]["out_channels"]
         self.n_heads = mc["transformer"].get("n_heads", 8)
+        self.chunk_size = mc.get("chunk_size", 500)
 
         self.eeg_cnn = TemporalCNNEncoder(eeg_dim, d_model)
         self.kin_cnn = TemporalCNNEncoder(kin_dim, d_model)
@@ -155,6 +156,14 @@ class HybridKGGTModel(nn.Module):
         eeg_feat = self.eeg_pos(self.eeg_cnn(eeg))
         kin_feat = self.kin_pos(self.kin_cnn(kin))
 
+        # --- Chunking Trick to avoid O(T^2) attention memory/time explosion ---
+        is_chunked = False
+        if self.chunk_size is not None and T > self.chunk_size and T % self.chunk_size == 0:
+            num_chunks = T // self.chunk_size
+            eeg_feat = eeg_feat.view(B * num_chunks, self.chunk_size, -1)
+            kin_feat = kin_feat.view(B * num_chunks, self.chunk_size, -1)
+            is_chunked = True
+
         eeg_kin_feat, eeg_kin_attn = self.cross_attn_eeg_kin(
             query=eeg_feat, key=kin_feat, value=kin_feat,
             need_weights=return_attention, average_attn_weights=False
@@ -168,6 +177,11 @@ class HybridKGGTModel(nn.Module):
         fused, g_t = self.fusion(eeg_kin_feat, kin_eeg_feat)
 
         temporal, self_attn_maps = self.transformer(fused, return_attention=return_attention)
+
+        if is_chunked:
+            temporal = temporal.view(B, T, -1)
+            g_t = g_t.view(B, T, -1)
+            fused = fused.view(B, T, -1)
 
         nodes   = self.node_expansion(temporal).view(B, T, out_ch, d_model)
         refined = self.gat(nodes, kin)

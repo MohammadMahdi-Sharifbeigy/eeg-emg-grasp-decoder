@@ -153,10 +153,12 @@ class TransformerEncoder(nn.Module):
         ffn_dim: int = 1024,
         dropout: float = 0.2,
         max_len: int = 5000,
+        chunk_size: int = 500,
     ) -> None:
         super().__init__()
         self.input_dim = input_dim
         self.d_model = d_model
+        self.chunk_size = chunk_size
 
         self.embed = nn.Linear(input_dim, d_model)
         self.pos_enc = SinusoidalPositionalEncoding(d_model, max_len, dropout)
@@ -171,8 +173,21 @@ class TransformerEncoder(nn.Module):
             raise ValueError(f"expected (B, T, input_dim), got {tuple(x.shape)}")
         z = self.embed(x)
         z = self.pos_enc(z)
+
+        # Apply Chunking Trick
+        is_chunked = False
+        B, T, C = z.shape
+        if getattr(self, "chunk_size", None) is not None and T > self.chunk_size and T % self.chunk_size == 0:
+            num_chunks = T // self.chunk_size
+            z = z.view(B * num_chunks, self.chunk_size, C)
+            is_chunked = True
+
         for layer in self.layers:
             z = layer(z)
+            
+        if is_chunked:
+            z = z.view(B, T, C)
+            
         return z
 
 
@@ -187,6 +202,7 @@ def build_transformer_from_config(cfg: dict, input_dim: int) -> TransformerEncod
         d_v=cfg.get("d_v", cfg.get("d_k", 32)),
         ffn_dim=cfg.get("ffn_dim", 1024),
         dropout=cfg.get("dropout", 0.2),
+        chunk_size=cfg.get("chunk_size", 500),
     )
 
 
