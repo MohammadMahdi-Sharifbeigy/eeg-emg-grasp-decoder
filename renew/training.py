@@ -307,9 +307,28 @@ def _load_training_checkpoint(
     scaler,
     device: torch.device,
 ) -> tuple[int, float, dict, int]:
-    """Load checkpoint and return (start_epoch, best_val, history, bad_epochs)."""
+    """Load checkpoint and return (start_epoch, best_val, history, bad_epochs).
+
+    If the checkpoint is architecturally incompatible (e.g. after changing
+    positional encoding type), logs a warning and returns epoch=0 so that
+    training restarts fresh rather than crashing.
+    """
     ckpt = torch.load(path, map_location=device, weights_only=False)
-    model.load_state_dict(ckpt["model_state_dict"])
+    try:
+        model.load_state_dict(ckpt["model_state_dict"])
+    except RuntimeError as exc:
+        import logging
+        logging.getLogger(__name__).warning(
+            "Checkpoint at %s is incompatible with the current model architecture "
+            "and will be ignored (training from scratch).\nDetails: %s",
+            path, exc,
+        )
+        print(
+            f"\n[WARNING] Checkpoint '{path}' cannot be loaded into the current model "
+            f"(architecture mismatch — likely a positional-encoding change).\n"
+            f"Training will start from scratch.\n"
+        )
+        return 0, float("inf"), {}, 0
     optimizer.load_state_dict(ckpt["optimizer_state_dict"])
     scheduler.load_state_dict(ckpt["scheduler_state_dict"])
     if scaler is not None and ckpt.get("scaler_state_dict") is not None:
