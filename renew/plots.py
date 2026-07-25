@@ -32,13 +32,17 @@ def get_dynamic_fig_dir(cfg):
     lr = cfg["training"].get("lr", 1e-4)
     bs = cfg["training"]["batch_size"]
     config_str = f"ep{max_epochs}_st{stride}_lr{lr}_bs{bs}"
-    
-    base_dir = Path("results") / config_str
-    
-    # MAGIC HAPPENS HERE: If we injected 'current_fold', put the plot in that fold's folder!
+
+    # Per-subject folder: results/P1/<config_str>/
+    participants = cfg["data"].get("participants", [])
+    subject_str  = f"P{participants[0]}" if participants else "unknown"
+
+    base_dir = Path("results") / subject_str / config_str
+
+    # If we injected 'current_fold', put the plot in that fold's folder!
     if "current_fold" in cfg["training"]:
         return base_dir / cfg["training"]["current_fold"] / "plots"
-        
+
     return base_dir / "plots"
 
 
@@ -189,20 +193,37 @@ def plot_gate_heatmap(gate_tensor, sample_idx=0, cfg=None):
     save_fig(fig, "gate_heatmap", cfg)
     return fig
 
-def plot_attention_maps(attn_tensor, title_prefix, sample_idx=0, cfg=None):
-    attn = attn_tensor[sample_idx].detach().cpu().numpy()
+def plot_attention_maps(attn_tensor, title_prefix, sample_idx=0, cfg=None,
+                        crop: int = 200):
+    """Plot self- or cross-attention maps.
+
+    Args:
+        attn_tensor : Tensor of shape (B_or_chunks, n_heads, T, T).
+                      When chunking is active the batch dim is B*num_chunks;
+                      sample_idx selects which chunk to visualise.
+        crop        : Show only the first `crop` timesteps on each axis so
+                      the diagonal structure is actually visible.  Set to
+                      None to show the full matrix (may be very large).
+    """
+    attn = attn_tensor[sample_idx].detach().cpu().float().numpy()
     n_heads = attn.shape[0]
-    
+    T = attn.shape[-1]
+
+    # Crop so the diagonal band is actually visible at plot resolution
+    if crop is not None:
+        c = min(crop, T)
+        attn = attn[:, :c, :c]
+
     # 1. Plot Mean Attention across heads
     mean_attn = attn.mean(axis=0)
     fig_mean = plt.figure(figsize=(6, 5))
     sns.heatmap(mean_attn, cmap="viridis")
-    plt.title(f"{title_prefix} - Mean Across Heads")
+    plt.title(f"{title_prefix} - Mean Across Heads (first {attn.shape[-1]} steps)")
     plt.xlabel("Key Time")
     plt.ylabel("Query Time")
     plt.tight_layout()
     save_fig(fig_mean, f"{title_prefix.replace(' ', '_').lower()}_mean", cfg)
-    
+
     # 2. Plot individual heads
     cols = 4
     rows = (n_heads + cols - 1) // cols
@@ -215,7 +236,7 @@ def plot_attention_maps(attn_tensor, title_prefix, sample_idx=0, cfg=None):
         axes[h].set_yticks([])
     for h in range(n_heads, len(axes)):
         axes[h].axis('off')
-    plt.suptitle(f"{title_prefix} - Per Head", fontsize=14, y=1.02)
+    plt.suptitle(f"{title_prefix} - Per Head (first {attn.shape[-1]} steps)", fontsize=14, y=1.02)
     plt.tight_layout()
     save_fig(fig_heads, f"{title_prefix.replace(' ', '_').lower()}_per_head", cfg)
     return fig_mean, fig_heads

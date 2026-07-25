@@ -234,6 +234,11 @@ class HybridKGGTModel(nn.Module):
         # FIX: LearnableGatedFusion receives TWO SEPARATE streams
         self.fusion = LearnableGatedFusion(d_model)
 
+        # KEY FIX: inject PE onto the fused stream BEFORE the Transformer.
+        # Cross-attention value projections destroy positional info, so fused
+        # is position-blind without this — causing vertical-stripe attention collapse.
+        self.fused_pos = _build_pos_enc(pos_type, d_model)
+
         tc = mc["transformer"]
         self.transformer = OptimizedTransformerEncoder(
             d_model=d_model, n_heads=self.n_heads,
@@ -272,6 +277,11 @@ class HybridKGGTModel(nn.Module):
 
         # FIX: gate DIRECTLY between two distinct cross-attention streams
         fused, g_t = self.fusion(eeg_kin_feat, kin_eeg_feat)
+
+        # Re-inject positional encoding onto fused before the Transformer.
+        # Cross-attention value projections discard PE, making fused position-blind.
+        # Without this, self-attention collapses to vertical stripes.
+        fused = self.fused_pos(fused)
 
         # --- Optional local attention mask for the self-attention Transformer ---
         attn_mask = None

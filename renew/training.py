@@ -790,7 +790,13 @@ def run_kfold_cross_validation(notebook_cfg, train_ds, batch_size, prepare_batch
     """
     max_epochs = notebook_cfg["training"]["max_epochs"] if not smoke_run else 1
     config_str = f"ep{max_epochs}_st{notebook_cfg['data']['stride']}_lr{notebook_cfg['training'].get('lr', 1e-4)}_bs{batch_size}"
-    save_dir = Path("results") / config_str
+
+    # --- Per-subject folder: results/P1/<config_str>/ ---
+    participants = notebook_cfg["data"].get("participants", [])
+    subject_id   = participants[0] if participants else "unknown"
+    subject_str  = f"P{subject_id}"
+
+    save_dir = Path("results") / subject_str / config_str
     save_dir.mkdir(parents=True, exist_ok=True)
     print(f"Results and Checkpoints will be saved to: {save_dir}")
 
