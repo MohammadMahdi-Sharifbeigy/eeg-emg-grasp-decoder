@@ -1,6 +1,13 @@
+import math
 import torch
 import torch.nn.functional as F
 import torch.nn as nn
+
+
+# ============================================================================
+# Positional Encodings
+# ============================================================================
+
 class LearnablePositionalEncoding(nn.Module):
     def __init__(self, d_model, max_len=10000):
         super().__init__()
@@ -9,6 +16,59 @@ class LearnablePositionalEncoding(nn.Module):
     def forward(self, x):
         return x + self.pos_emb[:, :x.size(1), :]
 
+
+class SinusoidalPositionalEncoding(nn.Module):
+    """Fixed sine/cosine positional encoding (Vaswani et al. 2017).
+    Naturally encodes distance, strongly encourages diagonal attention.
+    """
+    def __init__(self, d_model, max_len=10000, dropout=0.0):
+        super().__init__()
+        self.dropout = nn.Dropout(p=dropout)
+        pe = torch.zeros(max_len, d_model)
+        pos = torch.arange(0, max_len, dtype=torch.float).unsqueeze(1)
+        div = torch.exp(torch.arange(0, d_model, 2, dtype=torch.float)
+                        * (-math.log(10000.0) / d_model))
+        pe[:, 0::2] = torch.sin(pos * div)
+        pe[:, 1::2] = torch.cos(pos * div)
+        self.register_buffer("pe", pe.unsqueeze(0))  # (1, max_len, d_model)
+
+    def forward(self, x):
+        return self.dropout(x + self.pe[:, :x.size(1), :])
+
+
+def _build_pos_enc(pos_type: str, d_model: int, max_len: int = 10000):
+    """Factory that builds a positional encoding module from a string key.
+
+    Config options (set under ``model.pos_encoding``):
+        ``"learnable"``  – trainable embedding (default, original behaviour)
+        ``"sinusoidal"`` – fixed sine/cosine (recommended for diagonal attn)
+        ``"none"``       – no positional encoding
+    """
+    pos_type = (pos_type or "learnable").lower()
+    if pos_type == "sinusoidal":
+        return SinusoidalPositionalEncoding(d_model, max_len)
+    if pos_type == "none":
+        return nn.Identity()
+    # default: learnable
+    return LearnablePositionalEncoding(d_model, max_len)
+
+
+def _make_local_mask(T: int, window: int, device) -> torch.Tensor:
+    """Return an additive attention mask (float) of shape (T, T).
+
+    Positions outside ``[-window, +window]`` are set to ``-inf`` so that
+    softmax drives their weight to 0, creating a banded diagonal pattern.
+    """
+    idx = torch.arange(T, device=device)
+    dist = (idx.unsqueeze(0) - idx.unsqueeze(1)).abs()   # (T, T)
+    mask = torch.zeros(T, T, device=device)
+    mask[dist > window] = float("-inf")
+    return mask
+
+
+# ============================================================================
+# CNN Encoder
+# ============================================================================
 
 class TemporalCNNEncoder(nn.Module):
     """FIX: 2-layer residual CNN (matches teammate nb04 depth).
@@ -33,6 +93,10 @@ class TemporalCNNEncoder(nn.Module):
         return F.gelu(h + res)
 
 
+# ============================================================================
+# Fusion Gate
+# ============================================================================
+
 class LearnableGatedFusion(nn.Module):
     """Sigmoid gate between streams a and b.
     g_t * a + (1-g_t) * b
@@ -48,6 +112,10 @@ class LearnableGatedFusion(nn.Module):
         return fused, g_t
 
 
+# ============================================================================
+# Transformer Encoder
+# ============================================================================
+
 class CustomTransformerEncoderLayer(nn.Module):
     """Pre-LN Transformer encoder layer."""
     def __init__(self, d_model, n_heads, ffn_dim, dropout):
@@ -61,9 +129,10 @@ class CustomTransformerEncoderLayer(nn.Module):
         self.drop2     = nn.Dropout(dropout)
         self.act       = nn.GELU()
 
-    def forward(self, src, return_attention=False):
+    def forward(self, src, return_attention=False, attn_mask=None):
         n = self.norm1(src)
         s2, attn = self.self_attn(n, n, n,
+                                  attn_mask=attn_mask,
                                   need_weights=return_attention,
                                   average_attn_weights=False)
         src = src + self.drop1(s2)
@@ -80,14 +149,18 @@ class OptimizedTransformerEncoder(nn.Module):
             for _ in range(n_layers)
         ])
 
-    def forward(self, x, return_attention=False):
+    def forward(self, x, return_attention=False, attn_mask=None):
         attn_maps = []
         for layer in self.layers:
-            x, attn = layer(x, return_attention=return_attention)
+            x, attn = layer(x, return_attention=return_attention, attn_mask=attn_mask)
             if return_attention:
                 attn_maps.append(attn)
         return x, attn_maps
 
+
+# ============================================================================
+# Graph Attention
+# ============================================================================
 
 class OptimizedKG_GAT(nn.Module):
     def __init__(self, node_dim=64, kin_dim=13, out_nodes=5):
@@ -106,6 +179,10 @@ class OptimizedKG_GAT(nn.Module):
         return torch.bmm(adj, nodes).view(B, T, N, D)
 
 
+# ============================================================================
+# Full Hybrid Model
+# ============================================================================
+
 class HybridKGGTModel(nn.Module):
     """KG-GT model - nb06 fixed version.
 
@@ -115,6 +192,22 @@ class HybridKGGTModel(nn.Module):
        - not their sum, so each stream gets clean gradient signal
        - gate semantics: g~1 = rely on EEG, g~0 = rely on KIN
     3. Always returns dict {prediction, gate, fused} for gate loss + plots
+
+    Config keys (all under ``cfg["model"]``):
+        ``pos_encoding``     : "learnable" | "sinusoidal" | "none"
+                               Controls positional encoding type for EEG & KIN
+                               streams. "sinusoidal" strongly promotes diagonal
+                               attention. (default: "learnable")
+        ``local_attn_window``: int | null
+                               If set to an integer (e.g. 50), self-attention
+                               inside the Transformer is masked to only attend
+                               within ±window timesteps, enforcing locality.
+                               Set to null / omit to use full attention.
+                               (default: null)
+        ``chunk_size``       : int | null
+                               Sequence is split into chunks before the
+                               attention layers to cut O(T^2) cost.
+                               (default: 500)
     """
     def __init__(self, cfg, eeg_dim=None, kin_dim=None):
         super().__init__()
@@ -124,12 +217,16 @@ class HybridKGGTModel(nn.Module):
         d_model = mc.get("d_model", 64)
         out_ch  = mc["decoder"]["out_channels"]
         self.n_heads = mc["transformer"].get("n_heads", 8)
-        self.chunk_size = mc.get("chunk_size", 500)
+
+        # --- Config-driven options ---
+        self.chunk_size        = mc.get("chunk_size", 500)
+        self.local_attn_window = mc.get("local_attn_window", None)  # int or None
+        pos_type               = mc.get("pos_encoding", "learnable")
 
         self.eeg_cnn = TemporalCNNEncoder(eeg_dim, d_model)
         self.kin_cnn = TemporalCNNEncoder(kin_dim, d_model)
-        self.eeg_pos = LearnablePositionalEncoding(d_model)
-        self.kin_pos = LearnablePositionalEncoding(d_model)
+        self.eeg_pos = _build_pos_enc(pos_type, d_model)
+        self.kin_pos = _build_pos_enc(pos_type, d_model)
 
         self.cross_attn_eeg_kin = nn.MultiheadAttention(d_model, self.n_heads, batch_first=True)
         self.cross_attn_kin_eeg = nn.MultiheadAttention(d_model, self.n_heads, batch_first=True)
@@ -176,7 +273,15 @@ class HybridKGGTModel(nn.Module):
         # FIX: gate DIRECTLY between two distinct cross-attention streams
         fused, g_t = self.fusion(eeg_kin_feat, kin_eeg_feat)
 
-        temporal, self_attn_maps = self.transformer(fused, return_attention=return_attention)
+        # --- Optional local attention mask for the self-attention Transformer ---
+        attn_mask = None
+        if self.local_attn_window is not None:
+            chunk_T = fused.shape[1]  # may be chunk_size when chunking is active
+            attn_mask = _make_local_mask(chunk_T, self.local_attn_window, fused.device)
+
+        temporal, self_attn_maps = self.transformer(
+            fused, return_attention=return_attention, attn_mask=attn_mask
+        )
 
         if is_chunked:
             temporal = temporal.view(B, T, -1)
