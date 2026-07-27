@@ -102,8 +102,9 @@ class TrainConfig:
     """Resolved training hyperparameters."""
 
     lr: float = 1e-3
-    lr_patience: int = 50
-    lr_factor: float = 0.5
+    weight_decay: float = 1e-2          # used only by adamw
+    lr_patience: int = 50               # used only by 'reduce' scheduler
+    lr_factor: float = 0.5              # used only by 'reduce' scheduler
     grad_clip_norm: float = 1.0
     early_stop_patience: int = 30
     max_epochs: int = 500
@@ -112,22 +113,35 @@ class TrainConfig:
     log_memory_every: int = 50
     checkpoint_dir: str = "outputs/checkpoints"
     checkpoint_every: int = 1
+    # ── optimizer / scheduler selection ──────────────────────────────────────
+    optimizer: str = "adamw"            # 'adam' | 'adamw'
+    scheduler: str = "reduce"           # 'reduce' | 'cosine'
+    cosine_t_max: int | None = None     # cosine period (epochs); None → max_epochs
+    cosine_eta_min: float = 1e-6        # cosine floor LR
 
     @classmethod
     def from_config(cls, cfg: dict, max_epochs: int | None = None) -> "TrainConfig":
         """Build from the training section of default.yaml."""
+        resolved_max_epochs = (
+            max_epochs if max_epochs is not None else cfg.get("max_epochs", 500)
+        )
         return cls(
             lr=cfg.get("lr", 1e-3),
+            weight_decay=cfg.get("weight_decay", 1e-2),
             lr_patience=cfg.get("lr_patience", 50),
             lr_factor=cfg.get("lr_factor", 0.5),
             grad_clip_norm=cfg.get("grad_clip_norm", 1.0),
             early_stop_patience=cfg.get("early_stop_patience", 30),
-            max_epochs=max_epochs if max_epochs is not None else cfg.get("max_epochs", 500),
+            max_epochs=resolved_max_epochs,
             use_amp=cfg.get("use_amp", True),
             gradient_accumulation_steps=max(1, cfg.get("gradient_accumulation_steps", 1)),
             log_memory_every=max(1, cfg.get("log_memory_every", 50)),
             checkpoint_dir=cfg.get("checkpoint_dir", "outputs/checkpoints"),
             checkpoint_every=cfg.get("checkpoint_every", 1),
+            optimizer=cfg.get("optimizer", "adamw"),
+            scheduler=cfg.get("scheduler", "reduce"),
+            cosine_t_max=cfg.get("cosine_t_max", None),
+            cosine_eta_min=cfg.get("cosine_eta_min", 1e-6),
         )
 
 
@@ -312,16 +326,45 @@ def train_model(
         TrainResult with best val loss, best CPU state_dict, and history.
     """
     use_amp = cfg.use_amp and device.type == "cuda"
-    optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
-    scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience
-    )
+
+    # ── Optimizer ─────────────────────────────────────────────────────────────
+    _opt_name = cfg.optimizer.lower().strip()
+    if _opt_name == "adamw":
+        optimizer = torch.optim.AdamW(
+            model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
+        )
+    elif _opt_name == "adam":
+        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+    else:
+        raise ValueError(f"Unknown optimizer '{cfg.optimizer}'. Choose 'adam' or 'adamw'.")
+
+    # ── Scheduler ─────────────────────────────────────────────────────────────
+    _sched_name = cfg.scheduler.lower().strip()
+    if _sched_name == "reduce":
+        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+            optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience
+        )
+    elif _sched_name == "cosine":
+        t_max = cfg.cosine_t_max if cfg.cosine_t_max is not None else cfg.max_epochs
+        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=t_max, eta_min=cfg.cosine_eta_min
+        )
+    else:
+        raise ValueError(f"Unknown scheduler '{cfg.scheduler}'. Choose 'reduce' or 'cosine'.")
+
     scaler = torch.amp.GradScaler(enabled=use_amp)
 
     print_gpu_info(device)
     logger.info(
-        "Training on %s | AMP=%s | epochs=%d | lr=%g | ckpt_dir=%s",
-        device, use_amp, cfg.max_epochs, cfg.lr, cfg.checkpoint_dir,
+        "Training on %s | AMP=%s | epochs=%d | lr=%g | optimizer=%s | scheduler=%s | ckpt_dir=%s",
+        device, use_amp, cfg.max_epochs, cfg.lr, cfg.optimizer, cfg.scheduler, cfg.checkpoint_dir,
+    )
+    print(
+        f"  Optimizer : {cfg.optimizer.upper()}  (weight_decay={cfg.weight_decay})\n"
+        f"  Scheduler : {cfg.scheduler.upper()}"
+        + (f"  (T_max={cfg.cosine_t_max or cfg.max_epochs}, eta_min={cfg.cosine_eta_min})"
+           if cfg.scheduler == "cosine"
+           else f"  (patience={cfg.lr_patience}, factor={cfg.lr_factor})")
     )
 
     last_ckpt = _ckpt_path(cfg.checkpoint_dir, "last.pt")
@@ -359,7 +402,11 @@ def train_model(
             None, None, cfg.grad_clip_norm, use_amp,
             1, epoch=ep, phase="val",
         )
-        scheduler.step(vl)
+        # ReduceLROnPlateau needs the metric; CosineAnnealingLR does not
+        if isinstance(scheduler, torch.optim.lr_scheduler.ReduceLROnPlateau):
+            scheduler.step(vl)
+        else:
+            scheduler.step()
         result.history["train"].append(tr)
         result.history["val"].append(vl)
 

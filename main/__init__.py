@@ -22,11 +22,6 @@ from .dataloader import load_hs, load_ws, load_participant, get_split_series
 from .preprocessing_eeg import (
     preprocess_eeg,
     preprocess_eeg_from_config,
-    bandpass,
-    notch,
-    asr,
-    common_average_reference,
-    delta_band,
     select_channels,
 )
 from .preprocessing_emg_kin import (
@@ -75,8 +70,7 @@ __all__ = [
     # dataloader
     "load_hs", "load_ws", "load_participant", "get_split_series",
     # preprocessing
-    "preprocess_eeg", "preprocess_eeg_from_config",
-    "bandpass", "notch", "asr", "common_average_reference", "delta_band", "select_channels",
+    "preprocess_eeg", "preprocess_eeg_from_config", "select_channels",
     "preprocess_emg", "preprocess_emg_from_config", "EMGNormalizer",
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
     "extract_kt_raw", "extract_kt",
