@@ -126,22 +126,53 @@ class MultiHeadSelfAttention(nn.Module):
         self.W_O = nn.Linear(n_heads * d_v, d_model, bias=False)
 
     def forward(self, x: Tensor) -> Tensor:
-        """x: (B, T, d_model) -> (B, T, d_model)."""
+        """x: (B, T, d_model) -> (B, T, d_model).
+
+        DUAL-MODE IMPLEMENTATION:
+          • Training mode:  Uses torch.nn.functional.scaled_dot_product_attention
+            (fused CUDA kernel — FlashAttention / memory-efficient backend).
+            Fast, memory-efficient, but the attention matrix is NOT returned.
+
+          • Eval mode:      Manually computes softmax(QK^T/√d_k)·V.
+            The full (B, H, T, T) attention matrix is stored in
+            self.last_attn_weights for EEG temporal interpretability.
+            Cost: O(T²) memory — acceptable at batch_size=1 for visualization.
+
+        Access after model.eval() + forward pass:
+            attn = model.encoder.layers[-1].mhsa.last_attn_weights  # (B, H, T, T)
+            # Mean over heads for a (B, T, T) temporal relevance map.
+            # Sum over query axis → (B, T,) column attention score per timestep.
+        """
         B, T, _ = x.shape
         H, d_k, d_v = self.n_heads, self.d_k, self.d_v
 
-        q = self.W_Q(x).view(B, T, H, d_k).transpose(1, 2)  # (B,H,T,d_k)
+        q = self.W_Q(x).view(B, T, H, d_k).transpose(1, 2)  # (B, H, T, d_k)
         k = self.W_K(x).view(B, T, H, d_k).transpose(1, 2)
         v = self.W_V(x).view(B, T, H, d_v).transpose(1, 2)
 
-        # Log which SDPA backend is chosen (once per process)
-        _log_sdpa_backend_once(x.device.type)
+        if not self.training:
+            # ── INTERPRETABILITY PATH (eval mode) ─────────────────────────
+            # Manual scaled dot-product attention exposes the full attention matrix.
+            # No dropout applied during inference.
+            scale  = 1.0 / math.sqrt(d_k)
+            scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, H, T, T)
+            attn   = torch.softmax(scores, dim=-1)                  # (B, H, T, T)
 
-        ctx = F.scaled_dot_product_attention(
-            q, k, v,
-            dropout_p=self.dropout if self.training else 0.0,
-            is_causal=False,
-        )  # (B, H, T, d_v)
+            # Store for temporal interpretability (EEG attention heatmap).
+            # Detach to avoid accumulating in the computation graph.
+            self.last_attn_weights = attn.detach()
+
+            ctx = torch.matmul(attn, v)                             # (B, H, T, d_v)
+        else:
+            # ── FAST TRAINING PATH ────────────────────────────────────────
+            # Uses the fused SDPA kernel (FlashAttention when available).
+            # Attention matrix is NOT stored to save memory during training.
+            _log_sdpa_backend_once(x.device.type)
+            ctx = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=self.dropout,
+                is_causal=False,
+            )  # (B, H, T, d_v)
 
         ctx = ctx.transpose(1, 2).contiguous().view(B, T, H * d_v)
         return self.W_O(ctx)
@@ -233,14 +264,20 @@ class TransformerEncoder(nn.Module):
         z = self.embed(x)
         z = self.pos_enc(z)
 
-        # ── Chunking trick ─────────────────────────────────────────────────
-        # Reduces attention from O(T²) to O(chunk_size²) per chunk.
+        # ── Chunking trick (TRAINING MODE ONLY) ────────────────────────────
+        # Reduces attention from O(T²) to O(chunk_size²) per chunk during training.
         # REQUIREMENT: T must be exactly divisible by chunk_size.
-        # If not, a loud warning is emitted and full O(T²) attention is used.
+        #
+        # INTERPRETABILITY NOTE: Chunking is intentionally DISABLED during eval().
+        # Rationale: each chunk independently produces a (B*chunks, H, cs, cs)
+        # attention matrix. For the EEG temporal attention heatmap (money plot),
+        # we need a single unfragmented (B, H, T, T) matrix from the last encoder
+        # layer's mhsa.last_attn_weights. Disabling chunking in eval() ensures this
+        # at the cost of O(T²) memory — acceptable for batch_size=1 inference.
         is_chunked = False
         B, T, C = z.shape
         cs = getattr(self, "chunk_size", None)
-        if cs is not None and T > cs:
+        if self.training and cs is not None and T > cs:
             if T % cs != 0:
                 warnings.warn(
                     f"TransformerEncoder: T={T} is NOT divisible by chunk_size={cs}. "
@@ -370,6 +407,15 @@ class MuscleGATLayer(nn.Module):
 
         self.edge_bias = nn.Parameter(init_bias)   # (H, N, N), always learnable
 
+        # Register the initial biological prior as a FROZEN buffer.
+        # Used by EdgePriorKLDivLoss (losses.py) which computes:
+        #   KL( softmax(edge_bias) || softmax(edge_prior_anchor) )
+        # This anchors the learned muscle connectivity distribution to the
+        # EMG correlation prior and only allows deviation when training gradients
+        # strongly demand it. The buffer moves with the model (GPU/CPU) but
+        # receives no gradients — it is a reference, not a trainable parameter.
+        self.register_buffer("edge_prior_anchor", init_bias.clone())
+
     def forward(self, nodes: torch.Tensor) -> torch.Tensor:
         """nodes: (B, T, N, node_dim) → (B, T, N, out_dim)."""
         batch_size, steps, n_nodes, _ = nodes.shape
@@ -492,7 +538,7 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         num_heads: int,
         out_dim: int,
         n_nodes: int = 5,
-        kin_hidden: int = 64,
+        kin_hidden: int = 64,  # deprecated: unused after kin_edge_mlp → kin_edge_linear
         dropout: float = 0.0,
         edge_prior: Tensor | None = None,
     ) -> None:
@@ -525,20 +571,54 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
             init_bias = torch.zeros(num_heads, n_nodes, n_nodes)
         self.edge_bias = nn.Parameter(init_bias)   # (H, N, N)
 
-        # ── Kinematic → edge MLP ────────────────────────────────────────────
-        # Maps (kin_dim,) → (num_heads * n_nodes * n_nodes,) per timestep.
-        # Small by design: e.g. 12 → 64 → 100 for H=4, N=5.
-        self.kin_edge_mlp = nn.Sequential(
-            nn.Linear(kin_dim, kin_hidden),
-            nn.ReLU(),
-            nn.Linear(kin_hidden, num_heads * n_nodes * n_nodes),
-        )
+        # Register the initial biological prior as a FROZEN buffer for KL regularization.
+        # EdgePriorKLDivLoss (losses.py) computes:
+        #   KL( softmax(edge_bias) || softmax(edge_prior_anchor) ) summed over all GAT layers.
+        # This anchors the dynamic kinematic muscle-graph to the known co-activation structure.
+        self.register_buffer("edge_prior_anchor", init_bias.clone())
+
+        # ── Transparent kinematic → edge LINEAR mapping ─────────────────────
+        # DESIGN CHOICE (Q1 answer: full transparency):
+        # A single linear layer with NO hidden layer and NO activation maps the
+        # per-timestep kinematic state directly to (num_heads × n_nodes²) edge scalars.
+        #
+        # INTERPRETABILITY: After training, inspect:
+        #   W = model.gat.kin_edge_linear.weight      # shape: (H*N², kin_dim)
+        #   W_4d = W.view(num_heads, n_nodes, n_nodes, kin_dim)
+        # W_4d[h, i, j, k] = direct linear contribution of kinematic feature k
+        # to the attention edge i→j in head h.
+        #
+        # EXPECTED NEUROPHYSIOLOGICAL PATTERN:
+        #   d_grip (col 9, grip aperture)  → high weights on FDI-APB pinch edges
+        #   F_L / F_G (cols 10-11, forces)  → high weights on power-grasp muscle pairs
+        #   p_wrist (cols 0-2, position)    → low/diffuse — less muscle-specific
+        # Deviations from this pattern are scientifically interesting findings.
+        self.kin_edge_linear = nn.Linear(kin_dim, num_heads * n_nodes * n_nodes, bias=True)
 
     def forward(self, nodes: torch.Tensor, kin: torch.Tensor) -> torch.Tensor:
         """
-        nodes: (B, T, N, node_dim)
-        kin:   (B, T, kin_dim)
-        → (B, T, N, out_dim)
+        Forward pass of the Kinematic-Guided Muscle GAT.
+
+        Args:
+            nodes: (B, T, N, node_dim) — muscle node embeddings from MuscleNodeProjection.
+            kin:   (B, T, kin_dim)     — kinematic state vectors (13-dim k_t or 26-dim with vel).
+
+        Returns:
+            (B, T, N, out_dim) — graph-attended muscle node features.
+
+        EDGE SCORE DECOMPOSITION per timestep t:
+            scores_t = QK^T / √d_k       ← content attention (from node features)
+                     + self.edge_bias     ← static muscle synergy (H, N, N); biological prior
+                     + kin_bias_t         ← kinematic modulation (transparent linear)
+
+        INTERPRETABILITY (eval() mode only):
+            self.last_attn_weights      → (B*T, H, N, N)  total softmax attention weights
+            self.last_kin_edge_bias     → (B, T, H, N, N) kinematic dynamic edge contribution
+            self.last_static_edge_bias  → (H, N, N)        static learned synergy bias
+
+        After training, inspect the kinematic mapping:
+            W = model.gat.kin_edge_linear.weight.view(H, N, N, kin_dim)
+            W[h, i, j, :]  → how each kinematic feature contributes to the i→j edge in head h
         """
         batch_size, steps, n_nodes, _ = nodes.shape
         flat_nodes = nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
@@ -556,22 +636,39 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
             .permute(0, 2, 1, 3)
         )  # (B*T, H, N, d_v)
 
-        # Raw QK^T scores
+        # ── Score Component 1: content-based attention ─────────────────────
         scores = torch.matmul(q, q.transpose(-2, -1)) * self.scale  # (B*T, H, N, N)
 
-        # Add static learnable edge bias (broadcast over B*T)
-        scores = scores + self.edge_bias  # (H, N, N) → broadcast
+        # ── Score Component 2: static biological synergy bias ──────────────
+        # Encodes stable muscle co-activation patterns (e.g. FDI-APB during pinch).
+        # Anchored to EMG correlation prior via KL regularization in losses.py.
+        # Broadcast over B*T: every timestep starts from the same static prior.
+        scores = scores + self.edge_bias  # (H, N, N) → (B*T, H, N, N)
 
-        # Add dynamic kinematic edge bias (per timestep)
-        kin_bias = self.kin_edge_mlp(flat_kin)                                    # (B*T, H*N*N)
+        # ── Score Component 3: dynamic kinematic modulation ────────────────
+        # Transparent single linear layer: kin_dim → H*N² (no hidden layer).
+        # W[h*N*N + i*N + j, k] = contribution of kinematic feature k to edge i→j in head h.
+        kin_bias = self.kin_edge_linear(flat_kin)                              # (B*T, H*N*N)
         kin_bias = kin_bias.view(batch_size * steps, self.num_heads, n_nodes, n_nodes)
-        scores   = scores + kin_bias                                               # (B*T, H, N, N)
+        scores   = scores + kin_bias                                            # (B*T, H, N, N)
 
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
 
-        # Store for explainability plotting
+        # ── Interpretability Storage ───────────────────────────────────────
+        # Total attention is stored in both training and eval modes (lightweight: detached).
+        # Decomposed edge components are stored ONLY in eval() mode to avoid
+        # extra memory allocation during training.
         self.last_attn_weights = attn.detach()
+        if not self.training:
+            # Reshape kin_bias to (B, T, H, N, N) for time-resolved visualization.
+            # Plot self.last_kin_edge_bias[:, :, :, i, j] to see how the i→j
+            # muscle edge evolves over the inference window.
+            self.last_kin_edge_bias = kin_bias.view(
+                batch_size, steps, self.num_heads, n_nodes, n_nodes
+            ).detach()
+            # Static bias: same (H, N, N) tensor every call — just a reference.
+            self.last_static_edge_bias = self.edge_bias.detach()
 
         out = (
             torch.matmul(attn, v)
@@ -580,6 +677,7 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         )
         out      = self.out(out).view(batch_size, steps, n_nodes, -1)
         residual = self.residual(nodes)
+        return self.norm(residual + self.dropout(out))    # ← BUG FIX: missing return added
 # ============================================================================
 # Transformer-Only Model (Phase 1 Pretraining)
 # ============================================================================
