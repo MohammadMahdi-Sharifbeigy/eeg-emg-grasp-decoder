@@ -45,14 +45,14 @@ class PeakWeightedMSELoss(nn.Module):
         that actually encode motor commands.
 
     WEIGHT FORMULA:
-        w_t = 1 + alpha * (target_t / (max_batch + eps))
-        where max_batch = max over (B, T) per channel.
+        w_t = 1 + alpha * (target_shifted / (max_batch + eps))
+        where target_shifted = target - target.min() (to handle z-scored negative values)
 
-        alpha = 0    → standard MSE (all timesteps equal weight)
-        alpha = 3.0  → activated timesteps are up to 4× more important than silence
+        alpha = 0    -> standard MSE (all timesteps equal weight)
+        alpha = 3.0  -> activated timesteps are up to 4x more important than silence
 
     Args:
-        alpha: Peak-emphasis factor. Typical range 1.0–5.0. Default 3.0 is a
+        alpha: Peak-emphasis factor. Typical range 1.0-5.0. Default 3.0 is a
                good starting point for EMG envelopes; increase if peaks are still
                missed, decrease if baseline becomes too noisy.
     """
@@ -66,24 +66,35 @@ class PeakWeightedMSELoss(nn.Module):
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """
         Args:
-            pred:   Predicted EMG envelope (B, T, C) or (N, C).
-            target: Ground-truth EMG envelope, same shape as pred.
+            pred:   (B, T, C) predicted envelope
+            target: (B, T, C) ground truth envelope (raw or z-scored)
 
         Returns:
-            Scalar loss (weighted mean squared error).
+            Scalar weighted MSE loss
         """
-        # Normalize target to [0, 1] per channel, per batch.
-        # keepdim ensures broadcast works correctly for arbitrary leading dims.
+        if self.alpha == 0.0:
+            return F.mse_loss(pred, target)
+
+        # ── SHIFT FOR Z-SCORED TARGETS ────────────────────────────────────
+        # If target is z-scored, it has negative values during muscle rest.
+        # This would cause (target / max) to be negative, making w_t negative,
+        # which leads to a negative loss and model divergence!
+        # Fix: Shift the target so its minimum is 0 before computing weights.
+        
         reduce_dims = tuple(range(target.dim() - 1))          # all dims except last (C)
-        t_max = target.amax(dim=reduce_dims, keepdim=True)     # (1, ..., 1, C)
-        t_norm = target / (t_max + 1e-6)                       # ∈ [0, 1] per channel
+        t_min = target.amin(dim=reduce_dims, keepdim=True)    # (1, ..., 1, C)
+        target_shifted = target - t_min                       # Strictly non-negative
 
-        # Per-sample weight: baseline=1, peak up to (1 + alpha).
-        weight = 1.0 + self.alpha * t_norm                     # (B, T, C)
+        # max peak per channel in the batch
+        max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
+        
+        # w_t ∈ [1.0, 1.0 + alpha]
+        w_t = 1.0 + self.alpha * (target_shifted / (max_batch + 1e-8))
 
-        return (weight * (pred - target) ** 2).mean()
+        mse_raw = F.mse_loss(pred, target, reduction="none")  # same shape as target
+        loss = (w_t * mse_raw).mean()
 
-
+        return loss
 # ============================================================================
 # 2. Edge-prior KL divergence regularization
 # ============================================================================
@@ -203,11 +214,12 @@ class EdgePriorKLDivLoss(nn.Module):
 # ============================================================================
 
 class CombinedEMGLoss(nn.Module):
-    """Peak-weighted MSE reconstruction + KL edge-prior regularization.
+    """Peak-weighted MSE reconstruction + KL edge-prior regularization + L1 Sparsity.
 
     TOTAL LOSS:
         L = PeakWeightedMSE(pred, target)
-          + EdgePriorKLDiv(model)           ← only if model is passed
+          + lambda_reg * EdgePriorKLDiv(model)
+          + lambda_l1 * L1(pred)
 
     BACKWARD COMPATIBILITY:
         The signature forward(pred, target, model=None) is backward-compatible
@@ -224,6 +236,7 @@ class CombinedEMGLoss(nn.Module):
     Args:
         peak_alpha:      Peak-weighting factor (PeakWeightedMSELoss). Default 3.0.
         lambda_reg:      KL regularization weight (EdgePriorKLDivLoss). Default 0.01.
+        lambda_l1:       L1 Sparsity weight to suppress floating baselines. Default 1e-4.
         use_peak_weight: If False, use standard nn.MSELoss (alpha=0 equivalent).
                          Useful for ablation studies.
     """
@@ -232,18 +245,20 @@ class CombinedEMGLoss(nn.Module):
         self,
         peak_alpha:      float = 3.0,
         lambda_reg:      float = 0.01,
+        lambda_l1:       float = 1e-4,
         use_peak_weight: bool  = True,
     ) -> None:
         super().__init__()
         self.recon     = PeakWeightedMSELoss(alpha=peak_alpha) if use_peak_weight else nn.MSELoss()
         self.reg       = EdgePriorKLDivLoss(lambda_reg=lambda_reg)
         self.lambda_reg = lambda_reg
+        self.lambda_l1  = lambda_l1
 
     def forward(
         self,
         pred:   Tensor,
         target: Tensor,
-        model:  nn.Module | None = None,  # default None → backward-compatible
+        model:  nn.Module | None = None,  # default None -> backward-compatible
     ) -> Tensor:
         """
         Args:
@@ -256,6 +271,10 @@ class CombinedEMGLoss(nn.Module):
             Scalar loss value.
         """
         loss = self.recon(pred, target)
+
+        # L1 Sparsity to force exact zeros during muscle rest
+        if self.lambda_l1 > 0.0:
+            loss = loss + self.lambda_l1 * torch.mean(torch.abs(pred))
 
         # KL regularization is computed only when the model is explicitly provided
         # and lambda_reg > 0. This preserves strict backward compatibility.
@@ -276,12 +295,14 @@ def build_loss_from_config(cfg: dict) -> CombinedEMGLoss:
 
         cfg["loss"]["peak_alpha"]      float  Peak-weighting factor. Default 3.0.
         cfg["loss"]["lambda_reg"]      float  KL regularization weight. Default 0.01.
+        cfg["loss"]["lambda_l1"]       float  L1 Sparsity weight. Default 1e-4.
         cfg["loss"]["use_peak_weight"] bool   Enable peak weighting. Default True.
 
     Example config section:
         "loss": {
-            "peak_alpha": 3.0,        # 3× emphasis on burst peaks vs. baseline
+            "peak_alpha": 3.0,        # 3x emphasis on burst peaks vs. baseline
             "lambda_reg": 0.01,       # mild KL anchor to biological prior
+            "lambda_l1": 1e-4,        # suppress floating baseline noise
             "use_peak_weight": true,
         }
 
@@ -292,5 +313,6 @@ def build_loss_from_config(cfg: dict) -> CombinedEMGLoss:
     return CombinedEMGLoss(
         peak_alpha=loss_cfg.get("peak_alpha", 3.0),
         lambda_reg=loss_cfg.get("lambda_reg", 0.01),
+        lambda_l1=loss_cfg.get("lambda_l1", 1e-4),
         use_peak_weight=loss_cfg.get("use_peak_weight", True),
     )

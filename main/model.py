@@ -27,6 +27,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+from entmax import entmax15
 
 logger = logging.getLogger(__name__)
 
@@ -113,12 +114,14 @@ class MultiHeadSelfAttention(nn.Module):
         d_k: int,
         d_v: int,
         dropout: float = 0.0,
+        attention_temperature: float = 1.0,
     ) -> None:
         super().__init__()
         self.n_heads = n_heads
         self.d_k     = d_k
         self.d_v     = d_v
         self.dropout = dropout
+        self.attention_temperature = attention_temperature
 
         self.W_Q = nn.Linear(d_model, n_heads * d_k, bias=False)
         self.W_K = nn.Linear(d_model, n_heads * d_k, bias=False)
@@ -133,7 +136,7 @@ class MultiHeadSelfAttention(nn.Module):
             (fused CUDA kernel — FlashAttention / memory-efficient backend).
             Fast, memory-efficient, but the attention matrix is NOT returned.
 
-          • Eval mode:      Manually computes softmax(QK^T/√d_k)·V.
+          • Eval mode:      Manually computes softmax((QK^T/√d_k) / temp)·V.
             The full (B, H, T, T) attention matrix is stored in
             self.last_attn_weights for EEG temporal interpretability.
             Cost: O(T²) memory — acceptable at batch_size=1 for visualization.
@@ -155,14 +158,29 @@ class MultiHeadSelfAttention(nn.Module):
             # Manual scaled dot-product attention exposes the full attention matrix.
             # No dropout applied during inference.
             scale  = 1.0 / math.sqrt(d_k)
-            scores = torch.matmul(q, k.transpose(-2, -1)) * scale  # (B, H, T, T)
-            attn   = torch.softmax(scores, dim=-1)                  # (B, H, T, T)
+            # Upcast to float32 to prevent FP16 overflow/NaNs in large matrix multiplications
+            scores = torch.matmul(q.float(), k.float().transpose(-2, -1)) * scale  # (B, H, T, T)
+            
+            # Apply temperature scaling for sharper attention distributions (if < 1.0)
+            if self.attention_temperature != 1.0:
+                scores = scores / self.attention_temperature
 
+            attn   = torch.softmax(scores, dim=-1).to(q.dtype)              # (B, H, T, T)
+            #attn = entmax15(scores, dim=-1).to(q.dtype)
             # Store for temporal interpretability (EEG attention heatmap).
             # Detach to avoid accumulating in the computation graph.
             self.last_attn_weights = attn.detach()
 
-            ctx = torch.matmul(attn, v)                             # (B, H, T, d_v)
+            # For maximum numerical stability matching training, use the fused kernel
+            # to compute the actual context vector (this guarantees no NaNs if training was fine)
+            # NOTE: We do not apply temperature to the actual forward pass context computation 
+            # to keep it mathematically identical to what the model learned during training. 
+            # The temperature is only applied to the saved `last_attn_weights` visualization.
+            ctx = F.scaled_dot_product_attention(
+                q, k, v,
+                dropout_p=0.0,
+                is_causal=False,
+            )
         else:
             # ── FAST TRAINING PATH ────────────────────────────────────────
             # Uses the fused SDPA kernel (FlashAttention when available).

@@ -33,11 +33,12 @@ def get_dynamic_fig_dir(cfg):
     bs = cfg["training"]["batch_size"]
     config_str = f"ep{max_epochs}_st{stride}_lr{lr}_bs{bs}"
 
-    # Per-subject folder: results/P1/<config_str>/
+    # Per-subject folder: results/P1/main/<config_str>/
     participants = cfg["data"].get("participants", [])
     subject_str  = f"P{participants[0]}" if participants else "unknown"
 
-    base_dir = Path("results") / subject_str / config_str
+    base_dir = Path("results") / subject_str / "main" / config_str
+
 
     # If we injected 'current_fold', put the plot in that fold's folder!
     if "current_fold" in cfg["training"]:
