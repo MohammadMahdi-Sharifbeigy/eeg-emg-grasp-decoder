@@ -40,6 +40,15 @@ def rectify(emg: np.ndarray) -> np.ndarray:
     return np.abs(emg).astype(np.float32)
 
 
+def tkeo(emg: np.ndarray) -> np.ndarray:
+    """Teager-Kaiser Energy Operator (TKEO)."""
+    out = np.zeros_like(emg)
+    out[1:-1] = emg[1:-1]**2 - emg[:-2] * emg[2:]
+    out[0] = out[1]
+    out[-1] = out[-2]
+    return out.astype(np.float32)
+
+
 def lowpass_envelope(
     emg: np.ndarray,
     fs: float,
@@ -125,11 +134,12 @@ def preprocess_emg(
     filter_order: int = 4,
     lp_cutoff: float = 10.0,
     downsample_factor: int = 8,
+    use_tkeo: bool = True,
 ) -> np.ndarray:
     """Apply EMG envelope extraction pipeline to one continuous HS series.
 
     Steps (method1.tex order):
-      BP 30–300 Hz → |s(t)| → LP 10 Hz → decimate ×8
+      BP 30–300 Hz → TKEO (or |s(t)|) → LP 10 Hz → decimate ×8
 
     Z-score normalisation is NOT applied here because it requires statistics
     computed across the whole training set. Use EMGNormalizer separately.
@@ -141,13 +151,19 @@ def preprocess_emg(
         filter_order:     Butterworth filter order
         lp_cutoff:        envelope low-pass cutoff (Hz)
         downsample_factor: integer decimation factor (4000/500 = 8)
+        use_tkeo:         whether to use TKEO instead of rectification
 
     Returns:
         ndarray (T // downsample_factor, 5) float32
         at fs // downsample_factor Hz (500 Hz), envelope only (no z-score)
     """
     emg = bandpass(emg, fs, bp_low, bp_high, filter_order)
-    emg = rectify(emg)
+    if use_tkeo:
+        emg = tkeo(emg)
+        # Rectify AND take square root to map energy back to amplitude scale
+        emg = np.sqrt(np.abs(emg)) 
+    else:
+        emg = rectify(emg)
     emg = lowpass_envelope(emg, fs, lp_cutoff, filter_order)
     emg = downsample(emg, downsample_factor)
     return emg
@@ -163,6 +179,7 @@ def preprocess_emg_from_config(emg: np.ndarray, fs: float, cfg: dict) -> np.ndar
         filter_order=cfg.get("filter_order", 4),
         lp_cutoff=cfg.get("lp_cutoff", 10.0),
         downsample_factor=cfg.get("downsample_factor", 8),
+        use_tkeo=cfg.get("use_tkeo", True),
     )
 
 """

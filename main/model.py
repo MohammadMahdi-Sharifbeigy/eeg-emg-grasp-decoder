@@ -7,16 +7,65 @@ Architecture:
   3. MuscleGATEncoder / KinematicGuidedMuscleGATEncoder: Graph attention over muscles.
   4. KGGTModel: Full end-to-end model combining the above.
   5. CNN1dAligner: Optional learnable 1D CNN spatial filter replacing CCA.
+
+GAT changes (vs. original dense self-attention):
+  - MuscleGATLayer now adds a learnable (num_heads, n_nodes, n_nodes) edge_bias
+    to scores before softmax, making it a proper graph-attention layer.
+    Optionally initialised from a correlation-matrix prior via edge_prior arg.
+  - KinematicGuidedMuscleGATEncoder replaces the node-broadcast kin_proj with
+    a small MLP that maps kin_dim → (num_heads, n_nodes, n_nodes) edge bias,
+    conditioned per timestep. A static edge_bias is also added (same as above).
 """
 
 from __future__ import annotations
 
+import logging
 import math
+import warnings
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch import Tensor
+
+logger = logging.getLogger(__name__)
+
+# One-shot flag: log SDPA backend selection only once per process
+_SDPA_BACKEND_LOGGED = False
+
+
+def _log_sdpa_backend_once(device_type: str) -> None:
+    """Log which scaled_dot_product_attention backend is active (once per process).
+
+    Flash attention requires CUDA + fp16/bf16. Memory-efficient attention is
+    the fallback on older GPUs or fp32. Math backend is pure-PyTorch (slowest).
+    """
+    global _SDPA_BACKEND_LOGGED
+    if _SDPA_BACKEND_LOGGED:
+        return
+    _SDPA_BACKEND_LOGGED = True
+
+    if device_type != "cuda":
+        logger.info("SDPA backend: math (CPU path)")
+        return
+
+    flash = torch.backends.cuda.flash_sdp_enabled()
+    mem_eff = torch.backends.cuda.mem_efficient_sdp_enabled()
+    if flash:
+        backend = "flash_attention"
+    elif mem_eff:
+        backend = "memory_efficient"
+    else:
+        backend = "math (slowest — consider upgrading PyTorch or using fp16)"
+
+    msg = (
+        f"SDPA backend active: {backend}  "
+        f"(flash={flash}, mem_efficient={mem_eff}). "
+        "For best performance with T=4000, ensure AMP (fp16) is enabled and "
+        "PyTorch >= 2.0 is installed."
+    )
+    logger.info(msg)
+    print(f"[SDPA] {msg}")
 
 
 # ============================================================================
@@ -85,6 +134,9 @@ class MultiHeadSelfAttention(nn.Module):
         k = self.W_K(x).view(B, T, H, d_k).transpose(1, 2)
         v = self.W_V(x).view(B, T, H, d_v).transpose(1, 2)
 
+        # Log which SDPA backend is chosen (once per process)
+        _log_sdpa_backend_once(x.device.type)
+
         ctx = F.scaled_dot_product_attention(
             q, k, v,
             dropout_p=self.dropout if self.training else 0.0,
@@ -140,7 +192,14 @@ class TransformerEncoderLayer(nn.Module):
 
 
 class TransformerEncoder(nn.Module):
-    """Stack of L post-LN encoder layers with input embedding + PE."""
+    """Stack of L post-LN encoder layers with input embedding + PE.
+
+    Chunked attention: if chunk_size is set and T % chunk_size == 0, the
+    sequence is split into (T // chunk_size) independent chunks before the
+    transformer layers, reducing attention cost from O(T²) to O(chunk²).
+    If T % chunk_size != 0, a warning is emitted and full O(T²) attention
+    is used instead — this can be catastrophic at large T.
+    """
 
     def __init__(
         self,
@@ -174,20 +233,35 @@ class TransformerEncoder(nn.Module):
         z = self.embed(x)
         z = self.pos_enc(z)
 
-        # Apply Chunking Trick
+        # ── Chunking trick ─────────────────────────────────────────────────
+        # Reduces attention from O(T²) to O(chunk_size²) per chunk.
+        # REQUIREMENT: T must be exactly divisible by chunk_size.
+        # If not, a loud warning is emitted and full O(T²) attention is used.
         is_chunked = False
         B, T, C = z.shape
-        if getattr(self, "chunk_size", None) is not None and T > self.chunk_size and T % self.chunk_size == 0:
-            num_chunks = T // self.chunk_size
-            z = z.view(B * num_chunks, self.chunk_size, C)
-            is_chunked = True
+        cs = getattr(self, "chunk_size", None)
+        if cs is not None and T > cs:
+            if T % cs != 0:
+                warnings.warn(
+                    f"TransformerEncoder: T={T} is NOT divisible by chunk_size={cs}. "
+                    f"Falling back to FULL O(T²) self-attention — this will be very slow "
+                    f"and memory-heavy at T={T}. "
+                    f"Fix: set chunk_size to a divisor of T (e.g. chunk_size={T} for no "
+                    f"chunking, or chunk_size=500 requires T divisible by 500).",
+                    RuntimeWarning,
+                    stacklevel=2,
+                )
+            else:
+                num_chunks = T // cs
+                z = z.view(B * num_chunks, cs, C)
+                is_chunked = True
 
         for layer in self.layers:
             z = layer(z)
-            
+
         if is_chunked:
             z = z.view(B, T, C)
-            
+
         return z
 
 
@@ -230,47 +304,119 @@ class MuscleNodeProjection(nn.Module):
 # ============================================================================
 
 class MuscleGATLayer(nn.Module):
-    """Timewise multi-head attention over the fixed 5-muscle graph."""
+    """Timewise multi-head graph attention over the fixed 5-muscle graph.
+
+    Key fix vs. original: a learnable (num_heads, n_nodes, n_nodes) edge_bias
+    matrix is added to the raw QK scores before softmax. This makes it a
+    genuine graph-attention layer — each head can learn different edge strengths
+    between muscle pairs.
+
+    Optionally, a correlation-matrix prior (edge_prior) can initialise the bias
+    as log(prior + eps), broadcast across heads. The bias remains learnable so
+    the model can adjust away from the prior.
+
+    Args:
+        node_dim:   Input node feature dimension.
+        hidden_dim: Per-head key/query dimension.
+        num_heads:  Number of attention heads.
+        n_nodes:    Number of graph nodes (default 5, one per EMG channel).
+        dropout:    Dropout on attention weights.
+        out_dim:    Output node feature dimension (defaults to node_dim).
+        edge_prior: Optional (n_nodes, n_nodes) float tensor. If provided,
+                    edge_bias is initialised as log(edge_prior + 1e-6) broadcast
+                    across heads, instead of zeros. Must be non-negative.
+    """
 
     def __init__(
         self,
         node_dim: int,
         hidden_dim: int,
         num_heads: int,
+        n_nodes: int = 5,
         dropout: float = 0.0,
         out_dim: int | None = None,
+        edge_prior: Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.out_dim = out_dim or node_dim
-        self.query = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.key = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.value = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.out = nn.Linear(hidden_dim * num_heads, self.out_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(self.out_dim)
-        self.residual = nn.Linear(node_dim, self.out_dim) if node_dim != self.out_dim else nn.Identity()
+        self.num_heads  = num_heads
+        self.n_nodes    = n_nodes
+        self.out_dim    = out_dim or node_dim
+
+        self.query    = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
+        self.key      = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
+        self.value    = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
+        self.out      = nn.Linear(hidden_dim * num_heads, self.out_dim)
+        self.dropout  = nn.Dropout(dropout)
+        self.norm     = nn.LayerNorm(self.out_dim)
+        self.residual = (
+            nn.Linear(node_dim, self.out_dim) if node_dim != self.out_dim else nn.Identity()
+        )
         self.scale = 1.0 / math.sqrt(hidden_dim)
 
+        # ── Learnable edge-bias (H, N, N) ──────────────────────────────────
+        # Initialised from prior if supplied, else zeros.
+        # Always learnable (requires_grad=True).
+        if edge_prior is not None:
+            if edge_prior.shape != (n_nodes, n_nodes):
+                raise ValueError(
+                    f"edge_prior must be ({n_nodes}, {n_nodes}), got {tuple(edge_prior.shape)}"
+                )
+            # log(prior + eps) broadcast across heads
+            log_prior = torch.log(edge_prior.float().clamp(min=0.0) + 1e-6)
+            init_bias = log_prior.unsqueeze(0).expand(num_heads, -1, -1).clone()
+        else:
+            init_bias = torch.zeros(num_heads, n_nodes, n_nodes)
+
+        self.edge_bias = nn.Parameter(init_bias)   # (H, N, N), always learnable
+
     def forward(self, nodes: torch.Tensor) -> torch.Tensor:
+        """nodes: (B, T, N, node_dim) → (B, T, N, out_dim)."""
         batch_size, steps, n_nodes, _ = nodes.shape
         flat = nodes.reshape(batch_size * steps, n_nodes, -1)
-        query = self.query(flat).view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim).permute(0, 2, 1, 3)
-        key = self.key(flat).view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim).permute(0, 2, 1, 3)
-        value = self.value(flat).view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim).permute(0, 2, 1, 3)
 
-        scores = torch.matmul(query, key.transpose(-2, -1)) * self.scale
+        q = (
+            self.query(flat)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )  # (B*T, H, N, d_k)
+        k = (
+            self.key(flat)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )
+        v = (
+            self.value(flat)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )
+
+        # Raw attention scores + learnable graph edge bias
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B*T, H, N, N)
+        scores = scores + self.edge_bias                             # broadcast over B*T
+
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
-        out = torch.matmul(attn, value).permute(0, 2, 1, 3).reshape(batch_size * steps, n_nodes, self.num_heads * self.hidden_dim)
+
+        # Store for explainability plotting
+        self.last_attn_weights = attn.detach()
+
+        out = (
+            torch.matmul(attn, v)
+            .permute(0, 2, 1, 3)
+            .reshape(batch_size * steps, n_nodes, self.num_heads * self.hidden_dim)
+        )
         out = self.out(out).view(batch_size, steps, n_nodes, self.out_dim)
         residual = self.residual(nodes)
         return self.norm(residual + self.dropout(out))
 
 
 class MuscleGATEncoder(nn.Module):
-    """Stacked baseline graph-attention encoder over the 5 EMG nodes."""
+    """Stacked graph-attention encoder over the 5 EMG nodes.
+
+    Each layer is a MuscleGATLayer with its own learnable edge_bias.
+    edge_prior (if supplied) is used to initialise the bias in every layer.
+    """
 
     def __init__(
         self,
@@ -278,8 +424,10 @@ class MuscleGATEncoder(nn.Module):
         hidden_dim: int,
         num_heads: int,
         out_dim: int,
+        n_nodes: int = 5,
         n_layers: int = 2,
         dropout: float = 0.0,
+        edge_prior: Tensor | None = None,
     ) -> None:
         super().__init__()
         layers: list[nn.Module] = []
@@ -291,8 +439,10 @@ class MuscleGATEncoder(nn.Module):
                     node_dim=in_dim,
                     hidden_dim=hidden_dim,
                     num_heads=num_heads,
+                    n_nodes=n_nodes,
                     dropout=dropout,
                     out_dim=layer_out,
+                    edge_prior=edge_prior,
                 )
             )
             in_dim = layer_out
@@ -306,7 +456,33 @@ class MuscleGATEncoder(nn.Module):
 
 
 class KinematicGuidedMuscleGATEncoder(nn.Module):
-    """Graph attention whose edge scores are conditioned on kinematics."""
+    """Graph attention whose edge scores are conditioned on kinematics.
+
+    Fix vs. original: instead of broadcasting kin to nodes (which gives all
+    edges the same kinematic influence), a small MLP maps the per-timestep
+    kinematic vector to a (num_heads, n_nodes, n_nodes) edge-bias matrix.
+    This allows different kinematic states to express different muscle-pair
+    co-activation patterns.
+
+    Additionally, a static learnable edge_bias (same as MuscleGATLayer) is
+    added, optionally initialised from a correlation prior. The total score is:
+
+        scores = QK^T / sqrt(d) + static_edge_bias + kin_edge_bias(kin_t)
+
+    The MLP is deliberately small: kin_dim → kin_hidden → heads * n_nodes²
+    (e.g. 12 → 64 → 100 parameters for 4 heads, 5 nodes).
+
+    Args:
+        node_dim:   Input node feature dimension.
+        kin_dim:    Kinematic vector dimension (e.g. 12 after dropping rho_GL).
+        hidden_dim: Per-head key/query dimension.
+        num_heads:  Number of attention heads.
+        out_dim:    Output node feature dimension.
+        n_nodes:    Number of muscle nodes (default 5).
+        kin_hidden: Hidden size in the kin→edge MLP (default 64).
+        dropout:    Dropout on attention weights.
+        edge_prior: Optional (n_nodes, n_nodes) tensor for static bias init.
+    """
 
     def __init__(
         self,
@@ -315,37 +491,123 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         hidden_dim: int,
         num_heads: int,
         out_dim: int,
+        n_nodes: int = 5,
+        kin_hidden: int = 64,
         dropout: float = 0.0,
+        edge_prior: Tensor | None = None,
     ) -> None:
         super().__init__()
         self.hidden_dim = hidden_dim
-        self.num_heads = num_heads
-        self.node_proj = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.kin_proj = nn.Linear(kin_dim, hidden_dim * num_heads, bias=False)
+        self.num_heads  = num_heads
+        self.n_nodes    = n_nodes
+
+        # Node Q/K/V projections (unchanged from original)
+        self.node_proj  = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
         self.value_proj = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.out = nn.Linear(hidden_dim * num_heads, out_dim)
-        self.dropout = nn.Dropout(dropout)
-        self.norm = nn.LayerNorm(out_dim)
-        self.residual = nn.Linear(node_dim, out_dim) if node_dim != out_dim else nn.Identity()
+        self.out        = nn.Linear(hidden_dim * num_heads, out_dim)
+        self.dropout    = nn.Dropout(dropout)
+        self.norm       = nn.LayerNorm(out_dim)
+        self.residual   = (
+            nn.Linear(node_dim, out_dim) if node_dim != out_dim else nn.Identity()
+        )
         self.scale = 1.0 / math.sqrt(hidden_dim)
 
+        # ── Static learnable edge-bias (H, N, N) ───────────────────────────
+        # Same as MuscleGATLayer: prior-init or zeros.
+        if edge_prior is not None:
+            if edge_prior.shape != (n_nodes, n_nodes):
+                raise ValueError(
+                    f"edge_prior must be ({n_nodes}, {n_nodes}), got {tuple(edge_prior.shape)}"
+                )
+            log_prior = torch.log(edge_prior.float().clamp(min=0.0) + 1e-6)
+            init_bias = log_prior.unsqueeze(0).expand(num_heads, -1, -1).clone()
+        else:
+            init_bias = torch.zeros(num_heads, n_nodes, n_nodes)
+        self.edge_bias = nn.Parameter(init_bias)   # (H, N, N)
+
+        # ── Kinematic → edge MLP ────────────────────────────────────────────
+        # Maps (kin_dim,) → (num_heads * n_nodes * n_nodes,) per timestep.
+        # Small by design: e.g. 12 → 64 → 100 for H=4, N=5.
+        self.kin_edge_mlp = nn.Sequential(
+            nn.Linear(kin_dim, kin_hidden),
+            nn.ReLU(),
+            nn.Linear(kin_hidden, num_heads * n_nodes * n_nodes),
+        )
+
     def forward(self, nodes: torch.Tensor, kin: torch.Tensor) -> torch.Tensor:
+        """
+        nodes: (B, T, N, node_dim)
+        kin:   (B, T, kin_dim)
+        → (B, T, N, out_dim)
+        """
         batch_size, steps, n_nodes, _ = nodes.shape
-        flat_nodes = nodes.reshape(batch_size * steps, n_nodes, -1)
-        flat_kin = kin.reshape(batch_size * steps, -1)
+        flat_nodes = nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
+        flat_kin   = kin.reshape(batch_size * steps, -1)              # (B*T, kin_dim)
 
-        node_proj = self.node_proj(flat_nodes).view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim).permute(0, 2, 1, 3)
-        kin_proj = self.kin_proj(flat_kin).view(batch_size * steps, self.num_heads, self.hidden_dim).unsqueeze(2)
-        values = self.value_proj(flat_nodes).view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim).permute(0, 2, 1, 3)
+        # Q and V from nodes
+        q = (
+            self.node_proj(flat_nodes)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )  # (B*T, H, N, d_k)
+        v = (
+            self.value_proj(flat_nodes)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )  # (B*T, H, N, d_v)
 
-        guided = node_proj + kin_proj
-        scores = torch.matmul(guided, guided.transpose(-2, -1)) * self.scale
+        # Raw QK^T scores
+        scores = torch.matmul(q, q.transpose(-2, -1)) * self.scale  # (B*T, H, N, N)
+
+        # Add static learnable edge bias (broadcast over B*T)
+        scores = scores + self.edge_bias  # (H, N, N) → broadcast
+
+        # Add dynamic kinematic edge bias (per timestep)
+        kin_bias = self.kin_edge_mlp(flat_kin)                                    # (B*T, H*N*N)
+        kin_bias = kin_bias.view(batch_size * steps, self.num_heads, n_nodes, n_nodes)
+        scores   = scores + kin_bias                                               # (B*T, H, N, N)
+
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
-        out = torch.matmul(attn, values).permute(0, 2, 1, 3).reshape(batch_size * steps, n_nodes, self.num_heads * self.hidden_dim)
-        out = self.out(out).view(batch_size, steps, n_nodes, -1)
+
+        # Store for explainability plotting
+        self.last_attn_weights = attn.detach()
+
+        out = (
+            torch.matmul(attn, v)
+            .permute(0, 2, 1, 3)
+            .reshape(batch_size * steps, n_nodes, self.num_heads * self.hidden_dim)
+        )
+        out      = self.out(out).view(batch_size, steps, n_nodes, -1)
         residual = self.residual(nodes)
-        return self.norm(residual + self.dropout(out))
+# ============================================================================
+# Transformer-Only Model (Phase 1 Pretraining)
+# ============================================================================
+
+class TransformerOnlyModel(nn.Module):
+    """Phase 1 pretraining model: Transformer -> NodeProjection -> Decoder (no GAT)."""
+    
+    def __init__(
+        self,
+        transformer_cfg: dict,
+        input_dim: int,
+        node_dim: int = 64,
+        out_channels: int = 5,
+    ) -> None:
+        super().__init__()
+        self.encoder = build_transformer_from_config(transformer_cfg, input_dim)
+        self.node_projection = MuscleNodeProjection(
+            input_dim=self.encoder.d_model,
+            n_nodes=out_channels,
+            node_dim=node_dim,
+        )
+        self.decoder = nn.Linear(node_dim, 1)
+        
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        # kin is ignored, just matching the function signature
+        temporal = self.encoder(eeg)
+        nodes    = self.node_projection(temporal)
+        return self.decoder(nodes).squeeze(-1)
 
 
 # ============================================================================
@@ -353,7 +615,14 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
 # ============================================================================
 
 class KGGTModel(nn.Module):
-    """Transformer temporal encoder followed by muscle-graph reasoning."""
+    """Transformer temporal encoder followed by muscle-graph reasoning.
+
+    Args:
+        edge_prior: Optional (n_nodes, n_nodes) float tensor used to initialise
+                    the learnable edge-bias in MuscleGATLayer /
+                    KinematicGuidedMuscleGATEncoder. Compute via
+                    compute_muscle_edge_prior() in preprocessing_emg_kin.py.
+    """
 
     def __init__(
         self,
@@ -367,16 +636,19 @@ class KGGTModel(nn.Module):
         n_gat_layers: int = 2,
         gat_dropout: float = 0.1,
         use_kinematic_guidance: bool = False,
+        edge_prior: Tensor | None = None,
     ) -> None:
         super().__init__()
         self.use_kinematic_guidance = use_kinematic_guidance
         self.out_channels = out_channels
+
         self.encoder = build_transformer_from_config(transformer_cfg, input_dim)
         self.node_projection = MuscleNodeProjection(
             input_dim=self.encoder.d_model,
             n_nodes=out_channels,
             node_dim=node_dim,
         )
+
         if use_kinematic_guidance:
             self.gat = KinematicGuidedMuscleGATEncoder(
                 node_dim=node_dim,
@@ -384,7 +656,9 @@ class KGGTModel(nn.Module):
                 hidden_dim=gat_hidden_dim,
                 num_heads=gat_heads,
                 out_dim=node_dim,
+                n_nodes=out_channels,
                 dropout=gat_dropout,
+                edge_prior=edge_prior,
             )
         else:
             self.gat = MuscleGATEncoder(
@@ -392,14 +666,17 @@ class KGGTModel(nn.Module):
                 hidden_dim=gat_hidden_dim,
                 num_heads=gat_heads,
                 out_dim=node_dim,
+                n_nodes=out_channels,
                 n_layers=n_gat_layers,
                 dropout=gat_dropout,
+                edge_prior=edge_prior,
             )
+
         self.decoder = nn.Linear(node_dim, 1)
 
     def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
         temporal = self.encoder(eeg)
-        nodes = self.node_projection(temporal)
+        nodes    = self.node_projection(temporal)
         if self.use_kinematic_guidance:
             if kin is None:
                 raise ValueError("kin is required when use_kinematic_guidance=True")
@@ -413,12 +690,30 @@ def build_kg_gt_from_config(
     cfg: dict,
     input_dim: int,
     kin_dim: int = 13,
+    edge_prior: Tensor | None = None,
 ) -> KGGTModel:
-    """Build a KG-GT variant from the project config."""
+    """Build a KG-GT variant from the project config.
+
+    Args:
+        cfg:        Full project config dict.
+        input_dim:  EEG input channels (e.g. 32).
+        kin_dim:    Kinematic feature dimension after preprocessing.
+        edge_prior: Optional (5, 5) tensor from compute_muscle_edge_prior().
+                    If None, edge_bias is initialised to zeros.
+                    Compute via:
+                        from main.preprocessing_emg_kin import compute_muscle_edge_prior
+                        import torch
+                        prior_np = compute_muscle_edge_prior(train_emgs)
+                        edge_prior = torch.from_numpy(prior_np)
+    """
     model_cfg = cfg["model"]
-    gat_cfg = model_cfg.get("gat", {})
+    gat_cfg   = model_cfg.get("gat", {})
     model_type = model_cfg.get("type", "transformer_regressor")
-    use_kinematic_guidance = model_type == "kg_gt_kinematic" or gat_cfg.get("use_kinematic_guidance", False)
+    use_kinematic_guidance = (
+        model_type == "kg_gt_kinematic"
+        or gat_cfg.get("use_kinematic_guidance", False)
+    )
+
     return KGGTModel(
         transformer_cfg=model_cfg["transformer"],
         input_dim=input_dim,
@@ -430,6 +725,19 @@ def build_kg_gt_from_config(
         n_gat_layers=gat_cfg.get("n_layers", 2),
         gat_dropout=gat_cfg.get("dropout", model_cfg["transformer"].get("dropout", 0.1)),
         use_kinematic_guidance=use_kinematic_guidance,
+        edge_prior=edge_prior,
+    )
+
+
+def build_transformer_only_from_config(cfg: dict, input_dim: int) -> TransformerOnlyModel:
+    """Build the Phase 1 pretraining model (no GAT) from a config dictionary."""
+    model_cfg = cfg.get("model", {})
+    transformer_cfg = model_cfg.get("transformer", {})
+    return TransformerOnlyModel(
+        transformer_cfg=transformer_cfg,
+        input_dim=input_dim,
+        node_dim=model_cfg.get("gat", {}).get("node_dim", 64),
+        out_channels=model_cfg.get("decoder", {}).get("out_channels", 5),
     )
 
 

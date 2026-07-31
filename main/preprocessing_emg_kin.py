@@ -40,6 +40,15 @@ def rectify(emg: np.ndarray) -> np.ndarray:
     return np.abs(emg).astype(np.float32)
 
 
+def tkeo(emg: np.ndarray) -> np.ndarray:
+    """Teager-Kaiser Energy Operator (TKEO)."""
+    out = np.zeros_like(emg)
+    out[1:-1] = emg[1:-1]**2 - emg[:-2] * emg[2:]
+    out[0] = out[1]
+    out[-1] = out[-2]
+    return out.astype(np.float32)
+
+
 def lowpass_envelope(
     emg: np.ndarray,
     fs: float,
@@ -72,10 +81,11 @@ def preprocess_emg(
     filter_order: int = 4,
     lp_cutoff: float = 10.0,
     downsample_factor: int = 8,
+    use_tkeo: bool = True,
 ) -> np.ndarray:
     """Apply EMG envelope extraction pipeline to one continuous HS series.
 
-    Steps: BP 30–300 Hz → |s(t)| → LP 10 Hz → decimate ×8
+    Steps: BP 30–300 Hz → TKEO (or |s(t)|) → LP 10 Hz → decimate ×8
 
     Z-score normalisation is NOT applied here because it requires statistics
     computed across the whole training set.
@@ -83,12 +93,18 @@ def preprocess_emg(
     Args:
         emg:              ndarray (T, 5) float32 at `fs` Hz from load_hs()
         fs:               EMG sampling rate (default 4000 Hz)
+        use_tkeo:         whether to use TKEO instead of rectification
 
     Returns:
         ndarray (T // downsample_factor, 5) float32 at 500 Hz
     """
     emg = bandpass_emg(emg, fs, bp_low, bp_high, filter_order)
-    emg = rectify(emg)
+    if use_tkeo:
+        emg = tkeo(emg)
+        # Rectify AND take square root to map energy back to amplitude scale
+        emg = np.sqrt(np.abs(emg))
+    else:
+        emg = rectify(emg)
     emg = lowpass_envelope(emg, fs, lp_cutoff, filter_order)
     emg = downsample_emg(emg, downsample_factor)
     return emg
@@ -104,6 +120,7 @@ def preprocess_emg_from_config(emg: np.ndarray, fs: float, cfg: dict) -> np.ndar
         filter_order=cfg.get("filter_order", 4),
         lp_cutoff=cfg.get("lp_cutoff", 10.0),
         downsample_factor=cfg.get("downsample_factor", 8),
+        use_tkeo=cfg.get("use_tkeo", True),
     )
 
 
@@ -311,3 +328,64 @@ def preprocess_kinematics_from_config(
         bw_cutoff=cfg.get("bw_cutoff", 20.0),
         bw_order=cfg.get("bw_order", 4),
     )
+
+
+# ============================================================================
+# Edge-prior helper for graph attention
+# ============================================================================
+
+def compute_muscle_edge_prior(emg_arrays: list[np.ndarray]) -> np.ndarray:
+    """Compute a 5×5 symmetrized Pearson correlation matrix from training EMG envelopes.
+
+    Use this to initialise the learnable edge_bias in MuscleGATLayer /
+    KinematicGuidedMuscleGATEncoder with a data-informed prior: pairs of muscles
+    that co-activate strongly will start with higher edge weights.
+
+    The matrix is:
+      - Pearson correlation across all timesteps in the concatenated training set
+      - Symmetrized: C = (C + C^T) / 2   (should already be symmetric, but enforced)
+      - Diagonal clamped to 1.0
+      - Off-diagonal clipped to [0, 1]   (negative correlations become 0 — they
+        indicate inhibitory pairs; the model can learn negative edge biases itself)
+
+    Args:
+        emg_arrays: List of (T_i, 5) float32 EMG envelope arrays (training split).
+                    These should be the preprocessed, *unnormalised* or normalised
+                    envelopes — correlations are scale-invariant.
+
+    Returns:
+        (5, 5) float32 ndarray  in [0, 1], symmetric, diagonal ≈ 1.
+
+    Usage (after fitting EMGNormalizer on training data):
+        from main.preprocessing_emg_kin import compute_muscle_edge_prior
+        import torch
+
+        prior_np = compute_muscle_edge_prior(train_emgs)   # train_emgs: list of (T,5)
+        edge_prior = torch.from_numpy(prior_np)
+
+        model = build_kg_gt_from_config(cfg, input_dim=32, kin_dim=12, edge_prior=edge_prior)
+    """
+    if not emg_arrays:
+        raise ValueError("emg_arrays must be a non-empty list of (T, 5) arrays.")
+
+    # Concatenate all training EMG along the time axis
+    concat = np.concatenate(emg_arrays, axis=0)  # (T_total, 5)
+    if concat.ndim != 2 or concat.shape[1] != 5:
+        raise ValueError(
+            f"Expected each array to have shape (T, 5), got concat shape {concat.shape}"
+        )
+
+    # Pearson correlation matrix via np.corrcoef (operates on rows, so transpose)
+    corr = np.corrcoef(concat.T).astype(np.float32)  # (5, 5)
+
+    # Symmetrize (numerical safety)
+    corr = (corr + corr.T) / 2.0
+
+    # Set diagonal to 1 (self-edges = full self-attention)
+    np.fill_diagonal(corr, 1.0)
+
+    # Clip off-diagonal to [0, 1]: negative correlations → 0
+    # The model can learn negative edge biases from data; the prior is a floor.
+    corr = np.clip(corr, 0.0, 1.0)
+
+    return corr
