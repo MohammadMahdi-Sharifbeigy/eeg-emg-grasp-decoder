@@ -34,8 +34,13 @@ def get_dynamic_fig_dir(cfg):
     config_str = f"ep{max_epochs}_st{stride}_lr{lr}_bs{bs}"
 
     # Per-subject folder: results/P1/main/<config_str>/
-    participants = cfg["data"].get("participants", [])
-    subject_str  = f"P{participants[0]}" if participants else "unknown"
+    p_val = cfg["data"].get("participant", cfg["data"].get("participants", []))
+    if isinstance(p_val, (list, tuple)) and len(p_val) > 0:
+        p_id = p_val[0]
+    else:
+        p_id = p_val
+    p_id = str(p_id).replace("P", "")
+    subject_str = f"P{p_id}" if p_id != "" and p_id != [] else "unknown"
 
     base_dir = Path("results") / subject_str / "main" / config_str
 

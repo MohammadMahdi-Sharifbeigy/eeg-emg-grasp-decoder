@@ -32,67 +32,56 @@ from torch import Tensor
 # ============================================================================
 
 class PeakWeightedMSELoss(nn.Module):
-    """MSE with higher penalty on EMG burst peaks (activated timesteps).
+    """MSE with higher penalty on EMG burst peaks (activated timesteps) AND Asymmetry.
 
     MOTIVATION:
-        Raw EMG envelopes spend most of their time near zero (muscle at rest)
-        with short, high-amplitude activation bursts. Standard MSE over a
-        500-sample window is dominated by baseline samples, so the model learns
-        to predict "near zero always" and misses the biologically relevant peaks.
-
-        By scaling each sample's squared error by a weight proportional to its
-        EMG amplitude, we force the model to spend its capacity on the bursts
-        that actually encode motor commands.
+        1. Peak Weighting: We scale each sample's squared error by a weight proportional 
+           to its amplitude. This forces the model to spend capacity on bursts.
+        2. Asymmetry: It is much worse to completely miss a peak (under-predict) than 
+           to slightly overshoot it (over-predict).
 
     WEIGHT FORMULA:
         w_t = 1 + alpha * (target_shifted / (max_batch + eps))
-        where target_shifted = target - target.min() (to handle z-scored negative values)
-
-        alpha = 0    -> standard MSE (all timesteps equal weight)
-        alpha = 3.0  -> activated timesteps are up to 4x more important than silence
+        asym_w = asymmetry if (target > pred) else 1.0
+        
+        loss = w_t * asym_w * (pred - target)^2
 
     Args:
-        alpha: Peak-emphasis factor. Typical range 1.0-5.0. Default 3.0 is a
-               good starting point for EMG envelopes; increase if peaks are still
-               missed, decrease if baseline becomes too noisy.
+        alpha: Peak-emphasis factor. Typical range 1.0-5.0. 
+        asymmetry: Penalty multiplier for under-predicting the signal. Default 2.0.
     """
 
-    def __init__(self, alpha: float = 3.0) -> None:
+    def __init__(self, alpha: float = 3.0, asymmetry: float = 2.0) -> None:
         super().__init__()
         if alpha < 0:
             raise ValueError(f"alpha must be >= 0, got {alpha}")
         self.alpha = alpha
+        self.asymmetry = asymmetry
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """
         Args:
             pred:   (B, T, C) predicted envelope
             target: (B, T, C) ground truth envelope (raw or z-scored)
-
-        Returns:
-            Scalar weighted MSE loss
         """
-        if self.alpha == 0.0:
+        if self.alpha == 0.0 and self.asymmetry == 1.0:
             return F.mse_loss(pred, target)
 
-        # ── SHIFT FOR Z-SCORED TARGETS ────────────────────────────────────
-        # If target is z-scored, it has negative values during muscle rest.
-        # This would cause (target / max) to be negative, making w_t negative,
-        # which leads to a negative loss and model divergence!
-        # Fix: Shift the target so its minimum is 0 before computing weights.
-        
+        # ── 1. PEAK WEIGHTING ──────────────────────────────────────────────
         reduce_dims = tuple(range(target.dim() - 1))          # all dims except last (C)
-        t_min = target.amin(dim=reduce_dims, keepdim=True)    # (1, ..., 1, C)
+        t_min = target.amin(dim=reduce_dims, keepdim=True)    
         target_shifted = target - t_min                       # Strictly non-negative
 
-        # max peak per channel in the batch
         max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
-        
-        # w_t ∈ [1.0, 1.0 + alpha]
         w_t = 1.0 + self.alpha * (target_shifted / (max_batch + 1e-8))
 
-        mse_raw = F.mse_loss(pred, target, reduction="none")  # same shape as target
-        loss = (w_t * mse_raw).mean()
+        # ── 2. ASYMMETRY ───────────────────────────────────────────────────
+        # Penalize under-estimations (where the model missed the burst)
+        under_prediction = (target > pred).float()
+        asym_w = 1.0 + (self.asymmetry - 1.0) * under_prediction
+
+        mse_raw = F.mse_loss(pred, target, reduction="none")  
+        loss = (w_t * asym_w * mse_raw).mean()
 
         return loss
 # ============================================================================
@@ -247,12 +236,15 @@ class CombinedEMGLoss(nn.Module):
         lambda_reg:      float = 0.01,
         lambda_l1:       float = 1e-4,
         use_peak_weight: bool  = True,
+        asymmetry:       float = 2.0,
+        rest_threshold:  float = 0.05,
     ) -> None:
         super().__init__()
-        self.recon     = PeakWeightedMSELoss(alpha=peak_alpha) if use_peak_weight else nn.MSELoss()
+        self.recon     = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry) if use_peak_weight else nn.MSELoss()
         self.reg       = EdgePriorKLDivLoss(lambda_reg=lambda_reg)
         self.lambda_reg = lambda_reg
         self.lambda_l1  = lambda_l1
+        self.rest_threshold = rest_threshold
 
     def forward(
         self,
@@ -272,9 +264,22 @@ class CombinedEMGLoss(nn.Module):
         """
         loss = self.recon(pred, target)
 
-        # L1 Sparsity to force exact zeros during muscle rest
+        # L1 Sparsity ONLY during muscle rest (Thresholded Sparsity)
         if self.lambda_l1 > 0.0:
-            loss = loss + self.lambda_l1 * torch.mean(torch.abs(pred))
+            # Shift target to find the true baseline
+            reduce_dims = tuple(range(target.dim() - 1))
+            t_min = target.amin(dim=reduce_dims, keepdim=True)
+            target_shifted = target - t_min
+
+            # Find the max peak to define the threshold (e.g. 5% of max peak)
+            max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
+            
+            # Mask: 1.0 where muscle is resting, 0.0 during bursts
+            resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-8)).float()
+            
+            # Apply L1 penalty ONLY to the resting regions! 
+            # We push the prediction towards the true resting baseline (t_min), not zero.
+            loss = loss + self.lambda_l1 * torch.mean(torch.abs(pred - t_min) * resting_mask)
 
         # KL regularization is computed only when the model is explicitly provided
         # and lambda_reg > 0. This preserves strict backward compatibility.
@@ -315,4 +320,6 @@ def build_loss_from_config(cfg: dict) -> CombinedEMGLoss:
         lambda_reg=loss_cfg.get("lambda_reg", 0.01),
         lambda_l1=loss_cfg.get("lambda_l1", 1e-4),
         use_peak_weight=loss_cfg.get("use_peak_weight", True),
+        asymmetry=loss_cfg.get("asymmetry", 2.0),
+        rest_threshold=loss_cfg.get("rest_threshold", 0.05),
     )
