@@ -11,6 +11,7 @@ Features:
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
 import time
@@ -177,6 +178,15 @@ def _run_epoch(
     amp_device = "cuda" if device.type == "cuda" else "cpu"
 
     total, n = 0.0, 0
+
+    # Detect once — outside the hot batch loop — whether the loss function
+    # supports a 'model' kwarg (e.g. CombinedEMGLoss with KL regularization).
+    # Backward-compatible: legacy loss_fn(pred, target) calls are unaffected.
+    try:
+        _loss_accepts_model = "model" in inspect.signature(loss_fn.forward).parameters
+    except (ValueError, TypeError):
+        _loss_accepts_model = False
+
     if train:
         optimizer.zero_grad(set_to_none=True)
 
@@ -196,7 +206,13 @@ def _run_epoch(
         with torch.set_grad_enabled(train):
             with torch.amp.autocast(device_type=amp_device, enabled=use_amp):
                 pred = _forward_model(model, model_inputs)
-                loss = loss_fn(pred, y)
+                # Pass model to loss only during training so the KL edge-prior
+                # regularization is active. Validation loss is kept as pure
+                # reconstruction for fair cross-epoch comparison.
+                if _loss_accepts_model and train:
+                    loss = loss_fn(pred, y, model=model)
+                else:
+                    loss = loss_fn(pred, y)
 
             if train:
                 loss_for_backward = loss / gradient_accumulation_steps
@@ -501,23 +517,56 @@ from dataclasses import dataclass as _dataclass
 
 @_dataclass
 class EvalMetrics:
-    """Per-channel and mean regression metrics."""
+    """Per-channel regression metrics for EMG envelope prediction.
 
-    rmse: np.ndarray    # (C,)
-    mae: np.ndarray     # (C,)
-    pearson: np.ndarray # (C,)
+    Biomechanics publication standard (2023–2024 literature):
+      rmse    : Root Mean Square Error — magnitude of prediction error.
+      nrmse   : Normalized RMSE (% of signal range) — enables cross-channel
+                and cross-subject comparison regardless of amplitude scale.
+      mae     : Mean Absolute Error — robust to individual outlier samples.
+      pearson : Pearson r — waveform shape / temporal alignment similarity.
+      r2      : Coefficient of Determination (R²) — ML convention.
+      vaf     : Variance Accounted For (%) — motor control convention
+                (Winter, 1990). VAF > 80 % is generally considered acceptable.
+                NOTE: differs from R² in using signal variance (not mean-corrected),
+                making it sensitive to both shape and mean offset errors.
+    """
+
+    rmse:    np.ndarray   # (C,)  RMSE in signal units
+    mae:     np.ndarray   # (C,)  Mean Absolute Error
+    pearson: np.ndarray   # (C,)  Pearson correlation coefficient (r)
+    r2:      np.ndarray   # (C,)  Coefficient of Determination (R²)
+    vaf:     np.ndarray   # (C,)  Variance Accounted For (%)
+    nrmse:   np.ndarray   # (C,)  Normalized RMSE (% of signal range)
     channel_names: list[str]
 
     def as_table(self) -> str:
-        """Format metrics as an aligned text table."""
-        lines = [f'{"channel":20s} {"RMSE":>8s} {"MAE":>8s} {"Pearson":>8s}']
+        """Format all 6 metrics as an aligned text table for publication reporting."""
+        header = (
+            f'{"Channel":18s} {"RMSE":>8s} {"nRMSE%":>8s} {"MAE":>8s}'
+            f' {"Pearson r":>10s} {"R^2":>8s} {"VAF%":>8s}'
+        )
+        sep = "-" * len(header)
+        lines = [header, sep]
         for c, name in enumerate(self.channel_names):
             lines.append(
-                f"{name:20s} {self.rmse[c]:8.3f} {self.mae[c]:8.3f} {self.pearson[c]:8.3f}"
+                f"{name:18s}"
+                f" {self.rmse[c]:8.4f}"
+                f" {self.nrmse[c]:8.2f}"
+                f" {self.mae[c]:8.4f}"
+                f" {self.pearson[c]:10.4f}"
+                f" {self.r2[c]:8.4f}"
+                f" {self.vaf[c]:8.2f}"
             )
+        lines.append(sep)
         lines.append(
-            f'{"MEAN":20s} {self.rmse.mean():8.3f} '
-            f"{self.mae.mean():8.3f} {self.pearson.mean():8.3f}"
+            f"{' MEAN':18s}"
+            f" {self.rmse.mean():8.4f}"
+            f" {self.nrmse.mean():8.2f}"
+            f" {self.mae.mean():8.4f}"
+            f" {self.pearson.mean():10.4f}"
+            f" {self.r2.mean():8.4f}"
+            f" {self.vaf.mean():8.2f}"
         )
         return "\n".join(lines)
 
@@ -554,11 +603,20 @@ def collect_predictions(
 
 
 def compute_metrics(
-    pred: np.ndarray,
-    target: np.ndarray,
+    pred:          np.ndarray,
+    target:        np.ndarray,
     channel_names: list[str] | None = None,
 ) -> EvalMetrics:
-    """Per-channel RMSE, MAE, and Pearson r -- fully vectorised."""
+    """Per-channel RMSE, nRMSE, MAE, Pearson r, R\u00b2, and VAF — fully vectorised.
+
+    Args:
+        pred:          (N_samples, C) predicted EMG envelope.
+        target:        (N_samples, C) ground-truth EMG envelope.
+        channel_names: Optional list of C channel names for the metrics table.
+
+    Returns:
+        EvalMetrics dataclass with per-channel and mean values for all 6 metrics.
+    """
     pred   = pred.astype(np.float64)
     target = target.astype(np.float64)
     n_ch   = pred.shape[1]
@@ -566,18 +624,52 @@ def compute_metrics(
     if channel_names is None:
         channel_names = [f"ch{c}" for c in range(n_ch)]
 
-    rmse = np.sqrt(((pred - target) ** 2).mean(0))
-    mae  = np.abs(pred - target).mean(0)
+    # ── RMSE ─────────────────────────────────────────────────────────────────────
+    rmse = np.sqrt(((pred - target) ** 2).mean(0))                          # (C,)
 
-    p_mu = pred.mean(0, keepdims=True)
-    t_mu = target.mean(0, keepdims=True)
-    p_c  = pred   - p_mu
-    t_c  = target - t_mu
-    num  = (p_c * t_c).mean(0)
-    denom = np.sqrt((p_c**2).mean(0)) * np.sqrt((t_c**2).mean(0))
-    pearson = np.where(denom > 1e-12, num / denom, 0.0)
+    # ── nRMSE (% of signal range) ─────────────────────────────────────────────────
+    # Normalised RMSE enables cross-channel / cross-subject comparison.
+    target_range = target.max(0) - target.min(0)                            # (C,)
+    nrmse = np.where(target_range > 1e-12, rmse / target_range * 100.0, 0.0)
 
-    return EvalMetrics(rmse=rmse, mae=mae, pearson=pearson, channel_names=channel_names)
+    # ── MAE ─────────────────────────────────────────────────────────────────────
+    mae = np.abs(pred - target).mean(0)                                     # (C,)
+
+    # ── Pearson r ─────────────────────────────────────────────────────────────
+    p_mu  = pred.mean(0, keepdims=True)
+    t_mu  = target.mean(0, keepdims=True)
+    p_c   = pred   - p_mu
+    t_c   = target - t_mu
+    num   = (p_c * t_c).mean(0)
+    denom = np.sqrt((p_c ** 2).mean(0)) * np.sqrt((t_c ** 2).mean(0))
+    pearson = np.where(denom > 1e-12, num / denom, 0.0)                    # (C,)
+
+    # ── R² (Coefficient of Determination) ──────────────────────────────────────
+    # R² = 1 - SS_residual / SS_total  (ML / regression convention)
+    # SS_total uses the mean-corrected target (same denominator as Pearson).
+    ss_res = ((pred - target) ** 2).sum(0)                                  # (C,)
+    ss_tot = (t_c ** 2).sum(0)                                              # (C,)
+    r2 = np.where(ss_tot > 1e-12, 1.0 - ss_res / ss_tot, 0.0)             # (C,)
+
+    # ── VAF (Variance Accounted For) ───────────────────────────────────────────
+    # Motor control / EMG literature convention (Winter, 1990):
+    #   VAF = (1 − var(pred − target) / var(target)) × 100 %
+    # Uses raw signal variance (NOT mean-corrected) — stricter than R² because
+    # it penalises both shape errors AND mean-offset errors simultaneously.
+    # VAF > 80 % is the accepted biomechanics publication threshold.
+    err_var = np.var(pred - target, axis=0, ddof=0)                         # (C,)
+    tgt_var = np.var(target,        axis=0, ddof=0)                         # (C,)
+    vaf = np.where(tgt_var > 1e-12, (1.0 - err_var / tgt_var) * 100.0, 0.0)
+
+    return EvalMetrics(
+        rmse=rmse,
+        nrmse=nrmse,
+        mae=mae,
+        pearson=pearson,
+        r2=r2,
+        vaf=vaf,
+        channel_names=channel_names,
+    )
 
 
 def prepare_batch_factory(device: torch.device, drop_kin_indices=None):

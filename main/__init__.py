@@ -11,7 +11,8 @@ Public API:
     dataset:               WAYEEGDataset
     model:                 KGGTModel, build_kg_gt_from_config, CNN1dAligner,
                            TransformerOnlyModel, build_transformer_only_from_config
-    losses:                CombinedEMGLoss, build_loss_from_config
+    losses:                CombinedEMGLoss, PeakWeightedMSELoss, EdgePriorKLDivLoss,
+                           build_loss_from_config
     training:              train_model, TrainConfig, TrainResult,
                            collect_predictions, compute_metrics,
                            EvalMetrics, prepare_batch_factory,
@@ -51,6 +52,8 @@ from .model import (
 )
 from .losses import (
     CombinedEMGLoss,
+    PeakWeightedMSELoss,
+    EdgePriorKLDivLoss,
     build_loss_from_config,
 )
 from .training import (
@@ -80,7 +83,11 @@ from .plots import(
     plot_residual_diagnostics,
     plot_fused_pca,
     plot_gate_vs_emg_power,
-    plot_emg_envelope_overlay
+    plot_emg_envelope_overlay,
+    # Interpretability visualizations
+    plot_interpretability_triptych,
+    plot_muscle_synergy_matrix,
+    plot_kin_edge_linear_weights,
 )
 
 __all__ = [
@@ -100,17 +107,22 @@ __all__ = [
     "TransformerEncoder", "build_transformer_from_config",
     "MuscleGATEncoder", "KinematicGuidedMuscleGATEncoder",
     "SinusoidalPositionalEncoding",
-    # losses
-    "CombinedEMGLoss", "build_loss_from_config", "SoftDTWLoss", "soft_dtw",
+    # losses (SoftDTWLoss / soft_dtw removed — hard-removed from codebase)
+    "CombinedEMGLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
+    "build_loss_from_config",
     # training
     "train_model", "TrainConfig", "TrainResult", "EvalMetrics",
     "collect_predictions", "compute_metrics", "prepare_batch_factory",
     "save_checkpoint", "load_checkpoint", "print_gpu_info",
-    # plots
-    "get_dynamic_fig_dir", "save_fig","plot_multichannel_trace",
+    # plots — core
+    "get_dynamic_fig_dir", "save_fig", "plot_multichannel_trace",
     "plot_signal_heatmap", "plot_preprocessing_comparison",
     "plot_kinematic_features", "plot_training_history",
     "plot_prediction_overlay", "plot_gate_heatmap",
     "plot_attention_maps", "plot_residual_diagnostics",
-    "plot_fused_pca","plot_gate_vs_emg_power", "plot_emg_envelope_overlay"
+    "plot_fused_pca", "plot_gate_vs_emg_power", "plot_emg_envelope_overlay",
+    # plots — interpretability
+    "plot_interpretability_triptych",
+    "plot_muscle_synergy_matrix",
+    "plot_kin_edge_linear_weights",
 ]

@@ -345,3 +345,405 @@ def plot_emg_envelope_overlay(raw_emg, env_emg, fs_raw=4000, fs_env=500, channel
     fig.tight_layout()
     save_fig(fig, f"emg_overlay_ch{channel_idx}", cfg)
     return fig
+
+
+# ============================================================================
+# Interpretability Visualizations
+# ============================================================================
+
+def plot_interpretability_triptych(
+    pred:              np.ndarray,
+    target:            np.ndarray,
+    eeg_attn:          np.ndarray,
+    kin_edge_bias:     np.ndarray,
+    muscle_names:      list[str],
+    kin_feature_names: list[str] | None = None,
+    fs:                float = 500.0,
+    cfg:               dict | None = None,
+    figsize:           tuple = (15, 13),
+) -> plt.Figure:
+    """Publication-quality 3-panel interpretability 'money plot' for a single inference window.
+
+    Panels (top → bottom):
+      1. Actual vs Predicted EMG Envelope — all muscle channels overlaid with per-channel
+         Pearson r and RMSE annotations and error-fill shading.
+      2. EEG Temporal Attention Heatmap — (H × T) matrix showing which EEG timeframes
+         each attention head focuses on, averaged over query positions.
+      3. Dynamic Kinematic Edge Bias — 10 time-series lines for the upper-triangle muscle
+         pairs, showing how kinematic state modulates the muscle graph over the window.
+      All panels share the same time axis for direct temporal alignment.
+
+    Args:
+        pred:              (T, C) predicted EMG envelope.
+        target:            (T, C) ground-truth EMG envelope.
+        eeg_attn:          (H, T, T) EEG self-attention weights from the last encoder layer.
+                           Obtain via: model.encoder.layers[-1].mhsa.last_attn_weights[0]
+        kin_edge_bias:     (T, H, N, N) per-timestep kinematic edge bias (dynamic component).
+                           Obtain via: model.gat.last_kin_edge_bias[0]
+        muscle_names:      List of C muscle channel names, e.g. ['FDI', 'APB', 'ADM', 'ECR', 'FCR'].
+        kin_feature_names: Optional list of kin_dim feature names for tooltips/legends.
+        fs:                Sampling rate in Hz (for time axis). Default 500.
+        cfg:               Optional config dict passed to save_fig().
+        figsize:           (width, height) in inches.
+
+    Returns:
+        matplotlib Figure. Call plt.show() or fig.savefig(...) afterwards.
+    """
+    import matplotlib.gridspec as gridspec
+    from scipy.stats import pearsonr as _pearsonr
+
+    pred   = np.asarray(pred,   dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    T, n_ch = pred.shape
+    time = np.arange(T) / fs   # seconds
+
+    # ── EEG attention processing ───────────────────────────────────────────────
+    # eeg_attn: (H, T_q, T_k). Mean over query positions → (H, T) "key received".
+    eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)   # (H, T, T)
+    H_attn    = eeg_attn.shape[0]
+    key_attn  = eeg_attn.mean(axis=1)                     # (H, T) key attention density
+
+    # Min-max normalise per head to [0, 1] for a clean, comparable heatmap.
+    attn_min = key_attn.min(axis=1, keepdims=True)
+    attn_max = key_attn.max(axis=1, keepdims=True)
+    key_norm  = (key_attn - attn_min) / (attn_max - attn_min + 1e-8)   # (H, T)
+
+    # ── Kinematic edge bias processing ────────────────────────────────────────
+    # kin_edge_bias: (T, H, N, N). Mean over H → (T, N, N).
+    kin_edge_bias = np.asarray(kin_edge_bias, dtype=np.float64)
+    n_muscles  = kin_edge_bias.shape[-1]
+    edge_mean  = kin_edge_bias.mean(axis=1)   # (T, N, N) — mean over H
+
+    # Upper-triangle muscle pairs (10 unique for N=5).
+    pairs      = [(i, j) for i in range(n_muscles) for j in range(i + 1, n_muscles)]
+    pair_labels = [f"{muscle_names[i]}\u2013{muscle_names[j]}" for i, j in pairs]
+    pair_data   = np.stack([edge_mean[:, i, j] for i, j in pairs], axis=1)   # (T, n_pairs)
+    n_pairs     = len(pairs)
+
+    # Peak EMG activation time (mean over channels) — used for a reference marker.
+    peak_t = float(target.argmax(axis=0).mean()) / fs
+
+    # ── Color palette ─────────────────────────────────────────────────────────
+    EMG_ACTUAL    = "#1a1a2e"      # near-black
+    EMG_PRED      = "#e94040"      # vivid red
+    EMG_FILL      = "#e94040"
+    PEAK_MARKER   = "#00b4d8"      # cyan — peak reference line
+    EDGE_CMAP     = plt.cm.tab10
+    edge_colors   = [EDGE_CMAP(k / max(n_pairs - 1, 1)) for k in range(n_pairs)]
+
+    # ── Figure / GridSpec ─────────────────────────────────────────────────────
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    outer = gridspec.GridSpec(
+        3, 1, figure=fig,
+        height_ratios=[n_ch * 1.1, 1.8, 2.8],
+        hspace=0.42,
+    )
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 1 — EMG Envelopes
+    # ─────────────────────────────────────────────────────────────────────────
+    inner_emg = gridspec.GridSpecFromSubplotSpec(
+        n_ch, 1, subplot_spec=outer[0], hspace=0.06,
+    )
+    emg_axes = [fig.add_subplot(inner_emg[c]) for c in range(n_ch)]
+
+    for c, ax in enumerate(emg_axes):
+        # Actual and predicted traces.
+        ax.plot(time, target[:, c], color=EMG_ACTUAL, lw=1.6, zorder=3, label="Actual")
+        ax.plot(time, pred[:, c],   color=EMG_PRED,   lw=1.0, ls="--", zorder=2,
+                alpha=0.90, label="Predicted")
+
+        # Error fill — highlights discrepancy regions.
+        ax.fill_between(time, target[:, c], pred[:, c],
+                        color=EMG_FILL, alpha=0.12, zorder=1)
+
+        # Peak reference marker.
+        ax.axvline(peak_t, color=PEAK_MARKER, lw=0.9, ls=":", alpha=0.55, zorder=4)
+
+        # Per-channel performance annotation.
+        try:
+            r_val, _ = _pearsonr(pred[:, c], target[:, c])
+        except Exception:
+            r_val = float("nan")
+        rmse_val = float(np.sqrt(np.mean((pred[:, c] - target[:, c]) ** 2)))
+        ax.text(
+            0.993, 0.86,
+            f"r = {r_val:.3f}  |  RMSE = {rmse_val:.4f}",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8,
+            color="#2d2d2d",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.82, ec="none"),
+        )
+
+        ch_label = muscle_names[c] if c < len(muscle_names) else f"ch{c}"
+        ax.set_ylabel(ch_label, fontsize=9, labelpad=4, rotation=0, ha="right", va="center")
+        ax.set_xlim(time[0], time[-1])
+        ax.tick_params(axis="x", labelbottom=(c == n_ch - 1), labelsize=8)
+        ax.tick_params(axis="y", labelsize=7)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+
+    emg_axes[0].legend(
+        loc="upper left", fontsize=8.5, framealpha=0.85, ncol=2,
+        borderpad=0.35, handlelength=1.6,
+    )
+    emg_axes[0].set_title(
+        "Panel 1 \u2014 EMG Envelope: Actual vs Predicted",
+        fontsize=11, fontweight="bold", pad=5,
+    )
+    emg_axes[-1].set_xlabel("Time (s)", fontsize=9)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 2 — EEG Temporal Attention Heatmap
+    # ─────────────────────────────────────────────────────────────────────────
+    ax_attn = fig.add_subplot(outer[1])
+
+    im = ax_attn.imshow(
+        key_norm,
+        aspect="auto",
+        cmap="plasma",
+        interpolation="nearest",
+        extent=[time[0], time[-1], H_attn + 0.5, 0.5],
+        vmin=0.0, vmax=1.0,
+    )
+    # Peak marker on attention panel.
+    ax_attn.axvline(peak_t, color=PEAK_MARKER, lw=1.0, ls=":", alpha=0.80,
+                    label=f"Peak t={peak_t:.2f}s")
+
+    cbar = fig.colorbar(im, ax=ax_attn, pad=0.01, shrink=0.90, aspect=12)
+    cbar.set_label("Attention\n(norm.)", fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
+
+    ax_attn.set_yticks(range(1, H_attn + 1))
+    ax_attn.set_yticklabels([f"H{h}" for h in range(1, H_attn + 1)], fontsize=8.5)
+    ax_attn.set_xlabel("Time (s)", fontsize=9)
+    ax_attn.set_ylabel("Attn Head", fontsize=9)
+    ax_attn.set_xlim(time[0], time[-1])
+    ax_attn.tick_params(axis="x", labelsize=8)
+    ax_attn.set_title(
+        "Panel 2 \u2014 EEG Temporal Attention (per head \u00d7 key timestep, mean over query positions)",
+        fontsize=11, fontweight="bold", pad=5,
+    )
+    ax_attn.legend(loc="upper left", fontsize=8, framealpha=0.7, borderpad=0.3)
+
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 3 — Dynamic Kinematic Edge Bias
+    # ─────────────────────────────────────────────────────────────────────────
+    ax_edge = fig.add_subplot(outer[2])
+
+    for k, (label, color) in enumerate(zip(pair_labels, edge_colors)):
+        ax_edge.plot(time, pair_data[:, k], lw=1.2, color=color,
+                     label=label, alpha=0.88)
+
+    ax_edge.axhline(0.0, color="#888888", lw=0.7, ls=":", alpha=0.7)
+    ax_edge.axvline(peak_t, color=PEAK_MARKER, lw=0.9, ls=":", alpha=0.55)
+
+    ax_edge.set_xlabel("Time (s)", fontsize=9)
+    ax_edge.set_ylabel("Edge Bias\n(kinematic component)", fontsize=9)
+    ax_edge.set_title(
+        "Panel 3 \u2014 Dynamic Kinematic Edge Bias: muscle-graph modulation over window"
+        "\n(mean over attention heads; upper-triangle pairs only)",
+        fontsize=11, fontweight="bold", pad=5,
+    )
+    ax_edge.legend(
+        loc="upper right", fontsize=7.5, ncol=2,
+        framealpha=0.85, borderpad=0.35, handlelength=1.4,
+    )
+    ax_edge.set_xlim(time[0], time[-1])
+    for sp in ("top", "right"):
+        ax_edge.spines[sp].set_visible(False)
+    ax_edge.tick_params(labelsize=8)
+
+    # ── Global title ──────────────────────────────────────────────────────────
+    fig.suptitle(
+        "KG-GT Model \u2014 Interpretability Triptych (Single Inference Window)",
+        fontsize=13, fontweight="bold", y=1.010,
+    )
+    fig.tight_layout()
+    save_fig(fig, "interpretability_triptych", cfg)
+    return fig
+
+
+def plot_muscle_synergy_matrix(
+    attn_weights:  np.ndarray,
+    muscle_names:  list[str],
+    title:         str = "Learned Muscle Synergy\n(Mean GAT Attention over All Windows)",
+    figsize:       tuple = (7, 6),
+    cfg:           dict | None = None,
+) -> plt.Figure:
+    """Annotated heatmap of the mean GAT attention matrix — reveals muscle synergies.
+
+    The learned attention weights encode which muscle pairs co-activate.
+    Averaged over all timesteps and attention heads, the (N × N) matrix is
+    analogous to an NMF synergy matrix but derived end-to-end from the data.
+
+    Args:
+        attn_weights:  (B*T, H, N, N) GAT attention from model.gat.last_attn_weights.
+                       Concatenate across all test batches for a dataset-level view.
+        muscle_names:  List of N muscle names for axis labels.
+        title:         Figure title.
+        figsize:       (width, height) in inches.
+        cfg:           Optional config dict passed to save_fig().
+
+    Returns:
+        matplotlib Figure.
+    """
+    attn = np.asarray(attn_weights, dtype=np.float64)   # (B*T, H, N, N)
+    # Mean over all timesteps AND all heads → (N, N)
+    synergy = attn.mean(axis=(0, 1))
+    N = synergy.shape[0]
+    names = muscle_names[:N]
+
+    fig, ax = plt.subplots(figsize=figsize, facecolor="white")
+
+    mask_diag = np.zeros_like(synergy, dtype=bool)
+    np.fill_diagonal(mask_diag, False)   # keep diagonal
+
+    hm = sns.heatmap(
+        synergy,
+        ax=ax,
+        cmap="mako",
+        vmin=0.0,
+        vmax=synergy.max(),
+        annot=True,
+        fmt=".3f",
+        annot_kws={"size": 10.5, "weight": "semibold", "color": "white"},
+        linewidths=1.0,
+        linecolor="white",
+        xticklabels=names,
+        yticklabels=names,
+        cbar_kws={"label": "Mean Attention Weight", "shrink": 0.88},
+    )
+
+    # Highlight diagonal (self-connections) with a different annotation colour.
+    for i in range(N):
+        ax.add_patch(
+            plt.Rectangle((i, i), 1, 1, fill=False,
+                           edgecolor="#FFD700", lw=2.0, zorder=5)
+        )
+
+    ax.set_title(title, fontsize=12, fontweight="bold", pad=10)
+    ax.set_xlabel("Key Muscle (source)", fontsize=10)
+    ax.set_ylabel("Query Muscle (target)", fontsize=10)
+    ax.tick_params(axis="both", labelsize=10.5)
+    ax.set_xticklabels(ax.get_xticklabels(), rotation=30, ha="right")
+    ax.set_yticklabels(ax.get_yticklabels(), rotation=0)
+
+    # Footnote with interpretation guidance.
+    fig.text(
+        0.5, -0.01,
+        "Off-diagonal high values = stable co-activation (synergy)."
+        "  Gold border = self-loop.",
+        ha="center", fontsize=8.5, color="#555555", style="italic",
+    )
+
+    fig.tight_layout()
+    save_fig(fig, "muscle_synergy_matrix", cfg)
+    return fig
+
+
+def plot_kin_edge_linear_weights(
+    weight_matrix:     np.ndarray,
+    muscle_names:      list[str],
+    kin_feature_names: list[str] | None = None,
+    num_heads:         int = 4,
+    n_nodes:           int = 5,
+    figsize:           tuple = (15, 8),
+    cfg:               dict | None = None,
+) -> plt.Figure:
+    """Heatmap of the transparent kin_edge_linear weight matrix.
+
+    Directly reveals which kinematic features drive which muscle-pair edge
+    connections in each attention head — the primary neurophysiological
+    interpretation output of the transparent linear mapping (Q1 design choice).
+
+    W \u2208 R^{H\u00b7N\u00b2 \u00d7 kin_dim}. Entry W[h*N\u00b2 + i*N + j, k] is the direct linear
+    contribution of kinematic feature k to the i\u2192j edge in head h.
+
+    Displayed as: one (N\u00b2 \u00d7 kin_dim) diverging heatmap per head + a mean-head
+    panel. Horizontal dashed lines separate source muscle groups (every N rows).
+
+    Args:
+        weight_matrix:     (H*N*N, kin_dim) numpy array — e.g.
+                           model.gat.kin_edge_linear.weight.detach().cpu().numpy()
+        muscle_names:      List of N muscle names.
+        kin_feature_names: List of kin_dim kinematic feature names.
+                           Default: ['k0', 'k1', ...].
+        num_heads:         Number of GAT attention heads H.
+        n_nodes:           Number of muscle nodes N.
+        figsize:           (width, height) in inches.
+        cfg:               Optional config dict passed to save_fig().
+
+    Returns:
+        matplotlib Figure (mean + H per-head subplots).
+    """
+    W    = np.asarray(weight_matrix, dtype=np.float64)   # (H*N\u00b2, kin_dim)
+    kin_dim = W.shape[1]
+    W_4d = W.reshape(num_heads, n_nodes, n_nodes, kin_dim)   # (H, N, N, kin_dim)
+
+    # Row labels: "Muscle_i \u2192 Muscle_j" for all N\u00b2 source-target combos.
+    row_labels = [
+        f"{muscle_names[i]}\u2192{muscle_names[j]}"
+        for i in range(n_nodes)
+        for j in range(n_nodes)
+    ]
+    col_labels = kin_feature_names or [f"k{k}" for k in range(kin_dim)]
+    # Truncate to 6 chars to avoid overlap on x-axis.
+    col_short  = [f[:7] for f in col_labels]
+
+    n_plots = num_heads + 1   # one per head + one mean
+    n_cols  = min(n_plots, 3)
+    n_rows  = (n_plots + n_cols - 1) // n_cols
+
+    fig, axes = plt.subplots(n_rows, n_cols, figsize=figsize, facecolor="white")
+    axes_flat = np.array(axes).flatten()
+
+    def _draw_panel(ax: plt.Axes, data_n2_k: np.ndarray, panel_title: str) -> None:
+        """data_n2_k: (N\u00b2, kin_dim)."""
+        vabs = max(np.abs(data_n2_k).max(), 1e-6)
+        sns.heatmap(
+            data_n2_k,
+            ax=ax,
+            cmap="RdBu_r",
+            center=0.0,
+            vmin=-vabs,
+            vmax=vabs,
+            annot=False,
+            xticklabels=col_short,
+            yticklabels=row_labels,
+            cbar_kws={"shrink": 0.85, "label": "Weight"},
+            linewidths=0.0,
+        )
+        ax.set_title(panel_title, fontsize=10, fontweight="bold", pad=4)
+        ax.set_xlabel("Kinematic Feature", fontsize=8, labelpad=3)
+        ax.set_ylabel("Muscle Edge (i\u2192j)", fontsize=8, labelpad=3)
+        ax.tick_params(axis="x", labelsize=7, rotation=55)
+        ax.tick_params(axis="y", labelsize=7, rotation=0)
+
+        # Horizontal dashed lines separating source-muscle groups (every N rows).
+        for boundary in range(n_nodes, n_nodes * n_nodes, n_nodes):
+            ax.axhline(boundary, color="#888888", lw=0.9, ls="--", alpha=0.55)
+
+    # Mean over heads.
+    W_mean = W_4d.mean(axis=0).reshape(n_nodes * n_nodes, kin_dim)
+    _draw_panel(axes_flat[0], W_mean, "Mean over All Heads")
+
+    # Per-head panels.
+    for h in range(num_heads):
+        W_h = W_4d[h].reshape(n_nodes * n_nodes, kin_dim)
+        _draw_panel(axes_flat[h + 1], W_h, f"Head {h + 1}")
+
+    # Hide surplus subplot axes.
+    for k in range(n_plots, len(axes_flat)):
+        axes_flat[k].set_visible(False)
+
+    fig.suptitle(
+        r"Kinematic $\rightarrow$ Muscle Edge Weights  "
+        r"($W_{h,\,i\to j,\,k}$: contribution of feature $k$ to edge $i\to j$ in head $h$)"
+        "\n\u25ba Red = positive bias (feature increases this edge)"
+        "   \u25ba Blue = negative bias (feature suppresses this edge)"
+        "\n\u25ba High |weight| on d_grip / F_L / F_G rows confirms task-relevant synergy routing",
+        fontsize=11, fontweight="bold",
+    )
+    fig.tight_layout(rect=[0, 0, 1, 0.90])
+    save_fig(fig, "kin_edge_linear_weights", cfg)
+    return fig
