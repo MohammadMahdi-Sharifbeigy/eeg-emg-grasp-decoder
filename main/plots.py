@@ -143,23 +143,54 @@ def plot_kinematic_features(kin, fs=500, feature_names=None, max_features=6, fig
     save_fig(fig, "kinematic_features", cfg)
     return fig
 
-def plot_training_history(history, figsize=(10, 4), cfg=None):
-    fig, ax = plt.subplots(figsize=figsize)
+def plot_training_history(history, stage="Training", figsize=(13, 5), cfg=None):
+    """Plot Train/Val Loss and Learning Rate curve over epochs side-by-side."""
     if isinstance(history, list):
         train_loss = [h.get('train_loss', 0) for h in history]
         val_loss = [h.get('val_loss', 0) for h in history]
+        lr_history = [h.get('lr', 0) for h in history]
     else:
         train_loss = history.get("train", [])
         val_loss = history.get("val", [])
-        
-    ax.plot(train_loss, label="Train loss", linewidth=1.8, color="blue")
-    ax.plot(val_loss, label="Val loss", linewidth=1.8, color="orange")
-    ax.set_xlabel("Epoch")
-    ax.set_ylabel("Loss")
-    ax.set_title("Training History")
-    ax.legend()
+        lr_history = history.get("lr", [])
+
+    has_lr = len(lr_history) > 0 and any(lr > 0 for lr in lr_history)
+    
+    if has_lr:
+        fig, (ax1, ax2) = plt.subplots(1, 2, figsize=figsize)
+    else:
+        fig, ax1 = plt.subplots(1, 1, figsize=(figsize[0] * 0.6, figsize[1]))
+        ax2 = None
+
+    epochs = range(1, len(train_loss) + 1)
+    
+    # Left panel: Loss
+    ax1.plot(epochs, train_loss, label="Train loss", linewidth=2.0, color="#2B5B84")
+    if len(val_loss) == len(train_loss):
+        ax1.plot(epochs, val_loss, label="Val loss", linewidth=2.0, color="#ED553B")
+    ax1.set_xlabel("Epoch", fontweight="bold")
+    ax1.set_ylabel("Loss", fontweight="bold")
+    ax1.set_title(f"{stage} â€” Loss History", fontsize=12, fontweight="bold", pad=10)
+    ax1.grid(True, linestyle="--", alpha=0.5)
+    ax1.legend(frameon=True, facecolor="white", framealpha=0.9)
+
+    # Right panel: Learning Rate
+    if ax2 is not None and has_lr:
+        lr_epochs = range(1, len(lr_history) + 1)
+        ax2.plot(lr_epochs, lr_history, linewidth=2.0, color="#3CAEA3", label="Learning Rate")
+        ax2.set_xlabel("Epoch", fontweight="bold")
+        ax2.set_ylabel("Learning Rate", fontweight="bold")
+        ax2.set_yscale("log")
+        ax2.set_title(f"{stage} â€” LR Schedule", fontsize=12, fontweight="bold", pad=10)
+        ax2.grid(True, linestyle="--", alpha=0.5)
+        ax2.legend(frameon=True, facecolor="white", framealpha=0.9)
+
     fig.tight_layout()
-    save_fig(fig, "training_history", cfg)
+    
+    # Generate clean filename based on stage name
+    safe_stage = "".join(c if c.isalnum() else "_" for c in str(stage)).strip("_").lower()
+    fname = f"history_{safe_stage}" if safe_stage else "training_history"
+    save_fig(fig, fname, cfg)
     return fig
 
 def plot_prediction_overlay(pred, target, fs=500, channel_names=None, channels=None, figsize=(12, 8), cfg=None):
@@ -370,12 +401,12 @@ def plot_interpretability_triptych(
 ) -> plt.Figure:
     """Publication-quality 3-panel interpretability 'money plot' for a single inference window.
 
-    Panels (top → bottom):
-      1. Actual vs Predicted EMG Envelope — all muscle channels overlaid with per-channel
+    Panels (top â†’ bottom):
+      1. Actual vs Predicted EMG Envelope â€” all muscle channels overlaid with per-channel
          Pearson r and RMSE annotations and error-fill shading.
-      2. EEG Temporal Attention Heatmap — (H × T) matrix showing which EEG timeframes
+      2. EEG Temporal Attention Heatmap â€” (H Ã— T) matrix showing which EEG timeframes
          each attention head focuses on, averaged over query positions.
-      3. Dynamic Kinematic Edge Bias — 10 time-series lines for the upper-triangle muscle
+      3. Dynamic Kinematic Edge Bias â€” 10 time-series lines for the upper-triangle muscle
          pairs, showing how kinematic state modulates the muscle graph over the window.
       All panels share the same time axis for direct temporal alignment.
 
@@ -403,8 +434,8 @@ def plot_interpretability_triptych(
     T, n_ch = pred.shape
     time = np.arange(T) / fs   # seconds
 
-    # ── EEG attention processing ───────────────────────────────────────────────
-    # eeg_attn: (H, T_q, T_k). Mean over query positions → (H, T) "key received".
+    # â”€â”€ EEG attention processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # eeg_attn: (H, T_q, T_k). Mean over query positions â†’ (H, T) "key received".
     eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)   # (H, T, T)
     H_attn    = eeg_attn.shape[0]
     key_attn  = eeg_attn.mean(axis=1)                     # (H, T) key attention density
@@ -414,11 +445,11 @@ def plot_interpretability_triptych(
     attn_max = key_attn.max(axis=1, keepdims=True)
     key_norm  = (key_attn - attn_min) / (attn_max - attn_min + 1e-8)   # (H, T)
 
-    # ── Kinematic edge bias processing ────────────────────────────────────────
-    # kin_edge_bias: (T, H, N, N). Mean over H → (T, N, N).
+    # â”€â”€ Kinematic edge bias processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # kin_edge_bias: (T, H, N, N). Mean over H â†’ (T, N, N).
     kin_edge_bias = np.asarray(kin_edge_bias, dtype=np.float64)
     n_muscles  = kin_edge_bias.shape[-1]
-    edge_mean  = kin_edge_bias.mean(axis=1)   # (T, N, N) — mean over H
+    edge_mean  = kin_edge_bias.mean(axis=1)   # (T, N, N) â€” mean over H
 
     # Upper-triangle muscle pairs (10 unique for N=5).
     pairs      = [(i, j) for i in range(n_muscles) for j in range(i + 1, n_muscles)]
@@ -426,18 +457,18 @@ def plot_interpretability_triptych(
     pair_data   = np.stack([edge_mean[:, i, j] for i, j in pairs], axis=1)   # (T, n_pairs)
     n_pairs     = len(pairs)
 
-    # Peak EMG activation time (mean over channels) — used for a reference marker.
+    # Peak EMG activation time (mean over channels) â€” used for a reference marker.
     peak_t = float(target.argmax(axis=0).mean()) / fs
 
-    # ── Color palette ─────────────────────────────────────────────────────────
+    # â”€â”€ Color palette â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     EMG_ACTUAL    = "#1a1a2e"      # near-black
     EMG_PRED      = "#e94040"      # vivid red
     EMG_FILL      = "#e94040"
-    PEAK_MARKER   = "#00b4d8"      # cyan — peak reference line
+    PEAK_MARKER   = "#00b4d8"      # cyan â€” peak reference line
     EDGE_CMAP     = plt.cm.tab10
     edge_colors   = [EDGE_CMAP(k / max(n_pairs - 1, 1)) for k in range(n_pairs)]
 
-    # ── Figure / GridSpec ─────────────────────────────────────────────────────
+    # â”€â”€ Figure / GridSpec â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fig = plt.figure(figsize=figsize, facecolor="white")
     outer = gridspec.GridSpec(
         3, 1, figure=fig,
@@ -445,9 +476,9 @@ def plot_interpretability_triptych(
         hspace=0.42,
     )
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PANEL 1 — EMG Envelopes
-    # ─────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # PANEL 1 â€” EMG Envelopes
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     inner_emg = gridspec.GridSpecFromSubplotSpec(
         n_ch, 1, subplot_spec=outer[0], hspace=0.06,
     )
@@ -459,7 +490,7 @@ def plot_interpretability_triptych(
         ax.plot(time, pred[:, c],   color=EMG_PRED,   lw=1.0, ls="--", zorder=2,
                 alpha=0.90, label="Predicted")
 
-        # Error fill — highlights discrepancy regions.
+        # Error fill â€” highlights discrepancy regions.
         ax.fill_between(time, target[:, c], pred[:, c],
                         color=EMG_FILL, alpha=0.12, zorder=1)
 
@@ -498,9 +529,9 @@ def plot_interpretability_triptych(
     )
     emg_axes[-1].set_xlabel("Time (s)", fontsize=9)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PANEL 2 — EEG Temporal Attention Heatmap
-    # ─────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # PANEL 2 â€” EEG Temporal Attention Heatmap
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ax_attn = fig.add_subplot(outer[1])
 
     im = ax_attn.imshow(
@@ -531,9 +562,9 @@ def plot_interpretability_triptych(
     )
     ax_attn.legend(loc="upper left", fontsize=8, framealpha=0.7, borderpad=0.3)
 
-    # ─────────────────────────────────────────────────────────────────────────
-    # PANEL 3 — Dynamic Kinematic Edge Bias
-    # ─────────────────────────────────────────────────────────────────────────
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # PANEL 3 â€” Dynamic Kinematic Edge Bias
+    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     ax_edge = fig.add_subplot(outer[2])
 
     for k, (label, color) in enumerate(zip(pair_labels, edge_colors)):
@@ -559,7 +590,7 @@ def plot_interpretability_triptych(
         ax_edge.spines[sp].set_visible(False)
     ax_edge.tick_params(labelsize=8)
 
-    # ── Global title ──────────────────────────────────────────────────────────
+    # â”€â”€ Global title â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
     fig.suptitle(
         "KG-GT Model \u2014 Interpretability Triptych (Single Inference Window)",
         fontsize=13, fontweight="bold", y=1.010,
@@ -576,10 +607,10 @@ def plot_muscle_synergy_matrix(
     figsize:       tuple = (7, 6),
     cfg:           dict | None = None,
 ) -> plt.Figure:
-    """Annotated heatmap of the mean GAT attention matrix — reveals muscle synergies.
+    """Annotated heatmap of the mean GAT attention matrix â€” reveals muscle synergies.
 
     The learned attention weights encode which muscle pairs co-activate.
-    Averaged over all timesteps and attention heads, the (N × N) matrix is
+    Averaged over all timesteps and attention heads, the (N Ã— N) matrix is
     analogous to an NMF synergy matrix but derived end-to-end from the data.
 
     Args:
@@ -594,7 +625,7 @@ def plot_muscle_synergy_matrix(
         matplotlib Figure.
     """
     attn = np.asarray(attn_weights, dtype=np.float64)   # (B*T, H, N, N)
-    # Mean over all timesteps AND all heads → (N, N)
+    # Mean over all timesteps AND all heads â†’ (N, N)
     synergy = attn.mean(axis=(0, 1))
     N = synergy.shape[0]
     names = muscle_names[:N]
@@ -659,7 +690,7 @@ def plot_kin_edge_linear_weights(
     """Heatmap of the transparent kin_edge_linear weight matrix.
 
     Directly reveals which kinematic features drive which muscle-pair edge
-    connections in each attention head — the primary neurophysiological
+    connections in each attention head â€” the primary neurophysiological
     interpretation output of the transparent linear mapping (Q1 design choice).
 
     W \u2208 R^{H\u00b7N\u00b2 \u00d7 kin_dim}. Entry W[h*N\u00b2 + i*N + j, k] is the direct linear
@@ -669,7 +700,7 @@ def plot_kin_edge_linear_weights(
     panel. Horizontal dashed lines separate source muscle groups (every N rows).
 
     Args:
-        weight_matrix:     (H*N*N, kin_dim) numpy array — e.g.
+        weight_matrix:     (H*N*N, kin_dim) numpy array â€” e.g.
                            model.gat.kin_edge_linear.weight.detach().cpu().numpy()
         muscle_names:      List of N muscle names.
         kin_feature_names: List of kin_dim kinematic feature names.
@@ -752,4 +783,323 @@ def plot_kin_edge_linear_weights(
     )
     fig.tight_layout(rect=[0, 0, 1, 0.90])
     save_fig(fig, "kin_edge_linear_weights", cfg)
+    return fig
+
+
+# DIAGNOSTIC PLOT 1: Residual Decomposition â€” GAT nodes vs. Kinematic Skip
+def plot_residual_decomposition(model, eeg_window, kin_window, emg_target,
+                                 emg_names=None, fs=500,
+                                 emg_mean=None, emg_std=None,
+                                 smooth_hz=10.0,
+                                 cfg=None):
+    """Decomposes a single window's model output into two additive contributions:
+       - GAT-only component: what the graph attention network produces from EEG alone
+       - Kinematic skip component: what kin_skip_proj adds on top
+    This reveals whether the kinematic highway is contributing meaningfully to burst
+    peaks or whether the GAT is doing all the work (or vice versa).
+
+    Args:
+        model:       Trained KGGTModel with use_kinematic_guidance=True.
+        eeg_window:  Tensor (1, T, C_eeg) â€” a single EEG window.
+        kin_window:  Tensor (1, T, K)     â€” matching kinematic window.
+        emg_target:  Array  (T, 5)        â€” ground-truth EMG envelope.
+        emg_names:   List[str] of 5 muscle names.
+        fs:          Sampling frequency (Hz).
+        cfg:         Project config dict for save_fig.
+
+    Usage (notebook):
+        from main.plots import plot_residual_decomposition
+        eeg_t = eeg_window.unsqueeze(0).to(device)
+        kin_t = kin_window.unsqueeze(0).to(device)
+        fig = plot_residual_decomposition(model, eeg_t, kin_t, emg_target_np, emg_names=EMG_NAMES, cfg=notebook_cfg)
+    """
+    import torch
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+
+    with torch.no_grad():
+        eeg_window = eeg_window.to(next(model.parameters()).device)
+        kin_window  = kin_window.to(next(model.parameters()).device)
+
+        temporal = model.encoder(eeg_window)
+        nodes    = model.node_projection(temporal)
+
+        # GAT refined node embedding (graph attention output ONLY)
+        gat_out  = model.gat(nodes, kin_window)          # (1, T, n_nodes, node_dim)
+
+        # Kinematic skip contribution
+        B, T, K = kin_window.shape
+        kin_skip = model.kin_skip_proj(kin_window).view(B, T, model.out_channels, -1)
+
+        # Decode each component independently — all in normalized model space
+        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()  # (T, 5)
+        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()             # (T, 5)
+        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()            # (T, 5)
+
+    # Un-normalize to physical EMG scale so they match emg_target
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"):
+            emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):
+            emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        full_out  = full_out  * _s + _m
+        gat_only  = gat_only  * _s + _m
+        skip_only = skip_only * _s + _m
+
+    # Optional light smoothing to suppress high-frequency noise in the decoded traces
+    from scipy.signal import butter, sosfiltfilt
+    if smooth_hz is not None and smooth_hz > 0:
+        sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
+        full_out = sosfiltfilt(sos, full_out, axis=0)
+        gat_only = sosfiltfilt(sos, gat_only, axis=0)
+
+    time = np.arange(full_out.shape[0]) / float(fs)
+    n_ch = full_out.shape[1]
+
+    fig, axes = plt.subplots(n_ch, 1, figsize=(14, 2.8 * n_ch), sharex=True)
+    colors = {"actual": "#1a1a2e", "full": "#e94560", "gat": "#0f3460", "skip": "#f5a623"}
+
+    for i, ax in enumerate(axes):
+        tgt = emg_target[:, i] if emg_target is not None else None
+        if tgt is not None:
+            ax.plot(time, tgt,         color=colors["actual"], lw=1.5, label="Ground Truth",   zorder=4)
+        ax.plot(time, full_out[:, i],  color=colors["full"],   lw=1.2, ls="--", label="Full Pred (smoothed)",  zorder=3)
+        ax.plot(time, gat_only[:, i],  color=colors["gat"],    lw=1.0, ls=":",  label="GAT component (smoothed)", zorder=2, alpha=0.85)
+        ax.fill_between(time, 0, skip_only[:, i],
+                        color=colors["skip"], alpha=0.35, label="Kin-Skip component")
+        ax.set_ylabel(emg_names[i], fontsize=9)
+        ax.legend(loc="upper right", fontsize=7, ncol=4, framealpha=0.7)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Residual Decomposition: GAT Contribution vs. Kinematic Skip Highway\n"
+                 "(Check if 'Kin-Skip' orange aligns with burst peaks in 'Ground Truth')",
+                 fontweight="bold", fontsize=12)
+    fig.tight_layout()
+    save_fig(fig, "residual_decomposition", cfg)
+    return fig
+
+
+# DIAGNOSTIC PLOT 2: EMG Prediction Error Analysis (histogram + scatter + temporal)
+def plot_emg_error_analysis(y_pred, y_true, emg_names=None, fs=500, cfg=None):
+    """Three-panel error analysis per EMG channel:
+       Left:   Error distribution histogram (residuals) â€” reveals systematic bias.
+       Center: Predicted vs. Actual scatter with identity line â€” reveals canopy/compression.
+       Right:  Temporal error trace â€” reveals where (in time) the model fails most.
+
+    Args:
+        y_pred:    np.ndarray (N_windows*T, 5) or (T, 5) â€” flattened predictions.
+        y_true:    np.ndarray same shape as y_pred â€” ground truth.
+        emg_names: List[str] of 5 muscle names.
+        fs:        Sampling rate (Hz), used for x-axis label.
+        cfg:       Project config dict for save_fig.
+
+    Usage (notebook):
+        from main.plots import plot_emg_error_analysis
+        fig = plot_emg_error_analysis(all_preds, all_targets, emg_names=EMG_NAMES, cfg=notebook_cfg)
+    """
+    emg_names = emg_names or [f"Ch{i}" for i in range(y_pred.shape[-1])]
+    n_ch = y_pred.shape[-1]
+    residuals = y_pred - y_true
+    time = np.arange(y_pred.shape[0]) / float(fs)
+
+    fig, axes = plt.subplots(n_ch, 3, figsize=(16, 2.6 * n_ch))
+    if n_ch == 1:
+        axes = axes[np.newaxis, :]
+
+    import matplotlib
+    palette = matplotlib.colormaps["tab10"]
+
+    for i in range(n_ch):
+        c = palette(i)
+        res = residuals[:, i]
+        bias = res.mean()
+
+        # --- Left: Error histogram ---
+        ax_h = axes[i, 0]
+        ax_h.hist(res, bins=60, color=c, alpha=0.75, edgecolor="none")
+        ax_h.axvline(0,    color="black", lw=1.2, ls="--", label="Zero")
+        ax_h.axvline(bias, color="red",   lw=1.2, ls="-",  label=f"Bias={bias:.4f}")
+        ax_h.set_title(f"{emg_names[i]} â€” Error Distribution", fontsize=9)
+        ax_h.set_xlabel("Residual (pred âˆ’ true)", fontsize=8)
+        ax_h.legend(fontsize=7)
+
+        # --- Center: Scatter pred vs true ---
+        ax_s = axes[i, 1]
+        # subsample for speed if large
+        n_pts = min(5000, len(y_pred))
+        idx = np.random.choice(len(y_pred), n_pts, replace=False)
+        ax_s.scatter(y_true[idx, i], y_pred[idx, i], s=3, alpha=0.25, color=c)
+        lims = [min(y_true[:, i].min(), y_pred[:, i].min()),
+                max(y_true[:, i].max(), y_pred[:, i].max())]
+        ax_s.plot(lims, lims, "k--", lw=1.2, label="Ideal")
+        ax_s.set_xlabel("Actual", fontsize=8)
+        ax_s.set_ylabel("Predicted", fontsize=8)
+        ax_s.set_title(f"{emg_names[i]} â€” Pred vs Actual (n={n_pts})", fontsize=9)
+        ax_s.legend(fontsize=7)
+
+        # --- Right: Temporal error trace ---
+        ax_t = axes[i, 2]
+        ax_t.plot(time, np.abs(res), color=c, lw=0.7, alpha=0.8)
+        ax_t.set_xlabel("Time (s)", fontsize=8)
+        ax_t.set_ylabel("|Error|", fontsize=8)
+        ax_t.set_title(f"{emg_names[i]} â€” Temporal |Error| Trace", fontsize=9)
+
+    fig.suptitle("EMG Prediction Error Analysis\n"
+                 "Left: Bias check | Center: Compression/Canopy check | Right: Temporal error hotspots",
+                 fontweight="bold", fontsize=12)
+    fig.tight_layout()
+    save_fig(fig, "emg_error_analysis", cfg)
+    return fig
+
+
+# DIAGNOSTIC PLOT 3: Predicted vs. Actual Inter-Channel Correlation Matrix
+def plot_channel_correlation_matrix(y_pred, y_true, emg_names=None, cfg=None):
+    """Compares the inter-channel Pearson correlation structure between
+    ground-truth EMG and predicted EMG.
+    If the model has learned true muscle synergies, the two matrices should match closely.
+    Large deviations reveal which co-activations the model fails to decode.
+
+    Args:
+        y_pred:    np.ndarray (T, 5) â€” predictions for a single window.
+        y_true:    np.ndarray (T, 5) â€” ground truth for the same window.
+        emg_names: List[str] of 5 muscle names.
+        cfg:       Project config dict for save_fig.
+
+    Usage (notebook):
+        from main.plots import plot_channel_correlation_matrix
+        fig = plot_channel_correlation_matrix(pred_window, true_window, emg_names=EMG_NAMES, cfg=notebook_cfg)
+    """
+    emg_names = emg_names or [f"Ch{i}" for i in range(y_pred.shape[-1])]
+
+    corr_pred = np.corrcoef(y_pred.T)
+    corr_true = np.corrcoef(y_true.T)
+    corr_diff = corr_pred - corr_true
+
+    fig, axes = plt.subplots(1, 3, figsize=(16, 5))
+    kw = dict(annot=True, fmt=".2f", cmap="RdBu_r", center=0,
+              vmin=-1, vmax=1, square=True, linewidths=0.5,
+              xticklabels=emg_names, yticklabels=emg_names,
+              cbar_kws={"shrink": 0.8})
+
+    sns.heatmap(corr_true, ax=axes[0], **kw)
+    axes[0].set_title("Ground Truth\nInter-Muscle Correlation", fontweight="bold")
+
+    sns.heatmap(corr_pred, ax=axes[1], **kw)
+    axes[1].set_title("Predicted\nInter-Muscle Correlation", fontweight="bold")
+
+    kw_diff = dict(annot=True, fmt=".2f", cmap="PiYG", center=0,
+                   vmin=-0.5, vmax=0.5, square=True, linewidths=0.5,
+                   xticklabels=emg_names, yticklabels=emg_names,
+                   cbar_kws={"shrink": 0.8, "label": "Pred âˆ’ True"})
+    sns.heatmap(corr_diff, ax=axes[2], **kw_diff)
+    axes[2].set_title("Deviation (Pred âˆ’ True)\n|Green| = over-corr | |Purple| = under-corr",
+                       fontweight="bold")
+
+    fig.suptitle("Predicted vs. Actual Inter-Channel EMG Correlation Structure\n"
+                 "Deviation matrix reveals which muscle synergies the model fails to decode",
+                 fontweight="bold", fontsize=13)
+    fig.tight_layout()
+    save_fig(fig, "channel_correlation_matrix", cfg)
+    return fig
+
+
+# DIAGNOSTIC PLOT 4: Kinematic Skip Contribution Magnitude Over Time
+def plot_kin_skip_over_time(model, eeg_window, kin_window, emg_target,
+                             emg_names=None, fs=500,
+                             emg_mean=None, emg_std=None,
+                             smooth_hz=10.0,
+                             cfg=None):
+    """Plots the L2 norm of the kinematic skip vector at each timestep alongside
+    the ground-truth EMG. This reveals whether kin_skip_proj actually fires at burst
+    onset times, or whether it is contributing a constant smooth background offset.
+
+    Args:
+        model:       Trained KGGTModel with kin_skip_proj initialized.
+        eeg_window:  Tensor (1, T, C_eeg).
+        kin_window:  Tensor (1, T, K).
+        emg_target:  np.ndarray (T, 5) â€” ground truth EMG in PHYSICAL scale (un-normalized).
+        emg_names:   List[str] of 5 muscle names.
+        fs:          Sampling frequency (Hz).
+        emg_mean:    np.ndarray (5,) or Tensor â€” per-channel EMG mean used during training
+                     normalization. Required to un-normalize kin_skip_decoded to physical scale.
+        emg_std:     np.ndarray (5,) or Tensor â€” per-channel EMG std used during training.
+        cfg:         Project config dict for save_fig.
+
+    Usage (notebook):
+        from main.plots import plot_kin_skip_over_time
+        fig = plot_kin_skip_over_time(
+            model=best_model, eeg_window=eeg_b, kin_window=kin_b,
+            emg_target=true_np,           # already un-normalized (from triptych cell)
+            emg_mean=emg_mean, emg_std=emg_std,
+            smooth_hz=10.0,           # low-pass cutoff Hz for decoded output smoothing
+            emg_names=EMG_NAMES, fs=fs, cfg=CONFIG,
+        )
+    """
+    import torch
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+
+    with torch.no_grad():
+        eeg_window = eeg_window.to(next(model.parameters()).device)
+        kin_window  = kin_window.to(next(model.parameters()).device)
+
+        B, T, K = kin_window.shape
+        kin_skip = model.kin_skip_proj(kin_window).view(B, T, model.out_channels, -1)  # (1, T, 5, node_dim)
+
+        # L2 norm over node_dim â†’ (T, 5): how strongly does kin highway fire per muscle per timestep?
+        kin_skip_norm = kin_skip.squeeze(0).norm(dim=-1).cpu().numpy()                  # (T, 5)
+
+        # Final decoded skip contribution â€” in model's normalized output space
+        kin_skip_decoded = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy() # (T, 5)
+
+    # Un-normalize kin_skip_decoded to physical EMG scale so it is comparable to emg_target
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"):
+            emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):
+            emg_std = emg_std.cpu().numpy()
+        emg_mean = np.asarray(emg_mean).reshape(1, -1)
+        emg_std  = np.asarray(emg_std).reshape(1, -1)
+        kin_skip_decoded = kin_skip_decoded * emg_std + emg_mean
+
+    # Optional light smoothing on the decoded skip output
+    from scipy.signal import butter, sosfiltfilt
+    if smooth_hz is not None and smooth_hz > 0:
+        sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
+        kin_skip_decoded = sosfiltfilt(sos, kin_skip_decoded, axis=0)
+
+    time = np.arange(T) / float(fs)
+    n_ch = model.out_channels
+
+    fig, axes = plt.subplots(n_ch, 1, figsize=(14, 2.5 * n_ch), sharex=True)
+
+    for i, ax in enumerate(axes):
+        ax2 = ax.twinx()
+
+        tgt = emg_target[:, i]
+        ax.plot(time, tgt, color="#1a1a2e", lw=1.5, label="Ground Truth EMG", zorder=4)
+        ax.plot(time, kin_skip_decoded[:, i], color="#e94560", lw=1.0, ls="--",
+                label="Decoded Skip Output (physical scale)", alpha=0.9, zorder=3)
+        ax2.fill_between(time, 0, kin_skip_norm[:, i],
+                         color="#f5a623", alpha=0.4, label="Skip L2 Norm")
+
+        ax.set_ylabel(emg_names[i], fontsize=9, color="#1a1a2e")
+        ax2.set_ylabel("Skip Norm", fontsize=8, color="#f5a623")
+        ax2.tick_params(axis="y", labelcolor="#f5a623")
+
+        lines1, labels1 = ax.get_legend_handles_labels()
+        lines2, labels2 = ax2.get_legend_handles_labels()
+        ax.legend(lines1 + lines2, labels1 + labels2, loc="upper right", fontsize=7, ncol=3)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle(
+        "Kinematic Skip Highway: Activation Magnitude vs. EMG Ground Truth\n"
+        "If orange spikes align with black burst peaks â†’ highway fires at correct times\n"
+        "If orange is flat/constant â†’ highway contributes baseline offset, not burst sharpness",
+        fontweight="bold", fontsize=11
+    )
+    fig.tight_layout()
+    save_fig(fig, "kin_skip_over_time", cfg)
     return fig

@@ -776,6 +776,16 @@ class KGGTModel(nn.Module):
                 dropout=gat_dropout,
                 edge_prior=edge_prior,
             )
+            # Kinematic Direct Residual Highway (nonlinear MLP):
+            # With include_velocity=True, kin contains both positions and SG-differentiated
+            # velocities.  The GELU activation lets the network learn onset thresholds —
+            # firing sharply when velocity spikes (grasp onset) while staying near zero at rest.
+            skip_hidden = 128
+            self.kin_skip_proj = nn.Sequential(
+                nn.Linear(kin_dim, skip_hidden),
+                nn.GELU(),
+                nn.Linear(skip_hidden, out_channels * node_dim, bias=False),
+            )
         else:
             self.gat = MuscleGATEncoder(
                 node_dim=node_dim,
@@ -787,6 +797,7 @@ class KGGTModel(nn.Module):
                 dropout=gat_dropout,
                 edge_prior=edge_prior,
             )
+            self.kin_skip_proj = None
 
         self.decoder = nn.Linear(node_dim, 1)
 
@@ -797,6 +808,13 @@ class KGGTModel(nn.Module):
             if kin is None:
                 raise ValueError("kin is required when use_kinematic_guidance=True")
             refined = self.gat(nodes, kin)
+            
+            # Kinematic Direct Residual Highway
+            B, T, K_dim = kin.shape
+            kin_skip = self.kin_skip_proj(kin).view(B, T, self.out_channels, -1)
+            
+            # Inject sharp physical dynamics directly into node embeddings
+            refined = refined + kin_skip
         else:
             refined = self.gat(nodes)
         return self.decoder(refined).squeeze(-1)

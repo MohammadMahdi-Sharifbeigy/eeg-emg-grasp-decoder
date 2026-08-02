@@ -151,7 +151,7 @@ class TrainResult:
     """Outcome of a training run."""
     best_val: float
     best_state: dict | None
-    history: dict[str, list[float]] = field(default_factory=lambda: {"train": [], "val": []})
+    history: dict[str, list[float]] = field(default_factory=lambda: {"train": [], "val": [], "lr": []})
 
 
 # ============================================================================
@@ -429,6 +429,7 @@ def train_model(
         epoch_time = time.time() - t0
         gpu_mem = _gpu_mem_str(device)
         lr_now = optimizer.param_groups[0]["lr"]
+        result.history.setdefault("lr", []).append(lr_now)
 
         flag = ""
         if vl < result.best_val:

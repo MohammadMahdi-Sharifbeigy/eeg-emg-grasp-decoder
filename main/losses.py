@@ -73,7 +73,7 @@ class PeakWeightedMSELoss(nn.Module):
         target_shifted = target - t_min                       # Strictly non-negative
 
         max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
-        w_t = 1.0 + self.alpha * (target_shifted / (max_batch + 1e-8))
+        w_t = 1.0 + self.alpha * (target_shifted / (max_batch + 1e-5))
 
         # ── 2. ASYMMETRY ───────────────────────────────────────────────────
         # Penalize under-estimations (where the model missed the burst)
@@ -275,7 +275,7 @@ class CombinedEMGLoss(nn.Module):
             max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
             
             # Mask: 1.0 where muscle is resting, 0.0 during bursts
-            resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-8)).float()
+            resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-5)).float()
             
             # Apply L1 penalty ONLY to the resting regions! 
             # We push the prediction towards the true resting baseline (t_min), not zero.
