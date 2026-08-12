@@ -88,6 +88,10 @@ from .plots import(
     plot_interpretability_triptych,
     plot_muscle_synergy_matrix,
     plot_kin_edge_linear_weights,
+    # Advanced Diagnostic Plots
+    plot_neural_mechanical_latency_lag,
+    plot_spectral_power_decomposition,
+    plot_kinematic_velocity_acceleration_density,
 )
 
 __all__ = [
@@ -121,8 +125,11 @@ __all__ = [
     "plot_prediction_overlay", "plot_gate_heatmap",
     "plot_attention_maps", "plot_residual_diagnostics",
     "plot_fused_pca", "plot_gate_vs_emg_power", "plot_emg_envelope_overlay",
-    # plots — interpretability
+    # plots — interpretability & diagnostics
     "plot_interpretability_triptych",
     "plot_muscle_synergy_matrix",
     "plot_kin_edge_linear_weights",
+    "plot_neural_mechanical_latency_lag",
+    "plot_spectral_power_decomposition",
+    "plot_kinematic_velocity_acceleration_density",
 ]

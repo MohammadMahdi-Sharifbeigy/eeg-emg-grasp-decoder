@@ -32,53 +32,63 @@ from torch import Tensor
 # ============================================================================
 
 class PeakWeightedMSELoss(nn.Module):
-    """MSE with higher penalty on EMG burst peaks (activated timesteps) AND Asymmetry.
+    """Scale-Invariant Superlinear (Quadratic) Peak-Weighted MSE with Activation-Gated Asymmetry.
 
-    MOTIVATION:
-        1. Peak Weighting: We scale each sample's squared error by a weight proportional 
-           to its amplitude. This forces the model to spend capacity on bursts.
-        2. Asymmetry: It is much worse to completely miss a peak (under-predict) than 
-           to slightly overshoot it (over-predict).
-
-    WEIGHT FORMULA:
-        w_t = 1 + alpha * (target_shifted / (max_batch + eps))
-        asym_w = asymmetry if (target > pred) else 1.0
-        
-        loss = w_t * asym_w * (pred - target)^2
+    MOTIVATION & SOLVING THE CANOPY EFFECT:
+        1. Scale Invariance: Physical EMG envelopes vary in the range [0.00, 0.02], whereas z-scored
+           envelopes range [-1.0, +4.0]. Hardcoded thresholds fail on physical envelopes. We map each
+           channel dynamically to normalized activation y_norm in [0, 1].
+        2. Superlinear (Quadratic) Peak Weighting: A linear ramp (1 + alpha * y_norm) only mildly
+           differentiates mid-level canopy predictions from sharp burst tips. Using a quadratic curve
+           1 + alpha * (y_norm)^2 concentrates up to an 8x gradient boost exclusively on burst apices
+           while leaving resting baseline noise (y_norm ~ 0) totally uninflated.
+        3. Activation-Gated Asymmetry: Unconditional asymmetry penalizes under-predicted baseline
+           noise during rest, causing predictions to float upwards. By gating asymmetry with y_norm,
+           we enforce balanced zero-mean errors at rest (1.0x) while severely punishing missed contractions!
 
     Args:
-        alpha: Peak-emphasis factor. Typical range 1.0-5.0. 
-        asymmetry: Penalty multiplier for under-predicting the signal. Default 2.0.
+        alpha: Peak-emphasis multiplier at burst tips. Default 3.0 (gives 4x loss at peak).
+        asymmetry: Under-prediction multiplier during peak contractions. Default 2.0.
+        threshold: Maintained for backwards config compatibility.
+        peak_weight: Optional alias for alpha.
     """
 
-    def __init__(self, alpha: float = 3.0, asymmetry: float = 2.0) -> None:
+    def __init__(self, alpha: float = 3.0, asymmetry: float = 2.0, threshold: float = 1.0, peak_weight: float | None = None) -> None:
         super().__init__()
+        if peak_weight is not None:
+            alpha = peak_weight
         if alpha < 0:
             raise ValueError(f"alpha must be >= 0, got {alpha}")
-        self.alpha = alpha
-        self.asymmetry = asymmetry
+        self.alpha = float(alpha)
+        self.asymmetry = float(asymmetry)
+        self.threshold = float(threshold)  # kept for backwards config compatibility
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """
         Args:
             pred:   (B, T, C) predicted envelope
-            target: (B, T, C) ground truth envelope (raw or z-scored)
+            target: (B, T, C) ground truth envelope (raw physical scale or z-scored)
         """
         if self.alpha == 0.0 and self.asymmetry == 1.0:
             return F.mse_loss(pred, target)
 
-        # ── 1. PEAK WEIGHTING ──────────────────────────────────────────────
+        # ── 1. SCALE-INVARIANT RELATIVE ACTIVATION (0.0 to 1.0 per channel) ─
         reduce_dims = tuple(range(target.dim() - 1))          # all dims except last (C)
-        t_min = target.amin(dim=reduce_dims, keepdim=True)    
-        target_shifted = target - t_min                       # Strictly non-negative
+        t_min = target.amin(dim=reduce_dims, keepdim=True)
+        t_max = target.amax(dim=reduce_dims, keepdim=True)
+        
+        # y_norm seamlessly maps physical EMG envelopes (e.g. 0.00-0.02) to [0, 1]
+        y_norm = (target - t_min) / (t_max - t_min + 1e-6)
 
-        max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
-        w_t = 1.0 + self.alpha * (target_shifted / (max_batch + 1e-5))
+        # ── 2. SUPERLINEAR (QUADRATIC) PEAK WEIGHTING (The Canopy Eraser) ───
+        # Exponential gradient acceleration on sharp burst tips without multiplying rest noise
+        w_t = 1.0 + self.alpha * (y_norm ** 2)
 
-        # ── 2. ASYMMETRY ───────────────────────────────────────────────────
-        # Penalize under-estimations (where the model missed the burst)
+        # ── 3. ACTIVATION-GATED ASYMMETRY ──────────────────────────────────
+        # Pure symmetry at rest (y_norm -> 0) preventing upward baseline drift in FDI/ECR; 
+        # aggressive under-prediction penalties during actual burst firing!
         under_prediction = (target > pred).float()
-        asym_w = 1.0 + (self.asymmetry - 1.0) * under_prediction
+        asym_w = 1.0 + (self.asymmetry - 1.0) * under_prediction * y_norm
 
         mse_raw = F.mse_loss(pred, target, reduction="none")  
         loss = (w_t * asym_w * mse_raw).mean()
@@ -225,25 +235,28 @@ class CombinedEMGLoss(nn.Module):
     Args:
         peak_alpha:      Peak-weighting factor (PeakWeightedMSELoss). Default 3.0.
         lambda_reg:      KL regularization weight (EdgePriorKLDivLoss). Default 0.01.
-        lambda_l1:       L1 Sparsity weight to suppress floating baselines. Default 1e-4.
+        lambda_l1:       L1 Sparsity weight to suppress floating baselines. Default 0.05.
+        lambda_grad:     Temporal gradient tracking penalty to remove canopy smoothing. Default 0.2.
         use_peak_weight: If False, use standard nn.MSELoss (alpha=0 equivalent).
-                         Useful for ablation studies.
     """
 
     def __init__(
         self,
         peak_alpha:      float = 3.0,
         lambda_reg:      float = 0.01,
-        lambda_l1:       float = 1e-4,
+        lambda_l1:       float = 0.05,
+        lambda_grad:     float = 0.2,
         use_peak_weight: bool  = True,
         asymmetry:       float = 2.0,
-        rest_threshold:  float = 0.05,
+        rest_threshold:  float = 0.15,
+        threshold:       float = 1.0,
     ) -> None:
         super().__init__()
-        self.recon     = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry) if use_peak_weight else nn.MSELoss()
+        self.recon     = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry, threshold=threshold) if use_peak_weight else nn.MSELoss()
         self.reg       = EdgePriorKLDivLoss(lambda_reg=lambda_reg)
         self.lambda_reg = lambda_reg
         self.lambda_l1  = lambda_l1
+        self.lambda_grad = lambda_grad
         self.rest_threshold = rest_threshold
 
     def forward(
@@ -264,6 +277,12 @@ class CombinedEMGLoss(nn.Module):
         """
         loss = self.recon(pred, target)
 
+        # Temporal Gradient Loss to force sharp onset slopes and penalize low-pass smoothed canopies
+        if self.lambda_grad > 0.0 and pred.shape[1] > 1:
+            d_pred = pred[:, 1:] - pred[:, :-1]
+            d_target = target[:, 1:] - target[:, :-1]
+            loss = loss + self.lambda_grad * torch.mean(torch.abs(d_pred - d_target))
+
         # L1 Sparsity ONLY during muscle rest (Thresholded Sparsity)
         if self.lambda_l1 > 0.0:
             # Shift target to find the true baseline
@@ -271,7 +290,7 @@ class CombinedEMGLoss(nn.Module):
             t_min = target.amin(dim=reduce_dims, keepdim=True)
             target_shifted = target - t_min
 
-            # Find the max peak to define the threshold (e.g. 5% of max peak)
+            # Find the max peak to define the threshold (e.g. 15% of max peak)
             max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
             
             # Mask: 1.0 where muscle is resting, 0.0 during bursts
@@ -300,26 +319,18 @@ def build_loss_from_config(cfg: dict) -> CombinedEMGLoss:
 
         cfg["loss"]["peak_alpha"]      float  Peak-weighting factor. Default 3.0.
         cfg["loss"]["lambda_reg"]      float  KL regularization weight. Default 0.01.
-        cfg["loss"]["lambda_l1"]       float  L1 Sparsity weight. Default 1e-4.
+        cfg["loss"]["lambda_l1"]       float  L1 Sparsity weight. Default 0.05.
+        cfg["loss"]["lambda_grad"]     float  Temporal gradient weight. Default 0.2.
         cfg["loss"]["use_peak_weight"] bool   Enable peak weighting. Default True.
-
-    Example config section:
-        "loss": {
-            "peak_alpha": 3.0,        # 3x emphasis on burst peaks vs. baseline
-            "lambda_reg": 0.01,       # mild KL anchor to biological prior
-            "lambda_l1": 1e-4,        # suppress floating baseline noise
-            "use_peak_weight": true,
-        }
-
-    If cfg has no "loss" key, all defaults are used (equivalent to the old
-    pure-MSE CombinedEMGLoss but with peak weighting added).
     """
-    loss_cfg = cfg.get("loss", {})
+    loss_cfg = cfg.get("loss", cfg if "peak_alpha" in cfg or "threshold" in cfg else cfg.get("loss", {}))
     return CombinedEMGLoss(
-        peak_alpha=loss_cfg.get("peak_alpha", 3.0),
+        peak_alpha=loss_cfg.get("peak_alpha", loss_cfg.get("peak_weight", 3.0)),
         lambda_reg=loss_cfg.get("lambda_reg", 0.01),
-        lambda_l1=loss_cfg.get("lambda_l1", 1e-4),
+        lambda_l1=loss_cfg.get("lambda_l1", 0.05),
+        lambda_grad=loss_cfg.get("lambda_grad", 0.2),
         use_peak_weight=loss_cfg.get("use_peak_weight", True),
         asymmetry=loss_cfg.get("asymmetry", 2.0),
-        rest_threshold=loss_cfg.get("rest_threshold", 0.05),
+        rest_threshold=loss_cfg.get("rest_threshold", 0.15),
+        threshold=loss_cfg.get("threshold", 1.0),
     )

@@ -55,6 +55,8 @@ class WAYEEGDataset(Dataset):
         split: str,
         window_size: int = 500,
         stride: int = 50,
+        latency_shift_ms: float = 0.0,
+        fs: float = 500.0,
         preprocess_fn: Callable | None = None,
         cache_dir: Union[str, Path, None] = None,
     ) -> None:
@@ -63,6 +65,9 @@ class WAYEEGDataset(Dataset):
         self.split       = split
         self.window_size = window_size
         self.stride      = stride
+        self.latency_shift_ms = latency_shift_ms
+        self.fs          = fs
+        self.latency_shift_samples = int(round((latency_shift_ms / 1000.0) * fs))
         self.preprocess_fn = preprocess_fn
         self.cache_dir   = Path(cache_dir) if cache_dir else None
 
@@ -132,7 +137,8 @@ class WAYEEGDataset(Dataset):
         T = eeg.shape[0]
         W = self.window_size
         S = self.stride
-        for start in range(0, T - W + 1, S):
+        shift = self.latency_shift_samples
+        for start in range(0, T - W - shift + 1, S):
             self._windows.append((eeg, kt, emg, start))
 
     # ------------------------------------------------------------------
@@ -169,10 +175,11 @@ class WAYEEGDataset(Dataset):
     def __getitem__(self, idx: int) -> tuple[Tensor, Tensor, Tensor]:
         eeg_all, kt_all, emg_all, start = self._windows[idx]
         end = start + self.window_size
+        shift = self.latency_shift_samples
 
-        eeg_w = torch.from_numpy(eeg_all[start:end])   # (W, n_eeg)
-        kin_w = torch.from_numpy(kt_all[start:end])    # (W, 13)
-        emg_w = torch.from_numpy(emg_all[start:end])   # (W, 5)
+        eeg_w = torch.from_numpy(eeg_all[start:end])                 # (W, n_eeg) at time t
+        kin_w = torch.from_numpy(kt_all[start + shift:end + shift])    # (W, K) at time t + shift
+        emg_w = torch.from_numpy(emg_all[start + shift:end + shift])   # (W, 5) at time t + shift
 
         return eeg_w, kin_w, emg_w
 
@@ -187,5 +194,6 @@ class WAYEEGDataset(Dataset):
             f"participants={self.participants}, "
             f"n_windows={len(self)}, "
             f"window_size={self.window_size}, "
-            f"stride={self.stride})"
+            f"stride={self.stride}, "
+            f"latency_shift_ms={self.latency_shift_ms})"
         )

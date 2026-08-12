@@ -121,13 +121,16 @@ class TrainConfig:
     cosine_eta_min: float = 1e-6        # cosine floor LR
 
     @classmethod
-    def from_config(cls, cfg: dict, max_epochs: int | None = None) -> "TrainConfig":
+    def from_config(cls, cfg: dict, max_epochs: int | None = None, lr: float | None = None) -> "TrainConfig":
         """Build from the training section of default.yaml."""
         resolved_max_epochs = (
             max_epochs if max_epochs is not None else cfg.get("max_epochs", 500)
         )
+        resolved_lr = (
+            lr if lr is not None else cfg.get("lr", cfg.get("stage2_lr", cfg.get("stage1_lr", 1e-3)))
+        )
         return cls(
-            lr=cfg.get("lr", 1e-3),
+            lr=resolved_lr,
             weight_decay=cfg.get("weight_decay", 1e-2),
             lr_patience=cfg.get("lr_patience", 50),
             lr_factor=cfg.get("lr_factor", 0.5),
@@ -343,14 +346,28 @@ def train_model(
     """
     use_amp = cfg.use_amp and device.type == "cuda"
 
-    # ── Optimizer ─────────────────────────────────────────────────────────────
+    # ── Optimizer (with differential parameter grouping for Stage 2 KG-GT) ───
     _opt_name = cfg.optimizer.lower().strip()
+
+    if getattr(model, "use_kinematic_guidance", False) and getattr(model, "kin_skip_proj", None) is not None:
+        skip_params = set(model.kin_skip_proj.parameters())
+        neural_params = [p for p in model.parameters() if p not in skip_params]
+        skip_list = list(model.kin_skip_proj.parameters())
+
+        # Allocate higher plasticity to neural/decoder pathway vs restricted skip highway
+        param_groups = [
+            {"params": neural_params, "lr": cfg.lr, "weight_decay": cfg.weight_decay},
+            {"params": skip_list,     "lr": cfg.lr / 3.0, "weight_decay": max(0.05, cfg.weight_decay * 5.0)},
+        ]
+        logger.info("Applying differential parameter groups: neural lr=%g, skip lr=%g, skip weight_decay=%g",
+                    cfg.lr, cfg.lr / 3.0, max(0.05, cfg.weight_decay * 5.0))
+    else:
+        param_groups = [{"params": model.parameters(), "lr": cfg.lr, "weight_decay": cfg.weight_decay}]
+
     if _opt_name == "adamw":
-        optimizer = torch.optim.AdamW(
-            model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay
-        )
+        optimizer = torch.optim.AdamW(param_groups)
     elif _opt_name == "adam":
-        optimizer = torch.optim.Adam(model.parameters(), lr=cfg.lr)
+        optimizer = torch.optim.Adam(param_groups)
     else:
         raise ValueError(f"Unknown optimizer '{cfg.optimizer}'. Choose 'adam' or 'adamw'.")
 

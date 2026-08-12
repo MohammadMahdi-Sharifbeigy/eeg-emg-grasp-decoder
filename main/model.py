@@ -695,7 +695,38 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         )
         out      = self.out(out).view(batch_size, steps, n_nodes, -1)
         residual = self.residual(nodes)
-        return self.norm(residual + self.dropout(out))    # ← BUG FIX: missing return added
+        return self.norm(residual + self.dropout(out))
+
+# ============================================================================
+# Per-Muscle Independent Decoder (Unlocks individual muscle burst mechanics)
+# ============================================================================
+
+class PerMuscleDecoder(nn.Module):
+    """Per-muscle independent readout projection with high-frequency slope amplification.
+    
+    In addition to static point-in-time Linear mappings, each muscle features a parallel 
+    temporal derivative branch (slope_layer) applied to d(embedding)/dt, directly
+    amplifying sharp contraction onset spikes and eliminating canopy smoothing.
+    """
+    def __init__(self, node_dim: int, out_channels: int = 5) -> None:
+        super().__init__()
+        self.layers = nn.ModuleList([nn.Linear(node_dim, 1) for _ in range(out_channels)])
+        self.slope_layers = nn.ModuleList([nn.Linear(node_dim, 1) for _ in range(out_channels)])
+        for l in self.slope_layers:
+            nn.init.zeros_(l.weight)
+            nn.init.zeros_(l.bias)
+        
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        dx = x - torch.roll(x, shifts=1, dims=1)
+        if dx.shape[1] > 0:
+            dx[:, 0] = 0.0
+        outs = [
+            layer(xi) + slope(dxi) 
+            for layer, slope, xi, dxi in zip(self.layers, self.slope_layers, x.unbind(dim=-2), dx.unbind(dim=-2))
+        ]
+        return torch.stack(outs, dim=-2)
+
+
 # ============================================================================
 # Transformer-Only Model (Phase 1 Pretraining)
 # ============================================================================
@@ -717,7 +748,7 @@ class TransformerOnlyModel(nn.Module):
             n_nodes=out_channels,
             node_dim=node_dim,
         )
-        self.decoder = nn.Linear(node_dim, 1)
+        self.decoder = PerMuscleDecoder(node_dim, out_channels)
         
     def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
         # kin is ignored, just matching the function signature
@@ -766,9 +797,18 @@ class KGGTModel(nn.Module):
         )
 
         if use_kinematic_guidance:
+            if kin_dim >= 24 and kin_dim % 3 == 0:
+                gat_kin_dim = kin_dim // 3
+            elif kin_dim >= 24 and kin_dim % 2 == 0:
+                gat_kin_dim = kin_dim // 2
+            else:
+                gat_kin_dim = kin_dim
+            skip_kin_dim = kin_dim - gat_kin_dim if kin_dim > gat_kin_dim else kin_dim
+            self.gat_kin_dim = gat_kin_dim
+
             self.gat = KinematicGuidedMuscleGATEncoder(
                 node_dim=node_dim,
-                kin_dim=kin_dim,
+                kin_dim=gat_kin_dim,
                 hidden_dim=gat_hidden_dim,
                 num_heads=gat_heads,
                 out_dim=node_dim,
@@ -776,16 +816,15 @@ class KGGTModel(nn.Module):
                 dropout=gat_dropout,
                 edge_prior=edge_prior,
             )
-            # Kinematic Direct Residual Highway (nonlinear MLP):
-            # With include_velocity=True, kin contains both positions and SG-differentiated
-            # velocities.  The GELU activation lets the network learn onset thresholds —
-            # firing sharply when velocity spikes (grasp onset) while staying near zero at rest.
             skip_hidden = 128
             self.kin_skip_proj = nn.Sequential(
-                nn.Linear(kin_dim, skip_hidden),
+                nn.Linear(skip_kin_dim, skip_hidden),
+                nn.LayerNorm(skip_hidden),
                 nn.GELU(),
+                nn.Dropout(p=0.35),
                 nn.Linear(skip_hidden, out_channels * node_dim, bias=False),
             )
+            nn.init.zeros_(self.kin_skip_proj[-1].weight)
         else:
             self.gat = MuscleGATEncoder(
                 node_dim=node_dim,
@@ -799,7 +838,19 @@ class KGGTModel(nn.Module):
             )
             self.kin_skip_proj = None
 
-        self.decoder = nn.Linear(node_dim, 1)
+        self.decoder = PerMuscleDecoder(node_dim, out_channels)
+
+    def get_gat_kin(self, kin: torch.Tensor) -> torch.Tensor:
+        """Extract positional features for GAT co-activation synergy modulation."""
+        if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == kin.shape[-1]:
+            return kin
+        return kin[..., :self.gat_kin_dim]
+
+    def get_skip_kin(self, kin: torch.Tensor) -> torch.Tensor:
+        """Extract dynamic derivative features (velocity & acceleration) for direct skip highway."""
+        if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == kin.shape[-1]:
+            return kin
+        return kin[..., self.gat_kin_dim:]
 
     def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
         temporal = self.encoder(eeg)
@@ -807,11 +858,11 @@ class KGGTModel(nn.Module):
         if self.use_kinematic_guidance:
             if kin is None:
                 raise ValueError("kin is required when use_kinematic_guidance=True")
-            refined = self.gat(nodes, kin)
+            refined = self.gat(nodes, self.get_gat_kin(kin))
             
             # Kinematic Direct Residual Highway
-            B, T, K_dim = kin.shape
-            kin_skip = self.kin_skip_proj(kin).view(B, T, self.out_channels, -1)
+            B, T, _ = kin.shape
+            kin_skip = self.kin_skip_proj(self.get_skip_kin(kin)).view(B, T, self.out_channels, -1)
             
             # Inject sharp physical dynamics directly into node embeddings
             refined = refined + kin_skip

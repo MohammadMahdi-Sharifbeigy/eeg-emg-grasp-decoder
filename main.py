@@ -46,18 +46,19 @@ CONFIG = {
     "data": {
         "participant": "P2",       
         "data_root": "data/way-eeg/raw",
-        "cache_dir": "data/cache_main",
+        "cache_dir": "data/cache_main_dyn36",
         # window_size=4000 @ 500 Hz = 8 s window; stride=250 = 0.5 s step
         # chunked transformer: 4000 / chunk_size=500 = 8 chunks of 500 → O(500²) not O(4000²)
         "window_size": 500,
         "stride": 100,
+        "latency_shift_ms": 50.0,
         "fs_eeg": 500,                   # Hz
         "fs_emg": 4000,                  # Hz (raw); downsampled to fs_eeg after preprocess
         "fs_kin": 500,                   # Hz
         "n_eeg_channels": 32,
         "n_emg_channels": 5,
         "n_kin_raw": 36,                 # raw kin cols in hs.kin.sig
-        "n_kin_features": 26             # k_t dimension after extraction
+        "n_kin_features": 36             # k_t dimension after extraction
     },
     "preprocessing": {
         "eeg": {
@@ -82,7 +83,9 @@ CONFIG = {
             "downsample_factor": 8       # 4000 -> 500 Hz
         },
         "kinematics": {
-            "include_velocity": True,   # if true, output is (T, 26) = k_t + velocity
+            "include_velocity": True,      # if true, output includes velocity
+            "include_acceleration": True,  # if true, output includes acceleration
+            "drop_indices": [12, 25, 38],  # prune rho_GL from pos, vel, acc
             "velocity_method": "sg",     # 'sg' (Savitzky-Golay) | 'bw' (Butterworth diff)
             "sg_window": 11,             # SG window length (samples, must be odd)
             "sg_poly": 3,                # SG polynomial order
@@ -123,14 +126,15 @@ CONFIG = {
         "loss": {
             "peak_alpha":      5.0,    # 3× emphasis on EMG burst peaks vs. baseline silence
             "lambda_reg":      0.001,   # KL anchor strength: GAT edge_bias stays near prior
-            "lambda_l1": 0.01,
-            "rest_threshold":  0.05,
-            "asymmetry": 1.0,
+            "lambda_l1": 0.05,
+            "lambda_grad":     0.2,
+            "rest_threshold":  0.15,
+            "asymmetry": 2.5,
             "use_peak_weight": True,   # set False for ablation back to standard MSE
         },
         # ── optimizer ─────────────────────────────────────────────────────
         "optimizer":   "adamw",   # 'adam' | 'adamw'
-        "weight_decay": 1e-3,     # AdamW weight decay (ignored for adam)
+        "weight_decay": 3e-2,     # AdamW weight decay (ignored for adam)
         # ── scheduler ─────────────────────────────────────────────────────
         "scheduler":   "cosine",  # 'reduce' | 'cosine'
         # reduce-specific
@@ -141,16 +145,17 @@ CONFIG = {
         "cosine_eta_min": 1e-6,
         # ── common ────────────────────────────────────────────────────────
         "loss_lambda":  1.0,      # 1.0 = plain MSE; <1.0 enables Soft-DTW (O(T²), DO NOT use at T=4000)
-        "lr":                  1e-4,
+        "stage1_lr": 1e-4,
+        "stage2_lr": 3e-5,
         # batch_size=4 with T=4000 keeps VRAM safe on GTX 1660 Ti (6 GB).
         # effective batch = batch_size * gradient_accumulation_steps = 4 * 8 = 32
         # Tune batch_size up (e.g. 8) if VRAM is available; reduce grad_accum_steps proportionally.
         "batch_size":          32,
         "gradient_accumulation_steps": 2,
-        "early_stop_patience": 20,
+        "early_stop_patience": 30,
         "grad_clip_norm":      1.0,
         "stage1_epochs":       50,
-        "max_epochs":          50,
+        "max_epochs":          75,
         # use_amp=True: enables FP16 mixed precision via torch.autocast + GradScaler.
         # GTX 1660 Ti (sm_75 Turing) has FP16 tensor cores → ~1.5-2x speedup.
         # Requires PyTorch >= 2.0. Set False only if you see NaN losses.
@@ -164,6 +169,7 @@ CONFIG = {
         # Keep in sync with data.window_size / data.stride above
         "window_size": 500,
         "stride": 100,
+        "latency_shift_ms": 50.0,
     }
 }
 notebook_cfg = copy.deepcopy(CONFIG)
@@ -300,6 +306,7 @@ def build_dataset_split(cfg, participants=None, split="train", root_dir=ROOT):
         split=split,
         window_size=cfg["dataset"]["window_size"],
         stride=cfg["dataset"]["stride"],
+        latency_shift_ms=cfg["dataset"].get("latency_shift_ms", 0.0),
         preprocess_fn=make_preprocess_fn(cfg),
         cache_dir= root_dir / data_cfg["cache_dir"]
     )
@@ -449,7 +456,7 @@ loss.backward()
 
 print("Output shape:", out.shape) # Should be torch.Size([2, 500, 5])
 print("Skip projection (layer 0) grad norm:", m.kin_skip_proj[0].weight.grad.norm().item())
-print("Skip projection (layer 2) grad norm:", m.kin_skip_proj[2].weight.grad.norm().item())
+print("Skip projection (final layer) grad norm:", m.kin_skip_proj[-1].weight.grad.norm().item())  # changed [2] to [-1]
 
 
 # %%
@@ -526,7 +533,8 @@ print("═"*60 + "\n")
 
 train_cfg_stage1 = TrainConfig.from_config(
     notebook_cfg["training"], 
-    max_epochs=notebook_cfg["training"]["stage1_epochs"]
+    max_epochs=notebook_cfg["training"]["stage1_epochs"],
+    lr=notebook_cfg["training"]["stage1_lr"] 
 )
 # Automatically saves to: outputs/checkpoints_main_stage1/P2
 train_cfg_stage1.checkpoint_dir = notebook_cfg["training"].get("checkpoint_dir", "outputs/checkpoints_main") + f"_stage1/{subject_str}"
@@ -539,7 +547,7 @@ result_stage1 = train_model(
     loss_fn=loss_fn,
     device=device,
     cfg=train_cfg_stage1,
-    resume=False
+    resume=True
 )
 
 # %%
@@ -605,7 +613,8 @@ print(f"Active subject: {subject_str}")
 
 train_cfg_stage2 = TrainConfig.from_config(
     notebook_cfg["training"], 
-    max_epochs=notebook_cfg["training"]["max_epochs"]
+    max_epochs=notebook_cfg["training"]["max_epochs"],
+    lr=notebook_cfg["training"]["stage2_lr"] 
 )
 # Automatically saves to: outputs/checkpoints_main_stage2/P2
 train_cfg_stage2.checkpoint_dir = notebook_cfg["training"].get("checkpoint_dir", "outputs/checkpoints_main") + f"_stage2/{subject_str}"
@@ -618,7 +627,7 @@ result_stage2 = train_model(
     loss_fn=loss_fn,
     device=device,
     cfg=train_cfg_stage2,
-    resume=False,
+    resume=True,
 )
 
 # %%
@@ -754,8 +763,8 @@ true_np = true_np * emg_std_np + emg_mean_np
 
 # ── NEW: Post-processing smoothing (5Hz low-pass filter) ──────────
 fs = CONFIG["data"].get("fs_eeg", 500.0)
-sos = butter(4, 5.0 / (fs / 2.0), btype="low", output="sos")
-pred_np = sosfiltfilt(sos, pred_np, axis=0)
+# sos = butter(4, 5.0 / (fs / 2.0), btype="low", output="sos")
+# pred_np = sosfiltfilt(sos, pred_np, axis=0)
 # ──────────────────────────────────────────────────────────────────
 
 # 6. Extract EEG temporal attention: (1, H, T, T) -> (H, T, T)
@@ -783,6 +792,7 @@ fig = plot_interpretability_triptych(
     muscle_names=EMG_NAMES,
     kin_feature_names=KIN_FEATURE_NAMES,
     fs=fs,
+    smooth_hz  = 5.0,
     cfg=CONFIG,
 )
 
@@ -797,7 +807,7 @@ fig = plot_kin_skip_over_time(
     emg_target = true_np,     # physical scale
     emg_mean   = emg_mean,
     emg_std    = emg_std,
-    smooth_hz  = 10.0,        # ← low-pass at 10 Hz; set None to disable
+    smooth_hz  = 5.0,        # ← low-pass at 10 Hz; set None to disable
     emg_names  = EMG_NAMES,
     fs         = fs,
     cfg        = CONFIG,
@@ -816,7 +826,7 @@ fig = plot_residual_decomposition(
     emg_target = true_np,        # np.ndarray (T, 5) — physical scale
     emg_mean   = emg_mean,       # ← NEW: un-normalizes model outputs to physical scale
     emg_std    = emg_std,        # ← NEW
-    smooth_hz  = 10.0,           # optional low-pass Hz (set None to disable smoothing)
+    smooth_hz  = 5.0,           # optional low-pass Hz (set None to disable smoothing)
     emg_names  = EMG_NAMES,
     fs         = fs,
     cfg        = CONFIG,
@@ -934,7 +944,7 @@ if hasattr(best_model.gat, "kin_edge_linear"):
     gat_cfg = CONFIG["model"]["gat"]
     fig_kin = plot_kin_edge_linear_weights(
         weight_matrix=W,
-        muscle_names=EMG_NAMES,
+        muscle_names=EMG_NAMES,                       
         kin_feature_names=KIN_FEATURE_NAMES,
         num_heads=gat_cfg["heads"],
         n_nodes=5,
@@ -944,6 +954,60 @@ if hasattr(best_model.gat, "kin_edge_linear"):
     print("\nInspect high |weight| rows on d_grip / F_L / F_G for key insights.")
 else:
     print("kin_edge_linear not found (use_kinematic_guidance may be False).")
+
+
+# %%
+import matplotlib.pyplot as plt
+from main import (
+    plot_neural_mechanical_latency_lag,
+    plot_spectral_power_decomposition,
+    plot_kinematic_velocity_acceleration_density,
+)
+
+best_model.eval()
+
+# ── PLOT 1: Neural-Mechanical Latency Lag (Time-Shifted Cross-Correlation) ──
+print("Generating Plot 1: Neural-Mechanical Latency Lag Analysis...")
+fig_lat = plot_neural_mechanical_latency_lag(
+    model=best_model,
+    eeg_window=eeg_b,               # model_inputs["eeg"], shape: (1, T, 32)
+    kin_window=kin_b,               # model_inputs["kin"], shape: (1, T, 12)
+    emg_target=true_np,             # un-normalized ground truth array, shape: (T, 5)
+    emg_names=EMG_NAMES,
+    fs=500,
+    max_lag_ms=250,                 # check delays from -250ms to +250ms
+    emg_mean=emg_mean,              # un-normalize internal components to match true_np
+    emg_std=emg_std,
+    cfg=CONFIG
+)
+plt.show()
+
+# ── PLOT 2: Spectral Power Decomposition (PSD Bandwidth & Canopy Check) ──
+print("\nGenerating Plot 2: Spectral Power Decomposition (Welch's PSD)...")
+fig_spec = plot_spectral_power_decomposition(
+    model=best_model,
+    eeg_window=eeg_b,
+    kin_window=kin_b,
+    emg_target=true_np,
+    emg_names=EMG_NAMES,
+    fs=500,
+    max_freq_hz=20.0,
+    emg_mean=emg_mean,
+    emg_std=emg_std,
+    cfg=CONFIG
+)
+plt.show()
+
+# ── PLOT 3: Kinematic Velocity & Acceleration Density Alignment ──
+print("\nGenerating Plot 3: Kinematic State Separation Density Grid...")
+fig_kin_dens = plot_kinematic_velocity_acceleration_density(
+    kin_window=kin_b,               # shape: (1, T, 12) or (T, 12)
+    emg_target=true_np,
+    emg_names=EMG_NAMES,
+    fs=500,
+    cfg=CONFIG
+)
+plt.show()
 
 
 

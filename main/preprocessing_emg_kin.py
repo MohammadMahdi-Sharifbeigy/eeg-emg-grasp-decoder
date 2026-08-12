@@ -242,6 +242,53 @@ def estimate_velocity(
     raise ValueError(f"Unknown velocity method '{method}'. Choose 'sg' or 'bw'.")
 
 
+def sg_acceleration(
+    pos: np.ndarray,
+    fs: float = 500.0,
+    window: int = 11,
+    poly: int = 3,
+) -> np.ndarray:
+    """Acceleration via Savitzky-Golay second derivative."""
+    if window % 2 == 0:
+        window += 1
+    if poly < 2:
+        poly = 2
+    return savgol_filter(pos, window_length=window, polyorder=poly,
+                         deriv=2, delta=1.0 / fs, axis=0).astype(np.float32)
+
+
+def bw_acceleration(
+    pos: np.ndarray,
+    fs: float = 500.0,
+    cutoff: float = 20.0,
+    order: int = 4,
+) -> np.ndarray:
+    """Acceleration via Butterworth zero-phase second differentiator."""
+    nyq = fs / 2.0
+    sos = butter(order, cutoff / nyq, btype="low", output="sos")
+    pos_smooth = sosfiltfilt(sos, pos, axis=0)
+    vel = np.gradient(pos_smooth, 1.0 / fs, axis=0)
+    acc = np.gradient(vel, 1.0 / fs, axis=0)
+    return acc.astype(np.float32)
+
+
+def estimate_acceleration(
+    pos: np.ndarray,
+    fs: float = 500.0,
+    method: str = "sg",
+    sg_window: int = 11,
+    sg_poly: int = 3,
+    bw_cutoff: float = 20.0,
+    bw_order: int = 4,
+) -> np.ndarray:
+    """Unified acceleration estimator — dispatch to sg or bw method."""
+    if method == "sg":
+        return sg_acceleration(pos, fs=fs, window=sg_window, poly=sg_poly)
+    if method == "bw":
+        return bw_acceleration(pos, fs=fs, cutoff=bw_cutoff, order=bw_order)
+    raise ValueError(f"Unknown acceleration method '{method}'. Choose 'sg' or 'bw'.")
+
+
 def extract_kt_with_velocity(
     kin: np.ndarray,
     fs: float = 500.0,
@@ -259,6 +306,38 @@ def extract_kt_with_velocity(
         bw_cutoff=bw_cutoff, bw_order=bw_order,
     )                                                           # (T, 13)
     return np.concatenate([kt, vel], axis=1).astype(np.float32)  # (T, 26)
+
+
+def extract_kt_with_derivatives(
+    kin: np.ndarray,
+    fs: float = 500.0,
+    include_velocity: bool = True,
+    include_acceleration: bool = False,
+    method: str = "sg",
+    sg_window: int = 11,
+    sg_poly: int = 3,
+    bw_cutoff: float = 20.0,
+    bw_order: int = 4,
+) -> np.ndarray:
+    """Build multi-derivative kinematic state matrix (up to 39-dim with velocity & acceleration)."""
+    kt = extract_kt_raw(kin)                                    # (T, 13)
+    features = [kt]
+    if include_velocity or include_acceleration:
+        vel = estimate_velocity(
+            kt, fs=fs, method=method,
+            sg_window=sg_window, sg_poly=sg_poly,
+            bw_cutoff=bw_cutoff, bw_order=bw_order,
+        )
+        if include_velocity:
+            features.append(vel)
+        if include_acceleration:
+            acc = estimate_acceleration(
+                kt, fs=fs, method=method,
+                sg_window=sg_window, sg_poly=sg_poly,
+                bw_cutoff=bw_cutoff, bw_order=bw_order,
+            )
+            features.append(acc)
+    return np.concatenate(features, axis=1).astype(np.float32)
 
 
 class KinNormalizer:
@@ -296,20 +375,30 @@ def preprocess_kinematics(
     kin: np.ndarray,
     fs: float = 500.0,
     include_velocity: bool = False,
+    include_acceleration: bool = False,
     velocity_method: str = "sg",
     sg_window: int = 11,
     sg_poly: int = 3,
     bw_cutoff: float = 20.0,
     bw_order: int = 4,
+    drop_indices: list[int] | None = None,
 ) -> np.ndarray:
-    """Extract k_t from raw 36-col kin signal, optionally with velocity."""
-    if include_velocity:
-        return extract_kt_with_velocity(
-            kin, fs=fs, method=velocity_method,
+    """Extract k_t from raw 36-col kin signal, optionally with velocity, acceleration, and index pruning."""
+    if include_velocity or include_acceleration:
+        kt = extract_kt_with_derivatives(
+            kin, fs=fs,
+            include_velocity=include_velocity,
+            include_acceleration=include_acceleration,
+            method=velocity_method,
             sg_window=sg_window, sg_poly=sg_poly,
             bw_cutoff=bw_cutoff, bw_order=bw_order,
         )
-    return extract_kt_raw(kin)
+    else:
+        kt = extract_kt_raw(kin)
+
+    if drop_indices is not None and len(drop_indices) > 0:
+        kt = np.delete(kt, drop_indices, axis=-1)
+    return kt
 
 
 def preprocess_kinematics_from_config(
@@ -322,6 +411,7 @@ def preprocess_kinematics_from_config(
         kin,
         fs=fs,
         include_velocity=cfg.get("include_velocity", False),
+        include_acceleration=cfg.get("include_acceleration", False),
         velocity_method=cfg.get("velocity_method", "sg"),
         sg_window=cfg.get("sg_window", 11),
         sg_poly=cfg.get("sg_poly", 3),

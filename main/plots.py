@@ -29,7 +29,7 @@ def get_dynamic_fig_dir(cfg):
     """Rebuilds the dynamic model path from the config, accounting for current fold."""
     max_epochs = cfg["training"]["max_epochs"]
     stride = cfg["data"]["stride"]
-    lr = cfg["training"].get("lr", 1e-4)
+    lr = cfg["training"].get("lr", cfg["training"].get("stage2_lr", cfg["training"].get("stage1_lr", 1e-4)))
     bs = cfg["training"]["batch_size"]
     config_str = f"ep{max_epochs}_st{stride}_lr{lr}_bs{bs}"
 
@@ -381,13 +381,6 @@ def plot_emg_envelope_overlay(raw_emg, env_emg, fs_raw=4000, fs_env=500, channel
     
     fig.tight_layout()
     save_fig(fig, f"emg_overlay_ch{channel_idx}", cfg)
-    return fig
-
-
-# ============================================================================
-# Interpretability Visualizations
-# ============================================================================
-
 def plot_interpretability_triptych(
     pred:              np.ndarray,
     target:            np.ndarray,
@@ -396,17 +389,18 @@ def plot_interpretability_triptych(
     muscle_names:      list[str],
     kin_feature_names: list[str] | None = None,
     fs:                float = 500.0,
+    smooth_hz:         float | None = 10.0,
     cfg:               dict | None = None,
     figsize:           tuple = (15, 13),
 ) -> plt.Figure:
     """Publication-quality 3-panel interpretability 'money plot' for a single inference window.
 
-    Panels (top â†’ bottom):
-      1. Actual vs Predicted EMG Envelope â€” all muscle channels overlaid with per-channel
+    Panels (top → bottom):
+      1. Actual vs Predicted EMG Envelope — all muscle channels overlaid with per-channel
          Pearson r and RMSE annotations and error-fill shading.
-      2. EEG Temporal Attention Heatmap â€” (H Ã— T) matrix showing which EEG timeframes
+      2. EEG Temporal Attention Heatmap — (H × T) matrix showing which EEG timeframes
          each attention head focuses on, averaged over query positions.
-      3. Dynamic Kinematic Edge Bias â€” 10 time-series lines for the upper-triangle muscle
+      3. Dynamic Kinematic Edge Bias — 10 time-series lines for the upper-triangle muscle
          pairs, showing how kinematic state modulates the muscle graph over the window.
       All panels share the same time axis for direct temporal alignment.
 
@@ -420,6 +414,7 @@ def plot_interpretability_triptych(
         muscle_names:      List of C muscle channel names, e.g. ['FDI', 'APB', 'ADM', 'ECR', 'FCR'].
         kin_feature_names: Optional list of kin_dim feature names for tooltips/legends.
         fs:                Sampling rate in Hz (for time axis). Default 500.
+        smooth_hz:         Optional low-pass cutoff frequency in Hz to remove high-freq jitter for publication figures.
         cfg:               Optional config dict passed to save_fig().
         figsize:           (width, height) in inches.
 
@@ -428,14 +423,20 @@ def plot_interpretability_triptych(
     """
     import matplotlib.gridspec as gridspec
     from scipy.stats import pearsonr as _pearsonr
+    from scipy.signal import butter, sosfiltfilt
 
     pred   = np.asarray(pred,   dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
     T, n_ch = pred.shape
     time = np.arange(T) / fs   # seconds
 
-    # â”€â”€ EEG attention processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # eeg_attn: (H, T_q, T_k). Mean over query positions â†’ (H, T) "key received".
+    # Optional low-pass Butterworth filtering for crisp paper-ready visualization
+    if smooth_hz is not None and smooth_hz > 0:
+        sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
+        pred = sosfiltfilt(sos, pred, axis=0)
+
+    # ── EEG attention processing ─────────────────────────────────────────
+    # eeg_attn: (H, T_q, T_k). Mean over query positions → (H, T) "key received".
     eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)   # (H, T, T)
     H_attn    = eeg_attn.shape[0]
     key_attn  = eeg_attn.mean(axis=1)                     # (H, T) key attention density
@@ -445,30 +446,33 @@ def plot_interpretability_triptych(
     attn_max = key_attn.max(axis=1, keepdims=True)
     key_norm  = (key_attn - attn_min) / (attn_max - attn_min + 1e-8)   # (H, T)
 
-    # â”€â”€ Kinematic edge bias processing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # kin_edge_bias: (T, H, N, N). Mean over H â†’ (T, N, N).
+    # ── Kinematic edge bias processing ───────────────────────────────────
+    # kin_edge_bias: (T, H, N, N). Mean over H → (T, N, N).
     kin_edge_bias = np.asarray(kin_edge_bias, dtype=np.float64)
     n_muscles  = kin_edge_bias.shape[-1]
-    edge_mean  = kin_edge_bias.mean(axis=1)   # (T, N, N) â€” mean over H
+    edge_mean  = kin_edge_bias.mean(axis=1)   # (T, N, N) — mean over H
 
     # Upper-triangle muscle pairs (10 unique for N=5).
     pairs      = [(i, j) for i in range(n_muscles) for j in range(i + 1, n_muscles)]
-    pair_labels = [f"{muscle_names[i]}\u2013{muscle_names[j]}" for i, j in pairs]
+    pair_labels = [f"{muscle_names[i]}–{muscle_names[j]}" for i, j in pairs]
     pair_data   = np.stack([edge_mean[:, i, j] for i, j in pairs], axis=1)   # (T, n_pairs)
     n_pairs     = len(pairs)
 
-    # Peak EMG activation time (mean over channels) â€” used for a reference marker.
+    if smooth_hz is not None and smooth_hz > 0:
+        pair_data = sosfiltfilt(sos, pair_data, axis=0)
+
+    # Peak EMG activation time (mean over channels) — used for a reference marker.
     peak_t = float(target.argmax(axis=0).mean()) / fs
 
-    # â”€â”€ Color palette â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Color palette ────────────────────────────────────────────────────────
     EMG_ACTUAL    = "#1a1a2e"      # near-black
     EMG_PRED      = "#e94040"      # vivid red
     EMG_FILL      = "#e94040"
-    PEAK_MARKER   = "#00b4d8"      # cyan â€” peak reference line
+    PEAK_MARKER   = "#00b4d8"      # cyan — peak reference line
     EDGE_CMAP     = plt.cm.tab10
     edge_colors   = [EDGE_CMAP(k / max(n_pairs - 1, 1)) for k in range(n_pairs)]
 
-    # â”€â”€ Figure / GridSpec â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Figure / GridSpec ────────────────────────────────────────────────────
     fig = plt.figure(figsize=figsize, facecolor="white")
     outer = gridspec.GridSpec(
         3, 1, figure=fig,
@@ -476,21 +480,22 @@ def plot_interpretability_triptych(
         hspace=0.42,
     )
 
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # PANEL 1 â€” EMG Envelopes
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 1 — EMG Envelopes
+    # ─────────────────────────────────────────────────────────────────────────
     inner_emg = gridspec.GridSpecFromSubplotSpec(
         n_ch, 1, subplot_spec=outer[0], hspace=0.06,
     )
     emg_axes = [fig.add_subplot(inner_emg[c]) for c in range(n_ch)]
 
+    pred_label = f"Predicted ({int(smooth_hz)}Hz Low-pass)" if smooth_hz else "Predicted"
     for c, ax in enumerate(emg_axes):
         # Actual and predicted traces.
         ax.plot(time, target[:, c], color=EMG_ACTUAL, lw=1.6, zorder=3, label="Actual")
         ax.plot(time, pred[:, c],   color=EMG_PRED,   lw=1.0, ls="--", zorder=2,
-                alpha=0.90, label="Predicted")
+                alpha=0.90, label=pred_label)
 
-        # Error fill â€” highlights discrepancy regions.
+        # Error fill — highlights discrepancy regions.
         ax.fill_between(time, target[:, c], pred[:, c],
                         color=EMG_FILL, alpha=0.12, zorder=1)
 
@@ -524,14 +529,14 @@ def plot_interpretability_triptych(
         borderpad=0.35, handlelength=1.6,
     )
     emg_axes[0].set_title(
-        "Panel 1 \u2014 EMG Envelope: Actual vs Predicted",
+        "Panel 1 — EMG Envelope: Actual vs Predicted",
         fontsize=11, fontweight="bold", pad=5,
     )
     emg_axes[-1].set_xlabel("Time (s)", fontsize=9)
 
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # PANEL 2 â€” EEG Temporal Attention Heatmap
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 2 — EEG Temporal Attention Heatmap
+    # ─────────────────────────────────────────────────────────────────────────
     ax_attn = fig.add_subplot(outer[1])
 
     im = ax_attn.imshow(
@@ -557,14 +562,14 @@ def plot_interpretability_triptych(
     ax_attn.set_xlim(time[0], time[-1])
     ax_attn.tick_params(axis="x", labelsize=8)
     ax_attn.set_title(
-        "Panel 2 \u2014 EEG Temporal Attention (per head \u00d7 key timestep, mean over query positions)",
+        "Panel 2 — EEG Temporal Attention (per head × key timestep, mean over query positions)",
         fontsize=11, fontweight="bold", pad=5,
     )
     ax_attn.legend(loc="upper left", fontsize=8, framealpha=0.7, borderpad=0.3)
 
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
-    # PANEL 3 â€” Dynamic Kinematic Edge Bias
-    # â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ─────────────────────────────────────────────────────────────────────────
+    # PANEL 3 — Dynamic Kinematic Edge Bias
+    # ─────────────────────────────────────────────────────────────────────────
     ax_edge = fig.add_subplot(outer[2])
 
     for k, (label, color) in enumerate(zip(pair_labels, edge_colors)):
@@ -577,7 +582,7 @@ def plot_interpretability_triptych(
     ax_edge.set_xlabel("Time (s)", fontsize=9)
     ax_edge.set_ylabel("Edge Bias\n(kinematic component)", fontsize=9)
     ax_edge.set_title(
-        "Panel 3 \u2014 Dynamic Kinematic Edge Bias: muscle-graph modulation over window"
+        "Panel 3 — Dynamic Kinematic Edge Bias: muscle-graph modulation over window"
         "\n(mean over attention heads; upper-triangle pairs only)",
         fontsize=11, fontweight="bold", pad=5,
     )
@@ -590,15 +595,14 @@ def plot_interpretability_triptych(
         ax_edge.spines[sp].set_visible(False)
     ax_edge.tick_params(labelsize=8)
 
-    # â”€â”€ Global title â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+    # ── Global title ─────────────────────────────────────────────────────────
     fig.suptitle(
-        "KG-GT Model \u2014 Interpretability Triptych (Single Inference Window)",
+        "KG-GT Model — Interpretability Triptych (Single Inference Window)",
         fontsize=13, fontweight="bold", y=1.010,
     )
     fig.tight_layout()
     save_fig(fig, "interpretability_triptych", cfg)
     return fig
-
 
 def plot_muscle_synergy_matrix(
     attn_weights:  np.ndarray,
@@ -607,10 +611,10 @@ def plot_muscle_synergy_matrix(
     figsize:       tuple = (7, 6),
     cfg:           dict | None = None,
 ) -> plt.Figure:
-    """Annotated heatmap of the mean GAT attention matrix â€” reveals muscle synergies.
+    """Annotated heatmap of the mean GAT attention matrix — reveals muscle synergies.
 
     The learned attention weights encode which muscle pairs co-activate.
-    Averaged over all timesteps and attention heads, the (N Ã— N) matrix is
+    Averaged over all timesteps and attention heads, the (N × N) matrix is
     analogous to an NMF synergy matrix but derived end-to-end from the data.
 
     Args:
@@ -625,7 +629,7 @@ def plot_muscle_synergy_matrix(
         matplotlib Figure.
     """
     attn = np.asarray(attn_weights, dtype=np.float64)   # (B*T, H, N, N)
-    # Mean over all timesteps AND all heads â†’ (N, N)
+    # Mean over all timesteps AND all heads → (N, N)
     synergy = attn.mean(axis=(0, 1))
     N = synergy.shape[0]
     names = muscle_names[:N]
@@ -690,17 +694,17 @@ def plot_kin_edge_linear_weights(
     """Heatmap of the transparent kin_edge_linear weight matrix.
 
     Directly reveals which kinematic features drive which muscle-pair edge
-    connections in each attention head â€” the primary neurophysiological
+    connections in each attention head — the primary neurophysiological
     interpretation output of the transparent linear mapping (Q1 design choice).
 
-    W \u2208 R^{H\u00b7N\u00b2 \u00d7 kin_dim}. Entry W[h*N\u00b2 + i*N + j, k] is the direct linear
-    contribution of kinematic feature k to the i\u2192j edge in head h.
+    W ∈ R^{H·N² × kin_dim}. Entry W[h*N² + i*N + j, k] is the direct linear
+    contribution of kinematic feature k to the i→j edge in head h.
 
-    Displayed as: one (N\u00b2 \u00d7 kin_dim) diverging heatmap per head + a mean-head
+    Displayed as: one (N² × kin_dim) diverging heatmap per head + a mean-head
     panel. Horizontal dashed lines separate source muscle groups (every N rows).
 
     Args:
-        weight_matrix:     (H*N*N, kin_dim) numpy array â€” e.g.
+        weight_matrix:     (H*N*N, kin_dim) numpy array — e.g.
                            model.gat.kin_edge_linear.weight.detach().cpu().numpy()
         muscle_names:      List of N muscle names.
         kin_feature_names: List of kin_dim kinematic feature names.
@@ -713,19 +717,29 @@ def plot_kin_edge_linear_weights(
     Returns:
         matplotlib Figure (mean + H per-head subplots).
     """
-    W    = np.asarray(weight_matrix, dtype=np.float64)   # (H*N\u00b2, kin_dim)
+    W    = np.asarray(weight_matrix, dtype=np.float64)   # (H*N², kin_dim)
     kin_dim = W.shape[1]
     W_4d = W.reshape(num_heads, n_nodes, n_nodes, kin_dim)   # (H, N, N, kin_dim)
 
-    # Row labels: "Muscle_i \u2192 Muscle_j" for all N\u00b2 source-target combos.
+    # Row labels: "Muscle_i → Muscle_j" for all N² source-target combos.
     row_labels = [
-        f"{muscle_names[i]}\u2192{muscle_names[j]}"
+        f"{muscle_names[i]}→{muscle_names[j]}"
         for i in range(n_nodes)
         for j in range(n_nodes)
     ]
-    col_labels = kin_feature_names or [f"k{k}" for k in range(kin_dim)]
-    # Truncate to 6 chars to avoid overlap on x-axis.
-    col_short  = [f[:7] for f in col_labels]
+    col_labels = list(kin_feature_names) if kin_feature_names else [f"k{k}" for k in range(kin_dim)]
+    
+    # Automatically generate velocity feature names if only position features were passed
+    if len(col_labels) * 2 == kin_dim:
+        vel_labels = []
+        for name in col_labels:
+            if name.startswith("p_"):
+                vel_labels.append("v_" + name[2:])
+            else:
+                vel_labels.append(f"d({name})/dt")
+        col_labels = col_labels + vel_labels
+    elif len(col_labels) != kin_dim:
+        col_labels = (col_labels + [f"k{k}" for k in range(kin_dim)])[:kin_dim]
 
     n_plots = num_heads + 1   # one per head + one mean
     n_cols  = min(n_plots, 3)
@@ -745,7 +759,7 @@ def plot_kin_edge_linear_weights(
             vmin=-vabs,
             vmax=vabs,
             annot=False,
-            xticklabels=col_short,
+            xticklabels=col_labels,
             yticklabels=row_labels,
             cbar_kws={"shrink": 0.85, "label": "Weight"},
             linewidths=0.0,
@@ -824,12 +838,13 @@ def plot_residual_decomposition(model, eeg_window, kin_window, emg_target,
         temporal = model.encoder(eeg_window)
         nodes    = model.node_projection(temporal)
 
-        # GAT refined node embedding (graph attention output ONLY)
-        gat_out  = model.gat(nodes, kin_window)          # (1, T, n_nodes, node_dim)
+        k_gat = model.get_gat_kin(kin_window) if hasattr(model, "get_gat_kin") else kin_window
+        k_skip = model.get_skip_kin(kin_window) if hasattr(model, "get_skip_kin") else kin_window
+        gat_out  = model.gat(nodes, k_gat)               # (1, T, n_nodes, node_dim)
 
         # Kinematic skip contribution
-        B, T, K = kin_window.shape
-        kin_skip = model.kin_skip_proj(kin_window).view(B, T, model.out_channels, -1)
+        B, T, _ = kin_window.shape
+        kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
 
         # Decode each component independently — all in normalized model space
         full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()  # (T, 5)
@@ -1045,8 +1060,9 @@ def plot_kin_skip_over_time(model, eeg_window, kin_window, emg_target,
         eeg_window = eeg_window.to(next(model.parameters()).device)
         kin_window  = kin_window.to(next(model.parameters()).device)
 
-        B, T, K = kin_window.shape
-        kin_skip = model.kin_skip_proj(kin_window).view(B, T, model.out_channels, -1)  # (1, T, 5, node_dim)
+        B, T, _ = kin_window.shape
+        k_skip = model.get_skip_kin(kin_window) if hasattr(model, "get_skip_kin") else kin_window
+        kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)  # (1, T, 5, node_dim)
 
         # L2 norm over node_dim â†’ (T, 5): how strongly does kin highway fire per muscle per timestep?
         kin_skip_norm = kin_skip.squeeze(0).norm(dim=-1).cpu().numpy()                  # (T, 5)
@@ -1102,4 +1118,255 @@ def plot_kin_skip_over_time(model, eeg_window, kin_window, emg_target,
     )
     fig.tight_layout()
     save_fig(fig, "kin_skip_over_time", cfg)
+    return fig
+
+
+# ============================================================================
+# NEW DIAGNOSTIC PLOT 3: Neural-Mechanical Latency Lag Analysis (Cross-Correlation)
+# ============================================================================
+
+def plot_neural_mechanical_latency_lag(model, eeg_window, kin_window, emg_target,
+                                       emg_names=None, fs=500, max_lag_ms=250,
+                                       emg_mean=None, emg_std=None, cfg=None):
+    """Computes time-lagged cross-correlation between model prediction components and actual EMG.
+
+    Reveals whether neural signals (GAT/EEG) precede muscular contraction in time.
+    If peak correlation happens at negative lag (e.g., -50 ms to -100 ms), zero-lag training
+    inherently forces the network into smoothed canopies!
+    """
+    import torch
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+    max_samples = int((max_lag_ms / 1000.0) * fs)
+    lags_samples = np.arange(-max_samples, max_samples + 1)
+    lags_ms = (lags_samples / fs) * 1000.0
+
+    with torch.no_grad():
+        eeg_w = eeg_window.to(next(model.parameters()).device)
+        kin_w = kin_window.to(next(model.parameters()).device)
+        temporal = model.encoder(eeg_w)
+        nodes = model.node_projection(temporal)
+        k_gat = model.get_gat_kin(kin_w) if hasattr(model, "get_gat_kin") else kin_w
+        k_skip = model.get_skip_kin(kin_w) if hasattr(model, "get_skip_kin") else kin_w
+        gat_out = model.gat(nodes, k_gat)
+        B, T, _ = kin_w.shape
+        kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
+
+        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()
+        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+
+    if hasattr(emg_target, "cpu"):
+        emg_target = emg_target.cpu().numpy()
+
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"):
+            emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):
+            emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        full_out  = full_out * _s + _m
+        gat_only  = gat_only * _s + _m
+        skip_only = skip_only * _s + _m
+
+    n_ch = full_out.shape[1]
+    fig, axes = plt.subplots(n_ch, 1, figsize=(12, 2.6 * n_ch), sharex=True)
+    if n_ch == 1:
+        axes = [axes]
+
+    for i, ax in enumerate(axes):
+        y_true = emg_target[:, i] - np.mean(emg_target[:, i])
+        y_true_norm = np.linalg.norm(y_true) + 1e-8
+
+        corr_full, corr_gat, corr_skip = [], [], []
+        for d in lags_samples:
+            # Shift pred relative to target
+            if d < 0:
+                p_f = full_out[:d, i]; t_t = y_true[-d:]
+                p_g = gat_only[:d, i]
+                p_s = skip_only[:d, i]
+            elif d > 0:
+                p_f = full_out[d:, i]; t_t = y_true[:-d]
+                p_g = gat_only[d:, i]
+                p_s = skip_only[d:, i]
+            else:
+                p_f = full_out[:, i]; t_t = y_true
+                p_g = gat_only[:, i]
+                p_s = skip_only[:, i]
+
+            t_t_clean = t_t - np.mean(t_t)
+            t_t_norm = np.linalg.norm(t_t_clean) + 1e-8
+
+            def get_r(pred_sub):
+                p_clean = pred_sub - np.mean(pred_sub)
+                p_norm = np.linalg.norm(p_clean) + 1e-8
+                return np.dot(p_clean, t_t_clean) / (p_norm * t_t_norm)
+
+            corr_full.append(get_r(p_f))
+            corr_gat.append(get_r(p_g))
+            corr_skip.append(get_r(p_s))
+
+        ax.plot(lags_ms, corr_full, color="#e94560", lw=1.5, label="Full Prediction", zorder=4)
+        ax.plot(lags_ms, corr_gat,  color="#0f3460", lw=1.5, ls="--", label="GAT Component (EEG)", zorder=3)
+        ax.plot(lags_ms, corr_skip, color="#f5a623", lw=1.3, ls=":",  label="Kin-Skip Component", zorder=2)
+
+        peak_idx = np.argmax(corr_gat)
+        peak_lag_ms = lags_ms[peak_idx]
+        ax.axvline(x=peak_lag_ms, color="#0f3460", ls="--", alpha=0.6, lw=1.0)
+        ax.axvline(x=0, color="gray", ls="--", alpha=0.5, lw=1.0)
+        ax.set_ylabel(f"{emg_names[i]}\nCorrelation (r)", fontsize=9)
+        ax.set_title(f"Peak GAT Correlation at Lag: {peak_lag_ms:.1f} ms", fontsize=9, color="#0f3460")
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
+
+    axes[-1].set_xlabel("Lag $\\tau$ (ms) [Negative $\\tau$ means neural command precedes motor execution]", fontsize=10)
+    fig.suptitle("Neural-Mechanical Latency Lag Analysis (Time-Shifted Cross-Correlation)\n"
+                 "If peak correlation lies in negative lag space, latency time-shifting in preprocessing is required",
+                 fontweight="bold", fontsize=11)
+    fig.tight_layout()
+    save_fig(fig, "neural_mechanical_latency_lag", cfg)
+    return fig
+
+
+# ============================================================================
+# NEW DIAGNOSTIC PLOT 4: Spectral Power Decomposition (PSD Bandwidth Assessment)
+# ============================================================================
+
+def plot_spectral_power_decomposition(model, eeg_window, kin_window, emg_target,
+                                      emg_names=None, fs=500, max_freq_hz=20.0,
+                                      emg_mean=None, emg_std=None, cfg=None):
+    """Plots the Power Spectral Density (PSD) up to max_freq_hz via Welch's periodogram.
+    
+    Reveals exact frequency threshold where model predictions lose high-frequency burst content
+    and attenuate into low-pass smoothed canopies.
+    """
+    import torch
+    from scipy.signal import welch
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+
+    with torch.no_grad():
+        eeg_w = eeg_window.to(next(model.parameters()).device)
+        kin_w = kin_window.to(next(model.parameters()).device)
+        temporal = model.encoder(eeg_w)
+        nodes = model.node_projection(temporal)
+        k_gat = model.get_gat_kin(kin_w) if hasattr(model, "get_gat_kin") else kin_w
+        k_skip = model.get_skip_kin(kin_w) if hasattr(model, "get_skip_kin") else kin_w
+        gat_out = model.gat(nodes, k_gat)
+        B, T, _ = kin_w.shape
+        kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
+
+        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()
+        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+
+    if hasattr(emg_target, "cpu"):
+        emg_target = emg_target.cpu().numpy()
+
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"):
+            emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):
+            emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        full_out  = full_out * _s + _m
+        gat_only  = gat_only * _s + _m
+        skip_only = skip_only * _s + _m
+
+    n_ch = full_out.shape[1]
+    fig, axes = plt.subplots(n_ch, 1, figsize=(12, 2.5 * n_ch), sharex=True)
+    if n_ch == 1:
+        axes = [axes]
+
+    nperseg = min(256, emg_target.shape[0])
+    for i, ax in enumerate(axes):
+        f, psd_true = welch(emg_target[:, i], fs=fs, nperseg=nperseg)
+        _, psd_full = welch(full_out[:, i],   fs=fs, nperseg=nperseg)
+        _, psd_gat  = welch(gat_only[:, i],   fs=fs, nperseg=nperseg)
+        _, psd_skip = welch(skip_only[:, i],  fs=fs, nperseg=nperseg)
+
+        mask = f <= max_freq_hz
+        ax.semilogy(f[mask], psd_true[mask], color="#1a1a2e", lw=1.8, label="Ground Truth EMG", zorder=4)
+        ax.semilogy(f[mask], psd_full[mask], color="#e94560", lw=1.4, ls="--", label="Full Prediction", zorder=3)
+        ax.semilogy(f[mask], psd_gat[mask],  color="#0f3460", lw=1.2, ls=":",  label="GAT Component", zorder=2)
+        ax.semilogy(f[mask], psd_skip[mask], color="#f5a623", lw=1.2, ls="-.", label="Kin-Skip Component", alpha=0.85)
+
+        ax.set_ylabel(f"{emg_names[i]}\nPSD ($V^2$/Hz)", fontsize=9)
+        ax.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.8)
+        ax.axvline(x=3.0, color="gray", ls=":", alpha=0.5, label="3 Hz Canopy Limit")
+
+    axes[-1].set_xlabel("Frequency (Hz) [Content > 3 Hz represents rapid muscular burst spikes]", fontsize=10)
+    fig.suptitle("Spectral Power Decomposition: Frequency Content & Bandwidth Attenuation\n"
+                 "If prediction power drops below Ground Truth above 2-3 Hz, model is acting as a smoothing filter",
+                 fontweight="bold", fontsize=11)
+    fig.tight_layout()
+    save_fig(fig, "spectral_power_decomposition", cfg)
+    return fig
+
+
+# ============================================================================
+# NEW DIAGNOSTIC PLOT 5: Kinematic Velocity & Acceleration Density Alignment
+# ============================================================================
+
+def plot_kinematic_velocity_acceleration_density(kin_window, emg_target, emg_names=None,
+                                                 fs=500, cfg=None):
+    """3x5 scatter density grid showing how position vs velocity vs acceleration maps to EMG bursts.
+    
+    Validates whether static absolute positioning introduces unwanted resting baseline offset,
+    while movement velocity/acceleration cleanly segregates contraction bursts.
+    """
+    import torch
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+    
+    if hasattr(emg_target, "cpu"):
+        emg_target = emg_target.cpu().numpy()
+
+    if hasattr(kin_window, "cpu"):
+        kin_np = kin_window.squeeze(0).cpu().numpy()
+    else:
+        kin_np = np.asarray(kin_window)
+    if kin_np.ndim == 3:
+        kin_np = kin_np[0]
+
+    # Calculate L2 magnitudes of kinematic position, velocity, acceleration
+    # Columns 0-8 contain spatial position features (wrist, index, thumb)
+    pos_sub = kin_np[:, :min(9, kin_np.shape[1])]
+    pos_norm = np.linalg.norm(pos_sub, axis=1)
+    
+    # Velocity & Acceleration via first and second temporal derivative magnitude
+    vel_norm = np.linalg.norm(np.gradient(pos_sub, 1.0/fs, axis=0), axis=1)
+    acc_norm = np.linalg.norm(np.gradient(np.gradient(pos_sub, 1.0/fs, axis=0), 1.0/fs, axis=0), axis=1)
+
+    n_ch = emg_target.shape[1]
+    fig, axes = plt.subplots(n_ch, 3, figsize=(15, 2.6 * n_ch))
+
+    for i in range(n_ch):
+        emg_y = emg_target[:, i]
+        
+        # Col 1: Absolute Position vs EMG
+        r_pos = np.corrcoef(pos_norm, emg_y)[0, 1] if len(pos_norm) > 1 else 0.0
+        axes[i, 0].scatter(pos_norm, emg_y, alpha=0.25, s=15, color="#1a1a2e", edgecolors="none")
+        axes[i, 0].set_ylabel(f"{emg_names[i]}\nEMG Amplitude", fontsize=9)
+        axes[i, 0].set_title(f"Absolute Position ($r = {r_pos:.2f}$)", fontsize=9)
+        
+        # Col 2: Movement Velocity vs EMG
+        r_vel = np.corrcoef(vel_norm, emg_y)[0, 1] if len(vel_norm) > 1 else 0.0
+        axes[i, 1].scatter(vel_norm, emg_y, alpha=0.25, s=15, color="#e94560", edgecolors="none")
+        axes[i, 1].set_title(f"Movement Velocity ($r = {r_vel:.2f}$)", fontsize=9)
+        
+        # Col 3: Movement Acceleration vs EMG
+        r_acc = np.corrcoef(acc_norm, emg_y)[0, 1] if len(acc_norm) > 1 else 0.0
+        axes[i, 2].scatter(acc_norm, emg_y, alpha=0.25, s=15, color="#0f3460", edgecolors="none")
+        axes[i, 2].set_title(f"Movement Acceleration ($r = {r_acc:.2f}$)", fontsize=9)
+
+    axes[-1, 0].set_xlabel("Position Magnitude (mm)", fontsize=10)
+    axes[-1, 1].set_xlabel("Velocity Magnitude (mm/s)", fontsize=10)
+    axes[-1, 2].set_xlabel("Acceleration Magnitude (mm/$s^2$)", fontsize=10)
+
+    fig.suptitle("Kinematic State Separation: Absolute Position vs. Velocity & Acceleration vs. EMG Bursts\n"
+                 "High correlation on Velocity/Acceleration vs. low correlation on Position proves necessity of derivative decoupling",
+                 fontweight="bold", fontsize=11)
+    fig.tight_layout()
+    save_fig(fig, "kinematic_velocity_acceleration_density", cfg)
     return fig
