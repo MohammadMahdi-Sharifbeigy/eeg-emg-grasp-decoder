@@ -402,8 +402,11 @@ class MuscleGATLayer(nn.Module):
         self.key      = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
         self.value    = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
         self.out      = nn.Linear(hidden_dim * num_heads, self.out_dim)
+        # Zero-initialize the output projection for perfect identity mapping at start
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
         self.dropout  = nn.Dropout(dropout)
-        self.norm     = nn.LayerNorm(self.out_dim)
+        self.norm     = nn.LayerNorm(node_dim)  # Pre-LN is applied to input dim
         self.residual = (
             nn.Linear(node_dim, self.out_dim) if node_dim != self.out_dim else nn.Identity()
         )
@@ -437,7 +440,10 @@ class MuscleGATLayer(nn.Module):
     def forward(self, nodes: torch.Tensor) -> torch.Tensor:
         """nodes: (B, T, N, node_dim) → (B, T, N, out_dim)."""
         batch_size, steps, n_nodes, _ = nodes.shape
-        flat = nodes.reshape(batch_size * steps, n_nodes, -1)
+        
+        # Pre-LN: apply norm before attention
+        normed_nodes = self.norm(nodes)
+        flat = normed_nodes.reshape(batch_size * steps, n_nodes, -1)
 
         q = (
             self.query(flat)
@@ -472,7 +478,7 @@ class MuscleGATLayer(nn.Module):
         )
         out = self.out(out).view(batch_size, steps, n_nodes, self.out_dim)
         residual = self.residual(nodes)
-        return self.norm(residual + self.dropout(out))
+        return residual + self.dropout(out)
 
 
 class MuscleGATEncoder(nn.Module):
@@ -569,8 +575,11 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         self.node_proj  = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
         self.value_proj = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
         self.out        = nn.Linear(hidden_dim * num_heads, out_dim)
+        # Zero-initialize the output projection for perfect identity mapping at start
+        nn.init.zeros_(self.out.weight)
+        nn.init.zeros_(self.out.bias)
         self.dropout    = nn.Dropout(dropout)
-        self.norm       = nn.LayerNorm(out_dim)
+        self.norm       = nn.LayerNorm(node_dim)  # Pre-LN is applied to input dim
         self.residual   = (
             nn.Linear(node_dim, out_dim) if node_dim != out_dim else nn.Identity()
         )
@@ -639,7 +648,10 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
             W[h, i, j, :]  → how each kinematic feature contributes to the i→j edge in head h
         """
         batch_size, steps, n_nodes, _ = nodes.shape
-        flat_nodes = nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
+        
+        # Pre-LN: apply norm before attention
+        normed_nodes = self.norm(nodes)
+        flat_nodes = normed_nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
         flat_kin   = kin.reshape(batch_size * steps, -1)              # (B*T, kin_dim)
 
         # Q and V from nodes
@@ -695,7 +707,7 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         )
         out      = self.out(out).view(batch_size, steps, n_nodes, -1)
         residual = self.residual(nodes)
-        return self.norm(residual + self.dropout(out))
+        return residual + self.dropout(out)
 
 # ============================================================================
 # Per-Muscle Independent Decoder (Unlocks individual muscle burst mechanics)
@@ -726,6 +738,26 @@ class PerMuscleDecoder(nn.Module):
         ]
         return torch.stack(outs, dim=-2)
 
+class LearnableLagAlignment(nn.Module):
+    """Learns a soft per-muscle temporal shift via a depthwise causal conv
+    over a small kernel, instead of a hard-coded fixed-sample shift.
+    Kernel size sets the max lag (in samples) the model can express.
+    """
+    def __init__(self, n_channels: int, max_lag_samples: int = 150):
+        super().__init__()
+        k = 2 * max_lag_samples + 1
+        self.conv = nn.Conv1d(
+            n_channels, n_channels, kernel_size=k,
+            padding=max_lag_samples, groups=n_channels, bias=False,
+        )
+        # init as identity (delta at center tap) so training starts unbiased
+        with torch.no_grad():
+            self.conv.weight.zero_()
+            self.conv.weight[:, 0, max_lag_samples] = 1.0
+
+    def forward(self, x: Tensor) -> Tensor:
+        # x: (B, T, C) -> (B, C, T) -> conv -> (B, T, C)
+        return self.conv(x.transpose(1, 2)).transpose(1, 2)
 
 # ============================================================================
 # Transformer-Only Model (Phase 1 Pretraining)
@@ -839,6 +871,7 @@ class KGGTModel(nn.Module):
             self.kin_skip_proj = None
 
         self.decoder = PerMuscleDecoder(node_dim, out_channels)
+        self.lag_align = LearnableLagAlignment(n_channels=out_channels, max_lag_samples=150)  # ±300ms at 500Hz
 
     def get_gat_kin(self, kin: torch.Tensor) -> torch.Tensor:
         """Extract positional features for GAT co-activation synergy modulation."""
@@ -868,8 +901,8 @@ class KGGTModel(nn.Module):
             refined = refined + kin_skip
         else:
             refined = self.gat(nodes)
-        return self.decoder(refined).squeeze(-1)
-
+        out = self.decoder(refined).squeeze(-1)   # (B, T, 5)
+        return self.lag_align(out)
 
 def build_kg_gt_from_config(
     cfg: dict,

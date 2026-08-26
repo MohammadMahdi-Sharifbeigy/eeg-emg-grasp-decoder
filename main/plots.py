@@ -381,6 +381,86 @@ def plot_emg_envelope_overlay(raw_emg, env_emg, fs_raw=4000, fs_env=500, channel
     
     fig.tight_layout()
     save_fig(fig, f"emg_overlay_ch{channel_idx}", cfg)
+
+
+# plots.py — add after plot_emg_envelope_overlay (after line 383)
+
+def plot_emg_method_comparison_grid(
+    raw_emg: np.ndarray,
+    env_old: np.ndarray,
+    env_new: np.ndarray,
+    fs_raw: float,
+    fs_env: float,
+    muscle_names: list[str],
+    new_method_label: str = "TKEO",
+    old_method_label: str = "Rectify+LP",
+    new_scale_factor: float = 1.0,
+    start_sec: float = 0.0,
+    figsize_per_row: tuple = (14, 2.6),
+    cfg: dict | None = None,
+) -> plt.Figure:
+    """One stacked-subplot grid, one row per muscle, each row overlaying:
+    raw EMG (thin, background), old-method envelope (green), new-method
+    envelope (red, optionally rescaled purely for visual comparison).
+
+    Args:
+        raw_emg:  (T_raw, n_muscles) raw EMG signal
+        env_old:  (T_env, n_muscles) old-method envelope (e.g. rectify+LP)
+        env_new:  (T_env, n_muscles) new-method envelope (e.g. TKEO+LP)
+        fs_raw / fs_env: sampling rates for the two arrays
+        muscle_names: channel labels, len == n_muscles, used as row titles
+        new_scale_factor: purely cosmetic multiplier applied to env_new so its
+            amplitude is visually comparable to env_old/raw on the same axis.
+            Does NOT affect the underlying data — annotated in the row title.
+        start_sec: offset added to the x-axis so slices line up with the
+            original recording's absolute time (purely cosmetic).
+
+    Returns:
+        The matplotlib Figure (also saved via save_fig if cfg is given).
+    """
+    raw_emg = np.asarray(raw_emg)
+    env_old = np.asarray(env_old)
+    env_new = np.asarray(env_new)
+    n_muscles = raw_emg.shape[1]
+
+    time_raw = start_sec + _make_time_axis(raw_emg, fs_raw)
+    time_old = start_sec + _make_time_axis(env_old, fs_env)
+    time_new = start_sec + _make_time_axis(env_new, fs_env)
+
+    fig, axes = plt.subplots(
+        n_muscles, 1, figsize=(figsize_per_row[0], figsize_per_row[1] * n_muscles),
+        sharex=True,
+    )
+    if n_muscles == 1:
+        axes = [axes]
+
+    env_new_scaled = env_new * new_scale_factor
+
+    for i, ax in enumerate(axes):
+        name = muscle_names[i] if i < len(muscle_names) else f"Ch {i + 1}"
+
+        ax.plot(time_raw, raw_emg[:, i], color="steelblue", linewidth=0.4,
+                alpha=0.5, label="Raw EMG", zorder=1)
+        ax.plot(time_old, env_old[:, i], color="green", linewidth=1.8,
+                label=f"Old ({old_method_label})", zorder=2)
+        ax.plot(time_new, env_new_scaled[:, i], color="red", linewidth=1.8,
+                label=f"New ({new_method_label})"
+                      + (f" ×{new_scale_factor:g}" if new_scale_factor != 1.0 else ""),
+                zorder=3)
+
+        ax.set_ylabel(name, rotation=0, ha="right", va="center", fontsize=10)
+        ax.grid(True, alpha=0.25)
+        if i == 0:
+            ax.legend(loc="upper right", fontsize=8, ncol=3)
+
+    axes[-1].set_xlabel("Time [s]")
+    fig.suptitle("EMG Envelope Comparison: Raw vs Old Method vs New Method",
+                 fontsize=13, y=1.0)
+    fig.tight_layout()
+    save_fig(fig, "emg_method_comparison_grid", cfg)
+    return fig
+
+
 def plot_interpretability_triptych(
     pred:              np.ndarray,
     target:            np.ndarray,

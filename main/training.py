@@ -8,7 +8,6 @@ Features:
   - Crash-safe checkpointing (last.pt / best.pt)
   - GPU status diagnostics
 """
-
 from __future__ import annotations
 
 import inspect
@@ -18,6 +17,8 @@ import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable
+from pandas._config import config
+from asyncio import exceptions
 
 import numpy as np
 import torch
@@ -117,8 +118,12 @@ class TrainConfig:
     # ── optimizer / scheduler selection ──────────────────────────────────────
     optimizer: str = "adamw"            # 'adam' | 'adamw'
     scheduler: str = "reduce"           # 'reduce' | 'cosine'
+    warmup_epochs: int = 0        # NEW — 0 disables warmup (fully backward-compatible)
     cosine_t_max: int | None = None     # cosine period (epochs); None → max_epochs
     cosine_eta_min: float = 1e-6        # cosine floor LR
+    # ── differential LR for Transformer+GAT E2E training ─────────────────────
+    transformer_lr_scale: float = 1.0   # encoder/node_proj LR = lr * this scale
+                                        # set < 1.0 (e.g. 0.2) for E2E warmup Phase 2
 
     @classmethod
     def from_config(cls, cfg: dict, max_epochs: int | None = None, lr: float | None = None) -> "TrainConfig":
@@ -146,16 +151,17 @@ class TrainConfig:
             scheduler=cfg.get("scheduler", "reduce"),
             cosine_t_max=cfg.get("cosine_t_max", None),
             cosine_eta_min=cfg.get("cosine_eta_min", 1e-6),
+            transformer_lr_scale=cfg.get("transformer_lr_scale", 1.0),
+            warmup_epochs=cfg.get("warmup_epochs", 0),
         )
 
 
 @dataclass
 class TrainResult:
-    """Outcome of a training run."""
     best_val: float
     best_state: dict | None
     history: dict[str, list[float]] = field(default_factory=lambda: {"train": [], "val": [], "lr": []})
-
+    smoothed_val_history: list[float] = field(default_factory=list)   # NEW
 
 # ============================================================================
 # Internal epoch runner
@@ -204,50 +210,75 @@ def _run_epoch(
     else:
         bar = loader
 
-    for batch_idx, (eeg, kin, emg) in enumerate(bar, start=1):
-        model_inputs, y = prepare_batch(eeg, kin, emg)
-        with torch.set_grad_enabled(train):
-            with torch.amp.autocast(device_type=amp_device, enabled=use_amp):
-                pred = _forward_model(model, model_inputs)
-                # Pass model to loss only during training so the KL edge-prior
-                # regularization is active. Validation loss is kept as pure
-                # reconstruction for fair cross-epoch comparison.
-                if _loss_accepts_model and train:
-                    loss = loss_fn(pred, y, model=model)
-                else:
-                    loss = loss_fn(pred, y)
-
-            if train:
-                loss_for_backward = loss / gradient_accumulation_steps
-                if scaler is not None and scaler.is_enabled():
-                    scaler.scale(loss_for_backward).backward()
-                else:
-                    loss_for_backward.backward()
-
-                should_step = (
-                    batch_idx % gradient_accumulation_steps == 0
-                    or batch_idx == len(loader)
-                )
-                if should_step:
-                    if scaler is not None and scaler.is_enabled():
-                        scaler.unscale_(optimizer)
-                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                        scaler.step(optimizer)
-                        scaler.update()
+    try:
+        for batch_idx, (eeg, kin, emg) in enumerate(bar, start=1):
+            model_inputs, y = prepare_batch(eeg, kin, emg)
+            with torch.set_grad_enabled(train):
+                with torch.amp.autocast(device_type=amp_device, enabled=use_amp):
+                    pred = _forward_model(model, model_inputs)
+                    # Pass model to loss only during training so the KL edge-prior
+                    # regularization is active. Validation loss is kept as pure
+                    # reconstruction for fair cross-epoch comparison.
+                    if _loss_accepts_model and train:
+                        loss = loss_fn(pred, y, model=model)
                     else:
-                        nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
-                        optimizer.step()
-                    optimizer.zero_grad(set_to_none=True)
+                        loss = loss_fn(pred, y)
 
-        bs = eeg.size(0)
-        batch_loss = loss.item()
-        total += batch_loss * bs
-        n += bs
+                if train:
+                    loss_for_backward = loss / gradient_accumulation_steps
+                    if scaler is not None and scaler.is_enabled():
+                        scaler.scale(loss_for_backward).backward()
+                    else:
+                        loss_for_backward.backward()
 
+                    should_step = (
+                        batch_idx % gradient_accumulation_steps == 0
+                        or batch_idx == len(loader)
+                    )
+                    if should_step:
+                        if scaler is not None and scaler.is_enabled():
+                            scaler.unscale_(optimizer)
+                            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            nn.utils.clip_grad_norm_(model.parameters(), grad_clip)
+                            optimizer.step()
+                        optimizer.zero_grad(set_to_none=True)
+
+            bs = eeg.size(0)
+            batch_loss = loss.item()
+            total += batch_loss * bs
+            n += bs
+
+            if _TQDM_AVAILABLE:
+                bar.set_postfix(loss=f"{batch_loss:.4f}")
+    finally:
         if _TQDM_AVAILABLE:
-            bar.set_postfix(loss=f"{batch_loss:.4f}")
+            bar.close()
 
     return total / max(n, 1)
+
+def compute_mean_baseline_loss(loader: DataLoader, loss_fn: nn.Module, device: torch.device) -> float:
+    """Trivial baseline: predict the per-channel training mean for every timestep.
+    If Stage-1 train loss converges to ~this value, the model has collapsed
+    to a constant predictor and learned nothing beyond the channel mean.
+    """
+    sums, sq_sums, count = None, None, 0
+    with torch.no_grad():
+        for _, _, emg in loader:
+            emg = emg.to(device)
+            if sums is None:
+                sums = emg.sum(dim=(0, 1))
+                sq_sums = (emg ** 2).sum(dim=(0, 1))
+            else:
+                sums += emg.sum(dim=(0, 1))
+                sq_sums += (emg ** 2).sum(dim=(0, 1))
+            count += emg.shape[0] * emg.shape[1]
+    mean = sums / count                                   # (C,)
+    var = sq_sums / count - mean ** 2
+    # MSE of predicting the mean everywhere == variance of the target
+    return var.mean().item()
 
 
 # ============================================================================
@@ -346,17 +377,66 @@ def train_model(
     """
     use_amp = cfg.use_amp and device.type == "cuda"
 
-    # ── Optimizer (with differential parameter grouping for Stage 2 KG-GT) ───
+    # ── Optimizer (with parameter grouping for differential LRs) ────────────
     _opt_name = cfg.optimizer.lower().strip()
 
-    if getattr(model, "use_kinematic_guidance", False) and getattr(model, "kin_skip_proj", None) is not None:
-        skip_params = set(model.kin_skip_proj.parameters())
-        neural_params = [p for p in model.parameters() if p not in skip_params]
-        skip_list = list(model.kin_skip_proj.parameters())
+    # Collect parameter sets for potential grouping
+    _has_transformer = hasattr(model, "encoder") and hasattr(model, "node_projection")
+    _has_kin_skip    = getattr(model, "use_kinematic_guidance", False) and getattr(model, "kin_skip_proj", None) is not None
+    _use_diff_trans  = cfg.transformer_lr_scale < 1.0 and _has_transformer
 
-        # Allocate higher plasticity to neural/decoder pathway vs restricted skip highway
+    if _use_diff_trans:
+        # Three-group differential LR:
+        #   1. Transformer backbone (encoder + node_projection): lr * transformer_lr_scale
+        #   2. KinSkip highway (if present): lr / 3.0  (already regularized)
+        #   3. Everything else (GAT, decoder, …): lr
+        _trans_params = set()
+        for _m in [model.encoder, model.node_projection]:
+            _trans_params.update(_m.parameters())
+
+        _skip_params = set()
+        if _has_kin_skip:
+            _skip_params.update(model.kin_skip_proj.parameters())
+
+        _other_params = [
+            p for p in model.parameters()
+            if p not in _trans_params and p not in _skip_params and p.requires_grad
+        ]
+        _trans_list = [
+            p for p in model.parameters()
+            if p in _trans_params and p.requires_grad
+        ]
+        _skip_list = [
+            p for p in model.parameters()
+            if p in _skip_params and p.requires_grad
+        ]
+
         param_groups = [
-            {"params": neural_params, "lr": cfg.lr, "weight_decay": cfg.weight_decay},
+            {"params": _other_params, "lr": cfg.lr,                                    "weight_decay": cfg.weight_decay},
+            {"params": _trans_list,   "lr": cfg.lr * cfg.transformer_lr_scale,         "weight_decay": cfg.weight_decay},
+        ]
+        if _skip_list:
+            param_groups.append(
+                {"params": _skip_list, "lr": cfg.lr / 3.0, "weight_decay": max(0.05, cfg.weight_decay * 5.0)}
+            )
+        logger.info(
+            "Differential LR: other=%.2e | transformer=%.2e (scale=%.2f) | skip=%s",
+            cfg.lr, cfg.lr * cfg.transformer_lr_scale, cfg.transformer_lr_scale,
+            f"{cfg.lr/3:.2e}" if _skip_list else "n/a",
+        )
+        print(
+            f"  Differential LR groups:\n"
+            f"    GAT/Decoder  : {cfg.lr:.2e}\n"
+            f"    Transformer  : {cfg.lr * cfg.transformer_lr_scale:.2e}  (scale={cfg.transformer_lr_scale})\n"
+            + (f"    KinSkip      : {cfg.lr/3:.2e}  (regularized)\n" if _skip_list else "")
+        )
+    elif _has_kin_skip:
+        # Original two-group logic: neural vs kin_skip_proj
+        skip_params   = set(model.kin_skip_proj.parameters())
+        neural_params = [p for p in model.parameters() if p not in skip_params]
+        skip_list     = list(model.kin_skip_proj.parameters())
+        param_groups  = [
+            {"params": neural_params, "lr": cfg.lr,       "weight_decay": cfg.weight_decay},
             {"params": skip_list,     "lr": cfg.lr / 3.0, "weight_decay": max(0.05, cfg.weight_decay * 5.0)},
         ]
         logger.info("Applying differential parameter groups: neural lr=%g, skip lr=%g, skip weight_decay=%g",
@@ -374,16 +454,43 @@ def train_model(
     # ── Scheduler ─────────────────────────────────────────────────────────────
     _sched_name = cfg.scheduler.lower().strip()
     if _sched_name == "reduce":
-        scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        main_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer, mode="min", factor=cfg.lr_factor, patience=cfg.lr_patience
         )
     elif _sched_name == "cosine":
         t_max = cfg.cosine_t_max if cfg.cosine_t_max is not None else cfg.max_epochs
-        scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
-            optimizer, T_max=t_max, eta_min=cfg.cosine_eta_min
+        # Reserve the warmup epochs from the cosine horizon so the anneal still
+        # reaches cosine_eta_min by max_epochs rather than overshooting.
+        cosine_t_max = max(1, t_max - cfg.warmup_epochs)
+        main_scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(
+            optimizer, T_max=cosine_t_max, eta_min=cfg.cosine_eta_min
         )
     else:
         raise ValueError(f"Unknown scheduler '{cfg.scheduler}'. Choose 'reduce' or 'cosine'.")
+    
+    if cfg.warmup_epochs > 0 and _sched_name == "reduce":
+        raise ValueError(
+            "warmup_epochs > 0 is only supported with scheduler='cosine'. "
+            "SequentialLR cannot forward the val-loss metric to ReduceLROnPlateau "
+            "after the warmup milestone. Either set warmup_epochs=0, or use "
+            "scheduler='cosine' for warmup."
+        )
+    if cfg.warmup_epochs > 0 and _sched_name == "cosine":
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer,
+            start_factor=1e-2,          # start at 1% of base LR
+            end_factor=1.0,
+            total_iters=cfg.warmup_epochs,
+        )
+        scheduler = torch.optim.lr_scheduler.SequentialLR(
+            optimizer,
+            schedulers=[warmup_scheduler, main_scheduler],
+            milestones=[cfg.warmup_epochs],
+        )
+        logger.info("Warmup enabled: %d epochs, start_factor=0.01 -> 1.0, then %s",
+                    cfg.warmup_epochs, _sched_name)
+    else:
+        scheduler = main_scheduler
 
     scaler = torch.amp.GradScaler(enabled=use_amp)
 
@@ -400,6 +507,7 @@ def train_model(
            else f"  (patience={cfg.lr_patience}, factor={cfg.lr_factor})")
     )
 
+    best_ckpt = _ckpt_path(cfg.checkpoint_dir, "best.pt")
     last_ckpt = _ckpt_path(cfg.checkpoint_dir, "last.pt")
     start_epoch = 0
     result = TrainResult(best_val=float("inf"), best_state=None)
@@ -409,6 +517,11 @@ def train_model(
         start_epoch, result.best_val, result.history, bad = _load_training_checkpoint(
             last_ckpt, model, optimizer, scheduler, scaler, device
         )
+        if best_ckpt.exists():
+            _b_ckpt = torch.load(best_ckpt, map_location="cpu", weights_only=False)
+            result.best_state = _b_ckpt["model_state_dict"]
+            result.best_val = _b_ckpt.get("best_val", result.best_val)
+
         logger.info("Resumed from %s  (epoch %d done, best_val=%.4f)",
                     last_ckpt, start_epoch, result.best_val)
         print(
@@ -417,11 +530,19 @@ def train_model(
             f"  Best val loss    : {result.best_val:.4f}\n"
             f"  Early-stop bad   : {bad}/{cfg.early_stop_patience}\n"
         )
+        if bad >= cfg.early_stop_patience or start_epoch >= cfg.max_epochs:
+            msg = f"Early stop / max epochs condition already met ({bad}/{cfg.early_stop_patience} bad epochs, {start_epoch}/{cfg.max_epochs} epochs). Skipping training."
+            print(msg)
+            logger.info(msg)
+            if result.best_state is not None:
+                model.load_state_dict(result.best_state)
+            print(f"\nTraining done.  Best val loss = {result.best_val:.4f}")
+            print(f"Checkpoints saved to: {Path(cfg.checkpoint_dir).resolve()}")
+            return result
     else:
         print(f"\nStarting fresh training run  (checkpoint_dir={cfg.checkpoint_dir})\n")
 
-    best_ckpt = _ckpt_path(cfg.checkpoint_dir, "best.pt")
-
+    ep = start_epoch
     for ep in range(start_epoch + 1, cfg.max_epochs + 1):
         t0 = time.time()
 
@@ -441,25 +562,34 @@ def train_model(
         else:
             scheduler.step()
         result.history["train"].append(tr)
-        result.history["val"].append(vl)
 
         epoch_time = time.time() - t0
         gpu_mem = _gpu_mem_str(device)
         lr_now = optimizer.param_groups[0]["lr"]
         result.history.setdefault("lr", []).append(lr_now)
 
+        SMOOTH_WINDOW = 5  # trailing epochs to average before treating val as "improved"
+
+        result.history["val"].append(vl)
+        window = result.history["val"][-SMOOTH_WINDOW:]
+        smoothed_vl = sum(window) / len(window)
+        result.smoothed_val_history.append(smoothed_vl)
+
         flag = ""
-        if vl < result.best_val:
-            result.best_val = vl
+        # Only start smoothing once we have a full window — avoids penalizing early epochs
+        if len(result.history["val"]) >= SMOOTH_WINDOW and smoothed_vl < result.best_val:
+            result.best_val = smoothed_vl
             result.best_state = {
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
             }
             bad = 0
-            flag = "  <- BEST"
+            flag = "  <- BEST (smoothed)"
             _save_training_checkpoint(
                 best_ckpt, ep, model, optimizer, scheduler, scaler,
                 result.best_val, result.history, bad, cfg,
             )
+        elif len(result.history["val"]) < SMOOTH_WINDOW:
+            pass  # warm-up period, don't count as bad either
         else:
             bad += 1
 
@@ -474,21 +604,23 @@ def train_model(
         if ep % 10 == 0:
             logger.info(summary)
 
-        if ep % cfg.checkpoint_every == 0:
-            _save_training_checkpoint(
-                last_ckpt, ep, model, optimizer, scheduler, scaler,
-                result.best_val, result.history, bad, cfg,
-            )
+        # Save last.pt every single epoch so manual interruptions don't lose progress
+        _save_training_checkpoint(
+            last_ckpt, ep, model, optimizer, scheduler, scaler,
+            result.best_val, result.history, bad, cfg,
+        )
 
         if bad >= cfg.early_stop_patience:
             msg = f"Early stop at epoch {ep} (no val improvement for {bad} epochs)."
             print(msg)
             logger.info(msg)
-            _save_training_checkpoint(
-                last_ckpt, ep, model, optimizer, scheduler, scaler,
-                result.best_val, result.history, bad, cfg,
-            )
             break
+
+    # Save the final epoch state unconditionally for resumability
+    _save_training_checkpoint(
+        last_ckpt, ep, model, optimizer, scheduler, scaler,
+        result.best_val, result.history, bad, cfg,
+    )
 
     if result.best_state is not None:
         model.load_state_dict(result.best_state)

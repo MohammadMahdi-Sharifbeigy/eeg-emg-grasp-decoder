@@ -24,44 +24,79 @@ import numpy as np
 import torch
 from torch import Tensor
 from torch.utils.data import Dataset
-
-from .dataloader import load_participant, get_split_series
+from .dataloader import load_hs, load_participant, get_split_series
 from .preprocessing_emg_kin import extract_kt_raw
 
 
+# ---------------------------------------------------------------------------
+# Participant resolution helper
+# ---------------------------------------------------------------------------
+
+ALL_PARTICIPANTS: list[int] = list(range(1, 13))
+
+
+def resolve_participants(
+    participant_spec: "str | int | list[str | int]",
+) -> list[int]:
+    """Resolve a participant specification to a list of integer IDs.
+
+    Accepts any of:
+      ``"all"``           → [1, 2, ..., 12]
+      ``"P3"`` / ``3``   → [3]
+      ``[1, 2, 3]``       → [1, 2, 3]    (LOSOCV list)
+      ``["P1", "P3"]``   → [1, 3]
+
+    Passing a *list* activates LOSOCV mode: the caller is responsible for
+    iterating over folds and holding out one participant per fold.
+
+    Returns:
+        Sorted list of unique participant integer IDs.
+    """
+    if participant_spec == "all":
+        return list(ALL_PARTICIPANTS)
+    if isinstance(participant_spec, (list, tuple)):
+        return sorted({int(str(p).replace("P", "").replace("p", "")) for p in participant_spec})
+    # Single value: "P2", 2, etc.
+    return [int(str(participant_spec).replace("P", "").replace("p", ""))]
+
+
+# ---------------------------------------------------------------------------
+# Dataset
+# ---------------------------------------------------------------------------
+
 class WAYEEGDataset(Dataset):
-    """Sliding-window dataset over WAY-EEG-GAL HS series.
+    """Sliding-window Dataset for WAY-EEG-GAL continuous series.
 
-    Each sample is a tuple (eeg, kin, emg) of fixed-length windows:
-        eeg : Tensor (window_size, n_eeg)
-        kin : Tensor (window_size, 13)   k_t kinematic state
-        emg : Tensor (window_size, 5)    EMG envelope target
-
-    Args:
-        data_dir:       Root dir with P1/, P2/, ... subdirs.
-        participants:   List of participant IDs (1-12).
-        split:          'train' | 'val' | 'test' | 'stability' | 'all'.
-        window_size:    Number of samples per window (default 500 = 1 s @ 500 Hz).
-        stride:         Step between consecutive windows (default 50 = 100 ms).
-        preprocess_fn:  Optional callable (series_dict) -> series_dict applied
-                        to each raw series before windowing.
-        cache_dir:      Optional directory to cache processed .npz files.
+    Yields:
+        (eeg_window, kin_window, emg_window)
+        eeg_window : Tensor (window_size, n_eeg_channels)
+        kin_window : Tensor (window_size, n_kin_features)  (k_t)
+        emg_window : Tensor (window_size, n_emg_channels)
     """
 
     def __init__(
         self,
         data_dir: Union[str, Path],
-        participants: list[int],
-        split: str,
-        window_size: int = 500,
-        stride: int = 50,
-        latency_shift_ms: float = 0.0,
+        participants: "int | list[int]" = 2,
+        split: str = "train",
+        window_size: int = 4000,
+        stride: int = 250,
+        latency_shift_ms: float = 0.0,   # was 50.0 — lag is now learned in-model via
+                                          # LearnableLagAlignment (model.py), not pre-shifted
+                                          # here. Kept as a scalar knob for optional coarse
+                                          # centering only; leave at 0.0 by default.
         fs: float = 500.0,
-        preprocess_fn: Callable | None = None,
+        preprocess_fn: "Callable[[dict], dict] | None" = None,
         cache_dir: Union[str, Path, None] = None,
     ) -> None:
-        self.data_dir    = Path(data_dir)
-        self.participants = participants
+        super().__init__()
+
+        self.data_dir    = Path(data_dir) if data_dir else None
+        if isinstance(participants, int):
+            self.participants = [participants]
+        else:
+            self.participants = list(participants)
+
         self.split       = split
         self.window_size = window_size
         self.stride      = stride
@@ -84,31 +119,37 @@ class WAYEEGDataset(Dataset):
         target_series = get_split_series(self.split)
 
         for p in self.participants:
-            try:
-                series_list = load_participant(
-                    self.data_dir,
-                    participant=p,
-                    file_type="hs",
-                    series=target_series,
-                    include_stability=("ST" in target_series),
-                )
-            except FileNotFoundError:
-                continue
+            p_dir = self.data_dir / f"P{p}" if self.data_dir else None
 
-            for s in series_list:
+            for sid in target_series:
+                cache_key = f"P{p}_{self.split}_S{sid}"
+
+                # 1. Try cache first (ZERO memory overhead if cached)
+                if self.cache_dir is not None:
+                    cached = self._load_cache(cache_key)
+                    if cached is not None:
+                        eeg_all, kin_all, emg_all = cached
+                        self._slide_windows(eeg_all, kin_all, emg_all)
+                        continue
+
+                # 2. If not cached, find and load ONLY this single series file
+                if p_dir is None or not p_dir.exists():
+                    continue
+
+                file_path = p_dir / f"HS_P{p}_S{sid}.mat"
+                if not file_path.exists():
+                    continue
+
+                try:
+                    s = load_hs(file_path)
+                except Exception:
+                    continue
+
                 self._index_series(s, p)
 
     def _index_series(self, series: dict, participant: int) -> None:
         """Slice one series into windows and append to self._windows."""
         cache_key = f"P{participant}_{self.split}_S{series['series']}"
-
-        # Try cache first
-        if self.cache_dir is not None:
-            cached = self._load_cache(cache_key)
-            if cached is not None:
-                eeg_all, kin_all, emg_all = cached
-                self._slide_windows(eeg_all, kin_all, emg_all)
-                return
 
         # Apply preprocessing if supplied
         if self.preprocess_fn is not None:
@@ -136,7 +177,7 @@ class WAYEEGDataset(Dataset):
     ) -> None:
         T = eeg.shape[0]
         W = self.window_size
-        S = self.stride
+        S = self.stride if self.stride > 0 else W   # 0 → non-overlapping (stride = window_size)
         shift = self.latency_shift_samples
         for start in range(0, T - W - shift + 1, S):
             self._windows.append((eeg, kt, emg, start))

@@ -8,7 +8,9 @@ Public API:
     preprocessing_emg_kin: preprocess_emg, preprocess_emg_from_config,
                            preprocess_kinematics, preprocess_kinematics_from_config,
                            EMGNormalizer, KinNormalizer, extract_kt
-    dataset:               WAYEEGDataset
+    dataset:               WAYEEGDataset,
+                           resolve_participants (handles "all", single, or list),
+                           ALL_PARTICIPANTS
     model:                 KGGTModel, build_kg_gt_from_config, CNN1dAligner,
                            TransformerOnlyModel, build_transformer_only_from_config
     losses:                CombinedEMGLoss, PeakWeightedMSELoss, EdgePriorKLDivLoss,
@@ -37,7 +39,7 @@ from .preprocessing_emg_kin import (
     extract_kt,
     compute_muscle_edge_prior,
 )
-from .dataset import WAYEEGDataset
+from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
 from .model import (
     KGGTModel,
     build_kg_gt_from_config,
@@ -105,7 +107,7 @@ __all__ = [
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
     "extract_kt_raw", "extract_kt", "compute_muscle_edge_prior",
     # dataset
-    "WAYEEGDataset",
+    "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
     # model
     "KGGTModel", "build_kg_gt_from_config", "CNN1dAligner",
     "TransformerEncoder", "build_transformer_from_config",
