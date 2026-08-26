@@ -516,10 +516,13 @@ def plot_interpretability_triptych(
         pred = sosfiltfilt(sos, pred, axis=0)
 
     # ── EEG attention processing ─────────────────────────────────────────
-    # eeg_attn: (H, T_q, T_k). Mean over query positions → (H, T) "key received".
-    eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)   # (H, T, T)
+    # eeg_attn: (H, T_q, T_k) or (H, T). Mean over query positions → (H, T) "key received".
+    eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)
     H_attn    = eeg_attn.shape[0]
-    key_attn  = eeg_attn.mean(axis=1)                     # (H, T) key attention density
+    if eeg_attn.ndim == 3:
+        key_attn  = eeg_attn.mean(axis=1)                     # (H, T) key attention density
+    else:
+        key_attn  = eeg_attn
 
     # Min-max normalise per head to [0, 1] for a clean, comparable heatmap.
     attn_min = key_attn.min(axis=1, keepdims=True)
