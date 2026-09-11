@@ -133,7 +133,11 @@ def load_hs(path: Union[str, Path]) -> dict:
     emg_names = _names_to_list(hs.emg.names)
     kin_names = _names_to_list(hs.kin.names)
 
-    participant = int(np.asarray(hs.participant).flat[0])
+    try:
+        participant = int(np.asarray(hs.participant).flat[0])
+    except AttributeError:
+        participant = int(re.search(r"_P(\d+)_", path.name.upper()).group(1))
+        
     series = _series_id_from_filename(path.name)
 
     return {
@@ -189,7 +193,11 @@ def load_ws(path: Union[str, Path]) -> list[dict]:
     if not hasattr(wins, "__len__"):
         wins = [wins]
 
-    participant = int(np.asarray(ws.participantnum).flat[0])
+    try:
+        participant = int(np.asarray(ws.participantnum).flat[0])
+    except AttributeError:
+        participant = int(re.search(r"_P(\d+)_", path.name.upper()).group(1))
+        
     series = _series_id_from_filename(path.name)
 
     trials = []

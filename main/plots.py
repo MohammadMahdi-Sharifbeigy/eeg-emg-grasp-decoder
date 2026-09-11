@@ -1453,3 +1453,374 @@ def plot_kinematic_velocity_acceleration_density(kin_window, emg_target, emg_nam
     fig.tight_layout()
     save_fig(fig, "kinematic_velocity_acceleration_density", cfg)
     return fig
+
+def plot_pure_eeg_triptych(
+    pred:              np.ndarray,
+    target:            np.ndarray,
+    eeg_attn:          np.ndarray,
+    cross_attn:        np.ndarray,
+    muscle_names:      list[str],
+    fs:                float = 500.0,
+    smooth_hz:         float | None = 10.0,
+    cfg:               dict | None = None,
+    figsize:           tuple = (15, 13),
+) -> plt.Figure:
+    """Publication-quality 3-panel interpretability 'money plot' for PureEEGKGTModel.
+
+    Panels (top → bottom):
+      1. Actual vs Predicted EMG Envelope — all muscle channels overlaid.
+      2. EEG Temporal Attention Heatmap — (H × T) matrix showing which EEG timeframes
+         each attention head focuses on, averaged over query positions.
+      3. Muscle-EEG Cross Attention Heatmap — (N × T) matrix showing which EEG timeframes
+         each muscle node pays attention to (averaged over cross-attention heads).
+
+    Args:
+        pred:              (T, C) predicted EMG envelope.
+        target:            (T, C) ground-truth EMG envelope.
+        eeg_attn:          (H, T, T) EEG self-attention weights from the last encoder layer.
+                           Obtain via: model.encoder.layers[-1].mhsa.last_attn_weights[0]
+        cross_attn:        (H, N, T) TemporalMuscleCrossAttention weights.
+                           Obtain via: model.cross_attention.last_attn_weights[0]
+        muscle_names:      List of C muscle channel names.
+        fs:                Sampling rate in Hz (for time axis). Default 500.
+        smooth_hz:         Optional low-pass cutoff frequency in Hz.
+        cfg:               Optional config dict passed to save_fig().
+        figsize:           (width, height) in inches.
+
+    Returns:
+        matplotlib Figure.
+    """
+    import matplotlib.gridspec as gridspec
+    from scipy.stats import pearsonr as _pearsonr
+    from scipy.signal import butter, sosfiltfilt
+    import matplotlib.pyplot as plt
+    import numpy as np
+
+    pred   = np.asarray(pred,   dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    T, n_ch = pred.shape
+    time = np.arange(T) / fs
+
+    if smooth_hz is not None and smooth_hz > 0:
+        sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
+        pred = sosfiltfilt(sos, pred, axis=0)
+
+    # ── EEG attention processing ─────────────────────────────────────────
+    eeg_attn  = np.asarray(eeg_attn, dtype=np.float64)
+    H_attn    = eeg_attn.shape[0]
+    if eeg_attn.ndim == 3:
+        key_attn  = eeg_attn.mean(axis=1)
+    else:
+        key_attn  = eeg_attn
+
+    attn_min = key_attn.min(axis=1, keepdims=True)
+    attn_max = key_attn.max(axis=1, keepdims=True)
+    key_norm  = (key_attn - attn_min) / (attn_max - attn_min + 1e-8)
+
+    # ── Cross attention processing ─────────────────────────────────────────
+    # cross_attn: (H, N, T). Mean over H → (N, T).
+    cross_attn = np.asarray(cross_attn, dtype=np.float64)
+    muscle_attn = cross_attn.mean(axis=0)  # (N, T)
+    
+    m_min = muscle_attn.min(axis=1, keepdims=True)
+    m_max = muscle_attn.max(axis=1, keepdims=True)
+    muscle_norm = (muscle_attn - m_min) / (m_max - m_min + 1e-8)
+
+    peak_t = float(target.argmax(axis=0).mean()) / fs
+
+    EMG_ACTUAL    = "#1a1a2e"
+    EMG_PRED      = "#e94040"
+    EMG_FILL      = "#e94040"
+    PEAK_MARKER   = "#00b4d8"
+
+    fig = plt.figure(figsize=figsize, facecolor="white")
+    outer = gridspec.GridSpec(
+        3, 1, figure=fig,
+        height_ratios=[n_ch * 1.1, 1.8, 1.8],
+        hspace=0.42,
+    )
+
+    # PANEL 1
+    inner_emg = gridspec.GridSpecFromSubplotSpec(n_ch, 1, subplot_spec=outer[0], hspace=0.06)
+    emg_axes = [fig.add_subplot(inner_emg[c]) for c in range(n_ch)]
+
+    pred_label = f"Predicted ({int(smooth_hz)}Hz Low-pass)" if smooth_hz else "Predicted"
+    for c, ax in enumerate(emg_axes):
+        ax.plot(time, target[:, c], color=EMG_ACTUAL, lw=1.6, zorder=3, label="Actual")
+        ax.plot(time, pred[:, c],   color=EMG_PRED,   lw=1.0, ls="--", zorder=2, alpha=0.90, label=pred_label)
+        ax.fill_between(time, target[:, c], pred[:, c], color=EMG_FILL, alpha=0.12, zorder=1)
+        ax.axvline(peak_t, color=PEAK_MARKER, lw=0.9, ls=":", alpha=0.55, zorder=4)
+
+        try:
+            r_val, _ = _pearsonr(pred[:, c], target[:, c])
+        except Exception:
+            r_val = float("nan")
+        rmse_val = float(np.sqrt(np.mean((pred[:, c] - target[:, c]) ** 2)))
+        ax.text(
+            0.993, 0.86, f"r = {r_val:.3f}  |  RMSE = {rmse_val:.4f}",
+            transform=ax.transAxes, ha="right", va="top", fontsize=8, color="#2d2d2d",
+            bbox=dict(boxstyle="round,pad=0.25", fc="white", alpha=0.82, ec="none"),
+        )
+
+        ch_label = muscle_names[c] if c < len(muscle_names) else f"ch{c}"
+        ax.set_ylabel(ch_label, fontsize=9, labelpad=4, rotation=0, ha="right", va="center")
+        ax.set_xlim(time[0], time[-1])
+        ax.tick_params(axis="x", labelbottom=(c == n_ch - 1), labelsize=8)
+        ax.tick_params(axis="y", labelsize=7)
+        for sp in ("top", "right"):
+            ax.spines[sp].set_visible(False)
+
+    emg_axes[0].legend(loc="upper left", fontsize=8.5, framealpha=0.85, ncol=2, borderpad=0.35, handlelength=1.6)
+    emg_axes[0].set_title("Panel 1 — EMG Envelope: Actual vs Predicted", fontsize=11, fontweight="bold", pad=5)
+    emg_axes[-1].set_xlabel("Time (s)", fontsize=9)
+
+    # PANEL 2
+    ax_attn = fig.add_subplot(outer[1])
+    im = ax_attn.imshow(
+        key_norm, aspect="auto", cmap="plasma", interpolation="nearest",
+        extent=[time[0], time[-1], H_attn + 0.5, 0.5], vmin=0.0, vmax=1.0,
+    )
+    ax_attn.axvline(peak_t, color=PEAK_MARKER, lw=1.0, ls=":", alpha=0.80, label=f"Peak t={peak_t:.2f}s")
+    cbar = fig.colorbar(im, ax=ax_attn, pad=0.01, shrink=0.90, aspect=12)
+    cbar.set_label("Attention\n(norm.)", fontsize=8)
+    cbar.ax.tick_params(labelsize=7)
+    ax_attn.set_yticks(range(1, H_attn + 1))
+    ax_attn.set_yticklabels([f"H{h}" for h in range(1, H_attn + 1)], fontsize=8.5)
+    ax_attn.set_xlabel("Time (s)", fontsize=9)
+    ax_attn.set_ylabel("Attn Head", fontsize=9)
+    ax_attn.set_xlim(time[0], time[-1])
+    ax_attn.tick_params(axis="x", labelsize=8)
+    ax_attn.set_title("Panel 2 — EEG Temporal Attention (per head × key timestep)", fontsize=11, fontweight="bold", pad=5)
+    ax_attn.legend(loc="upper left", fontsize=8, framealpha=0.7, borderpad=0.3)
+
+    # PANEL 3
+    ax_cross = fig.add_subplot(outer[2])
+    im2 = ax_cross.imshow(
+        muscle_norm, aspect="auto", cmap="viridis", interpolation="nearest",
+        extent=[time[0], time[-1], n_ch + 0.5, 0.5], vmin=0.0, vmax=1.0,
+    )
+    ax_cross.axvline(peak_t, color=PEAK_MARKER, lw=1.0, ls=":", alpha=0.80)
+    cbar2 = fig.colorbar(im2, ax=ax_cross, pad=0.01, shrink=0.90, aspect=12)
+    cbar2.set_label("Cross-Attn\n(norm.)", fontsize=8)
+    cbar2.ax.tick_params(labelsize=7)
+    ax_cross.set_yticks(range(1, n_ch + 1))
+    ax_cross.set_yticklabels(muscle_names, fontsize=8.5)
+    ax_cross.set_xlabel("Time (s)", fontsize=9)
+    ax_cross.set_ylabel("Muscle", fontsize=9)
+    ax_cross.set_xlim(time[0], time[-1])
+    ax_cross.tick_params(axis="x", labelsize=8)
+    ax_cross.set_title("Panel 3 — Muscle-EEG Cross Attention (per muscle × key timestep)", fontsize=11, fontweight="bold", pad=5)
+
+    fig.suptitle("Pure EEG KG-GT Model — Interpretability Triptych", fontsize=13, fontweight="bold", y=1.010)
+    fig.tight_layout()
+    try:
+        from main.plots import save_fig
+        save_fig(fig, "pure_eeg_triptych", cfg)
+    except:
+        pass
+    return fig
+
+
+import torch
+import numpy as np
+import matplotlib.pyplot as plt
+
+def plot_pure_eeg_residual_decomposition(model, eeg_window, emg_target,
+                                 emg_names=None, fs=500,
+                                 emg_mean=None, emg_std=None,
+                                 smooth_hz=10.0,
+                                 cfg=None):
+    """Decomposes a single window's model output into two stages in PureEEGKGTModel:
+       - Cross-Attention Component: EEG -> Muscle Tokens (before spatial GAT)
+       - Final GAT Output: After applying muscle synergies
+    """
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+
+    with torch.no_grad():
+        eeg_window = eeg_window.to(next(model.parameters()).device)
+        
+        temporal = model.encoder(eeg_window)
+        # 1. Cross Attention Stage
+        cross_out = model.cross_attention(temporal)
+        
+        # 2. GAT Stage
+        gat_out = model.gat(cross_out)
+
+        # Decode each stage independently
+        cross_pred = model.decoder(cross_out).squeeze(-1).squeeze(0).cpu().numpy()  # (T, 5)
+        gat_pred = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()      # (T, 5)
+
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"): emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):  emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        cross_pred = cross_pred * _s + _m
+        gat_pred   = gat_pred * _s + _m
+
+    from scipy.signal import butter, sosfiltfilt
+    if smooth_hz is not None and smooth_hz > 0:
+        sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
+        cross_pred = sosfiltfilt(sos, cross_pred, axis=0)
+        gat_pred = sosfiltfilt(sos, gat_pred, axis=0)
+
+    time = np.arange(gat_pred.shape[0]) / float(fs)
+    n_ch = gat_pred.shape[1]
+
+    fig, axes = plt.subplots(n_ch, 1, figsize=(14, 2.8 * n_ch), sharex=True)
+    colors = {"actual": "#1a1a2e", "gat": "#e94560", "cross": "#0f3460"}
+
+    for i, ax in enumerate(axes):
+        tgt = emg_target[:, i] if emg_target is not None else None
+        if tgt is not None:
+            ax.plot(time, tgt, color=colors["actual"], lw=1.5, label="Ground Truth", zorder=4)
+        
+        ax.plot(time, gat_pred[:, i], color=colors["gat"], lw=1.2, ls="--", label="Final Pred (with GAT synergies)", zorder=3)
+        ax.plot(time, cross_pred[:, i], color=colors["cross"], lw=1.0, ls=":", label="Cross-Attn (Pre-GAT)", zorder=2, alpha=0.85)
+        
+        ax.fill_between(time, cross_pred[:, i], gat_pred[:, i], color=colors["gat"], alpha=0.15, label="GAT Added Value")
+        ax.set_ylabel(emg_names[i], fontsize=9)
+        ax.legend(loc="upper right", fontsize=7, ncol=4, framealpha=0.7)
+
+    axes[-1].set_xlabel("Time (s)")
+    fig.suptitle("Pure EEG Decomposition: Cross-Attention vs Spatial Synergy (GAT)\n"
+                 "(Check how the GAT refines the raw Temporal-to-Muscle mapping)",
+                 fontweight="bold", fontsize=12)
+    fig.tight_layout()
+    try:
+        from main.plots import save_fig
+        save_fig(fig, "pure_eeg_residual_decomposition", cfg)
+    except:
+        pass
+    return fig
+
+
+def plot_pure_eeg_latency_lag(model, eeg_window, emg_target,
+                                       emg_names=None, fs=500, max_lag_ms=250,
+                                       emg_mean=None, emg_std=None, cfg=None):
+    """Computes time-lagged cross-correlation between EEG model prediction and actual EMG."""
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+    max_samples = int((max_lag_ms / 1000.0) * fs)
+    lags_samples = np.arange(-max_samples, max_samples + 1)
+    lags_ms = (lags_samples / fs) * 1000.0
+
+    with torch.no_grad():
+        eeg_w = eeg_window.to(next(model.parameters()).device)
+        full_out = model(eeg_w).squeeze(0).cpu().numpy()
+
+    if hasattr(emg_target, "cpu"):
+        emg_target = emg_target.cpu().numpy()
+
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"): emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):  emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        full_out = full_out * _s + _m
+
+    n_ch = full_out.shape[1]
+    fig, axes = plt.subplots(n_ch, 1, figsize=(12, 2.6 * n_ch), sharex=True)
+    if n_ch == 1: axes = [axes]
+
+    for i, ax in enumerate(axes):
+        y_true = emg_target[:, i] - np.mean(emg_target[:, i])
+        y_true_norm = np.linalg.norm(y_true) + 1e-8
+
+        corr_full = []
+        for d in lags_samples:
+            if d < 0:
+                p_f = full_out[:d, i]; t_t = y_true[-d:]
+            elif d > 0:
+                p_f = full_out[d:, i]; t_t = y_true[:-d]
+            else:
+                p_f = full_out[:, i]; t_t = y_true
+
+            t_t_clean = t_t - np.mean(t_t)
+            t_t_norm = np.linalg.norm(t_t_clean) + 1e-8
+
+            p_clean = p_f - np.mean(p_f)
+            p_norm = np.linalg.norm(p_clean) + 1e-8
+            r = np.dot(p_clean, t_t_clean) / (p_norm * t_t_norm)
+            corr_full.append(r)
+
+        ax.plot(lags_ms, corr_full, color="#e94560", lw=1.5, label="Pure EEG Prediction", zorder=4)
+
+        peak_idx = np.argmax(corr_full)
+        peak_lag_ms = lags_ms[peak_idx]
+        ax.axvline(x=peak_lag_ms, color="#0f3460", ls="--", alpha=0.6, lw=1.0)
+        ax.axvline(x=0, color="gray", ls="--", alpha=0.5, lw=1.0)
+        ax.set_ylabel(f"{emg_names[i]}\nCorrelation (r)", fontsize=9)
+        ax.set_title(f"Peak Correlation at Lag: {peak_lag_ms:.1f} ms", fontsize=9, color="#0f3460")
+        ax.legend(loc="upper right", fontsize=8, framealpha=0.8)
+
+    axes[-1].set_xlabel("Lag $\\tau$ (ms) [Negative $\\tau$ means neural command precedes motor execution]", fontsize=10)
+    fig.suptitle("Neural-Mechanical Latency Lag Analysis (Time-Shifted Cross-Correlation)", fontweight="bold", fontsize=11)
+    fig.tight_layout()
+    try:
+        from main.plots import save_fig
+        save_fig(fig, "pure_eeg_latency_lag", cfg)
+    except:
+        pass
+    return fig
+
+
+def plot_pure_eeg_spectral_power_decomposition(model, eeg_window, emg_target,
+                                      emg_names=None, fs=500, max_freq_hz=20.0,
+                                      emg_mean=None, emg_std=None, cfg=None):
+    """Plots the Power Spectral Density (PSD) for pure EEG predictions vs true EMG."""
+    from scipy.signal import welch
+    model.eval()
+    emg_names = emg_names or [f"Ch{i}" for i in range(5)]
+
+    with torch.no_grad():
+        eeg_w = eeg_window.to(next(model.parameters()).device)
+        
+        temporal = model.encoder(eeg_w)
+        cross_out = model.cross_attention(temporal)
+        gat_out = model.gat(cross_out)
+
+        full_out  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()
+        cross_only = model.decoder(cross_out).squeeze(-1).squeeze(0).cpu().numpy()
+
+    if hasattr(emg_target, "cpu"):
+        emg_target = emg_target.cpu().numpy()
+
+    if emg_mean is not None and emg_std is not None:
+        if hasattr(emg_mean, "cpu"): emg_mean = emg_mean.cpu().numpy()
+        if hasattr(emg_std, "cpu"):  emg_std = emg_std.cpu().numpy()
+        _m = np.asarray(emg_mean).reshape(1, -1)
+        _s = np.asarray(emg_std).reshape(1, -1)
+        full_out = full_out * _s + _m
+        cross_only = cross_only * _s + _m
+
+    n_ch = full_out.shape[1]
+    fig, axes = plt.subplots(n_ch, 1, figsize=(12, 2.5 * n_ch), sharex=True)
+    if n_ch == 1: axes = [axes]
+
+    nperseg = min(256, emg_target.shape[0])
+    for i, ax in enumerate(axes):
+        f, psd_true = welch(emg_target[:, i], fs=fs, nperseg=nperseg)
+        _, psd_full = welch(full_out[:, i],   fs=fs, nperseg=nperseg)
+        _, psd_cross = welch(cross_only[:, i], fs=fs, nperseg=nperseg)
+
+        mask = f <= max_freq_hz
+        ax.semilogy(f[mask], psd_true[mask], color="#1a1a2e", lw=1.8, label="Ground Truth EMG", zorder=4)
+        ax.semilogy(f[mask], psd_full[mask], color="#e94560", lw=1.4, ls="--", label="Final Pred (GAT)", zorder=3)
+        ax.semilogy(f[mask], psd_cross[mask], color="#0f3460", lw=1.2, ls=":", label="Cross-Attn (Pre-GAT)", zorder=2)
+
+        ax.set_ylabel(f"{emg_names[i]}\nPSD ($V^2$/Hz)", fontsize=9)
+        ax.legend(loc="upper right", fontsize=7, ncol=2, framealpha=0.8)
+        ax.axvline(x=3.0, color="gray", ls=":", alpha=0.5, label="3 Hz Canopy Limit")
+
+    axes[-1].set_xlabel("Frequency (Hz) [Content > 3 Hz represents rapid muscular burst spikes]", fontsize=10)
+    fig.suptitle("Pure EEG Spectral Power Decomposition: Frequency Content", fontweight="bold", fontsize=11)
+    fig.tight_layout()
+    try:
+        from main.plots import save_fig
+        save_fig(fig, "pure_eeg_spectral_decomposition", cfg)
+    except:
+        pass
+    return fig
+

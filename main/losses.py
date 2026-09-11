@@ -72,13 +72,14 @@ class PeakWeightedMSELoss(nn.Module):
         if self.alpha == 0.0 and self.asymmetry == 1.0:
             return F.mse_loss(pred, target)
 
-        # ── 1. SCALE-INVARIANT RELATIVE ACTIVATION (0.0 to 1.0 per channel) ─
-        reduce_dims = tuple(range(target.dim() - 1))          # all dims except last (C)
-        t_min = target.amin(dim=reduce_dims, keepdim=True)
-        t_max = target.amax(dim=reduce_dims, keepdim=True)
+        # ── 1. SCALE-INVARIANT RELATIVE ACTIVATION (0.0 to 1.0 per channel per window) ─
+        # Normalize along time dimension (dim=1) so peak weighting is evaluated relative to each window
+        t_min = target.amin(dim=1, keepdim=True)   # (B, 1, C)
+        t_max = target.amax(dim=1, keepdim=True)   # (B, 1, C)
         
-        # y_norm seamlessly maps physical EMG envelopes (e.g. 0.00-0.02) to [0, 1]
-        y_norm = (target - t_min) / (t_max - t_min + 1e-6)
+        # Safe clamping prevents division by zero or noise explosion in resting windows
+        t_range = (t_max - t_min).clamp(min=1e-4)
+        y_norm = (target - t_min) / t_range
 
         # ── 2. SUPERLINEAR (QUADRATIC) PEAK WEIGHTING (The Canopy Eraser) ───
         # Exponential gradient acceleration on sharp burst tips without multiplying rest noise
@@ -209,128 +210,399 @@ class EdgePriorKLDivLoss(nn.Module):
 
 
 # ============================================================================
-# 3. Combined loss (reconstruction + regularization)
+# 3. Correlation- and Shape-Preserving Electrophysiological Losses
 # ============================================================================
 
-class CombinedEMGLoss(nn.Module):
-    """Peak-weighted MSE reconstruction + KL edge-prior regularization + L1 Sparsity.
+class CCCLoss(nn.Module):
+    """Concordance Correlation Coefficient (CCC) Loss along the temporal dimension (dim=1).
+
+    Measures agreement between prediction and ground-truth relative to the 45-degree
+    line of perfect identity:
+        CCC = 2 * Cov(y, y_hat) / (Var(y) + Var(y_hat) + (mean(y) - mean(y_hat))^2)
+        L_ccc = 1 - CCC in [0, 2]
+
+    Solves Mean Collapse: a flat line predictor achieves CCC = 0 (L_ccc = 1.0),
+    forcing the network to reproduce both dynamic range and correlated trajectory.
+    Denominator is clamped with min=eps for 100% numerical stability under AMP FP16.
+    """
+
+    def __init__(self, eps: float = 1e-6) -> None:
+        super().__init__()
+        self.eps = eps
+
+    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
+        mu_pred = pred.mean(dim=1, keepdim=True)        # (B, 1, C)
+        mu_target = target.mean(dim=1, keepdim=True)    # (B, 1, C)
+
+        var_pred = ((pred - mu_pred) ** 2).mean(dim=1, keepdim=True)
+        var_target = ((target - mu_target) ** 2).mean(dim=1, keepdim=True)
+
+        cov = ((pred - mu_pred) * (target - mu_target)).mean(dim=1, keepdim=True)
+
+        # Denominator clamped for AMP FP16 safety
+        denom = (var_pred + var_target + (mu_pred - mu_target) ** 2).clamp(min=self.eps)
+        ccc = (2.0 * cov) / denom
+        return (1.0 - ccc).mean()
+
+
+class PearsonCorrelationLoss(nn.Module):
+    """Temporal Pearson Correlation Loss (1 - r) with quiescent baseline gating and AMP clamp.
+
+    Rewards burst co-activation timing and relative profile independent of amplitude scale.
+    Near-zero variance channels (var_target < min_target_var) are gated out so the network
+    is not penalized for failing to correlate resting noise.
+    """
+
+    def __init__(self, eps: float = 1e-6, min_target_var: float = 1e-4) -> None:
+        super().__init__()
+        self.eps = eps
+        self.min_target_var = min_target_var
+
+    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
+        mu_pred = pred.mean(dim=1, keepdim=True)
+        mu_target = target.mean(dim=1, keepdim=True)
+
+        diff_pred = pred - mu_pred
+        diff_target = target - mu_target
+
+        num = (diff_pred * diff_target).sum(dim=1)     # (B, C)
+        denom = (
+            torch.sqrt(((diff_pred ** 2).sum(dim=1)).clamp(min=self.eps))
+            * torch.sqrt(((diff_target ** 2).sum(dim=1)).clamp(min=self.eps))
+        ).clamp(min=self.eps)                          # (B, C)
+        r = num / denom                                # (B, C)
+
+        # Quiescent baseline gate: only penalize when target has active variance
+        var_target = (diff_target ** 2).mean(dim=1)    # (B, C)
+        active_mask = (var_target > self.min_target_var).float()
+
+        loss = 1.0 - r
+        if active_mask.sum() > 0:
+            return (loss * active_mask).sum() / (active_mask.sum() + self.eps)
+        return loss.mean()
+
+
+class TemporalSmoothnessLoss(nn.Module):
+    """First-order temporal difference matching: L1(d(pred)/dt - d(target)/dt).
+
+    Penalizes both high-frequency attention jitter and sluggish low-pass canopies.
+    """
+
+    def forward(self, pred: Tensor, target: Tensor) -> Tensor:
+        if pred.shape[1] <= 1:
+            return torch.tensor(0.0, device=pred.device)
+        d_pred = pred[:, 1:, :] - pred[:, :-1, :]
+        d_target = target[:, 1:, :] - target[:, :-1, :]
+        return F.l1_loss(d_pred, d_target)
+
+
+# ============================================================================
+# 4. Composite Hybrid Loss (Peak-MSE + CCC + Pearson + Smoothness + Sparsity + KL)
+# ============================================================================
+
+class CompositeEMGLoss(nn.Module):
+    """Composite objective for low-SNR neural decoding (EEG-to-EMG).
 
     TOTAL LOSS:
-        L = PeakWeightedMSE(pred, target)
-          + lambda_reg * EdgePriorKLDiv(model)
-          + lambda_l1 * L1(pred)
-
-    BACKWARD COMPATIBILITY:
-        The signature forward(pred, target, model=None) is backward-compatible
-        with any existing code calling loss_fn(pred, target). The regularization
-        term is silently skipped when model=None.
-
-    USAGE IN TRAINING LOOP:
-        # Pass model explicitly in _run_epoch (see training.py):
-        loss = loss_fn(pred, y, model=model)
-
-        # Legacy / inference usage (no regularization):
-        loss = loss_fn(pred, y)
-
-    Args:
-        peak_alpha:      Peak-weighting factor (PeakWeightedMSELoss). Default 3.0.
-        lambda_reg:      KL regularization weight (EdgePriorKLDivLoss). Default 0.01.
-        lambda_l1:       L1 Sparsity weight to suppress floating baselines. Default 0.05.
-        lambda_grad:     Temporal gradient tracking penalty to remove canopy smoothing. Default 0.2.
-        use_peak_weight: If False, use standard nn.MSELoss (alpha=0 equivalent).
+        L_total = w_peak    * L_PeakMSE
+                + w_ccc     * L_CCC
+                + w_pearson * L_Pearson
+                + w_diff    * L_diff
+                + w_rest    * L_rest (resting L1)
+                + w_reg     * L_reg  (EdgePrior KL)
     """
 
     def __init__(
         self,
-        peak_alpha:      float = 3.0,
-        lambda_reg:      float = 0.01,
-        lambda_l1:       float = 0.05,
-        lambda_grad:     float = 0.2,
-        use_peak_weight: bool  = True,
-        asymmetry:       float = 2.0,
-        rest_threshold:  float = 0.15,
-        threshold:       float = 1.0,
+        w_peak: float = 1.0,
+        w_ccc: float = 0.5,
+        w_pearson: float = 0.2,
+        w_diff: float = 0.1,
+        w_rest: float = 0.05,
+        w_reg: float = 0.001,
+        peak_alpha: float = 3.0,
+        asymmetry: float = 2.0,
+        rest_threshold: float = 0.15,
+        eps: float = 1e-6,
+        # Backward compatibility arguments:
+        lambda_reg: float | None = None,
+        lambda_l1: float | None = None,
+        lambda_grad: float | None = None,
+        use_peak_weight: bool = True,
+        threshold: float = 1.0,
     ) -> None:
         super().__init__()
-        self.recon     = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry, threshold=threshold) if use_peak_weight else nn.MSELoss()
-        self.reg       = EdgePriorKLDivLoss(lambda_reg=lambda_reg)
-        self.lambda_reg = lambda_reg
-        self.lambda_l1  = lambda_l1
-        self.lambda_grad = lambda_grad
-        self.rest_threshold = rest_threshold
+        if lambda_reg is not None:
+            w_reg = lambda_reg
+        if lambda_l1 is not None:
+            w_rest = lambda_l1
+        if lambda_grad is not None:
+            w_diff = lambda_grad
+
+        self.w_peak = float(w_peak) if use_peak_weight else 0.0
+        self.w_ccc = float(w_ccc)
+        self.w_pearson = float(w_pearson)
+        self.w_diff = float(w_diff)
+        self.w_rest = float(w_rest)
+        self.w_reg = float(w_reg)
+        self.rest_threshold = float(rest_threshold)
+
+        self.peak_mse = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry, threshold=threshold)
+        self.ccc = CCCLoss(eps=eps)
+        self.pearson = PearsonCorrelationLoss(eps=eps)
+        self.diff = TemporalSmoothnessLoss()
+        self.reg = EdgePriorKLDivLoss(lambda_reg=1.0)
+
+        self.last_components: dict[str, float] = {}
 
     def forward(
         self,
-        pred:   Tensor,
+        pred: Tensor,
         target: Tensor,
-        model:  nn.Module | None = None,  # default None -> backward-compatible
-    ) -> Tensor:
-        """
-        Args:
-            pred:   Predicted EMG envelope, shape (B, T, C).
-            target: Ground-truth EMG envelope, same shape.
-            model:  The KGGTModel instance (for KL edge-prior regularization).
-                    Pass None to skip regularization (legacy / inference usage).
+        model: nn.Module | None = None,
+        return_components: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, float]]:
+        loss_components: dict[str, Tensor] = {}
+        total_loss = torch.zeros(1, device=pred.device, dtype=pred.dtype)
 
-        Returns:
-            Scalar loss value.
-        """
-        loss = self.recon(pred, target)
+        # 1. Peak Weighted MSE
+        if self.w_peak > 0:
+            l_peak = self.peak_mse(pred, target)
+            loss_components["peak_mse"] = l_peak
+            total_loss = total_loss + self.w_peak * l_peak
+        else:
+            loss_components["peak_mse"] = torch.tensor(0.0, device=pred.device)
 
-        # Temporal Gradient Loss to force sharp onset slopes and penalize low-pass smoothed canopies
-        if self.lambda_grad > 0.0 and pred.shape[1] > 1:
-            d_pred = pred[:, 1:] - pred[:, :-1]
-            d_target = target[:, 1:] - target[:, :-1]
-            loss = loss + self.lambda_grad * torch.mean(torch.abs(d_pred - d_target))
+        # 2. CCC Loss
+        if self.w_ccc > 0:
+            l_ccc = self.ccc(pred, target)
+            loss_components["ccc"] = l_ccc
+            total_loss = total_loss + self.w_ccc * l_ccc
+        else:
+            loss_components["ccc"] = torch.tensor(0.0, device=pred.device)
 
-        # L1 Sparsity ONLY during muscle rest (Thresholded Sparsity)
-        if self.lambda_l1 > 0.0:
-            # Shift target to find the true baseline
-            reduce_dims = tuple(range(target.dim() - 1))
-            t_min = target.amin(dim=reduce_dims, keepdim=True)
+        # 3. Pearson Correlation Loss
+        if self.w_pearson > 0:
+            l_pearson = self.pearson(pred, target)
+            loss_components["pearson"] = l_pearson
+            total_loss = total_loss + self.w_pearson * l_pearson
+        else:
+            loss_components["pearson"] = torch.tensor(0.0, device=pred.device)
+
+        # 4. Temporal Difference Matching
+        if self.w_diff > 0 and pred.shape[1] > 1:
+            l_diff = self.diff(pred, target)
+            loss_components["diff"] = l_diff
+            total_loss = total_loss + self.w_diff * l_diff
+        else:
+            loss_components["diff"] = torch.tensor(0.0, device=pred.device)
+
+        # 5. Resting Baseline L1 Penalty (Per-window normalized threshold)
+        if self.w_rest > 0:
+            t_min = target.amin(dim=1, keepdim=True)
             target_shifted = target - t_min
-
-            # Find the max peak to define the threshold (e.g. 15% of max peak)
-            max_batch = target_shifted.amax(dim=reduce_dims, keepdim=True)
-            
-            # Mask: 1.0 where muscle is resting, 0.0 during bursts
+            max_batch = target_shifted.amax(dim=1, keepdim=True)
             resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-5)).float()
-            
-            # Apply L1 penalty ONLY to the resting regions! 
-            # We push the prediction towards the true resting baseline (t_min), not zero.
-            loss = loss + self.lambda_l1 * torch.mean(torch.abs(pred - t_min) * resting_mask)
+            l_rest = torch.mean(torch.abs(pred - t_min) * resting_mask)
+            loss_components["rest_l1"] = l_rest
+            total_loss = total_loss + self.w_rest * l_rest
+        else:
+            loss_components["rest_l1"] = torch.tensor(0.0, device=pred.device)
 
-        # KL regularization is computed only when the model is explicitly provided
-        # and lambda_reg > 0. This preserves strict backward compatibility.
-        if model is not None and self.lambda_reg > 0.0:
-            loss = loss + self.reg(model)
+        # 6. GAT EdgePrior KL Divergence Regularization
+        if model is not None and self.w_reg > 0:
+            l_reg = self.reg(model)
+            loss_components["kl_reg"] = l_reg
+            total_loss = total_loss + self.w_reg * l_reg
+        else:
+            loss_components["kl_reg"] = torch.tensor(0.0, device=pred.device)
 
-        return loss
+        total_loss = total_loss.squeeze()
+
+        # Cache scalar values for epoch diagnostics
+        self.last_components = {
+            "total": total_loss.item(),
+            "peak_mse": loss_components["peak_mse"].item(),
+            "ccc": loss_components["ccc"].item(),
+            "pearson": loss_components["pearson"].item(),
+            "diff": loss_components["diff"].item(),
+            "rest_l1": loss_components["rest_l1"].item(),
+            "kl_reg": loss_components["kl_reg"].item(),
+        }
+
+        if return_components:
+            return total_loss, self.last_components
+        return total_loss
+
+
+# Backward compatibility alias
+CombinedEMGLoss = CompositeEMGLoss
 
 
 # ============================================================================
-# Config builder
+# 5. Config builder
 # ============================================================================
 
-def build_loss_from_config(cfg: dict) -> CombinedEMGLoss:
-    """Build CombinedEMGLoss from the project config dictionary.
+def build_loss_from_config(cfg: dict) -> CompositeEMGLoss:
+    """Build CompositeEMGLoss from the project config dictionary.
 
-    Reads from cfg["loss"] (all keys optional with sensible defaults):
-
-        cfg["loss"]["peak_alpha"]      float  Peak-weighting factor. Default 3.0.
-        cfg["loss"]["lambda_reg"]      float  KL regularization weight. Default 0.01.
-        cfg["loss"]["lambda_l1"]       float  L1 Sparsity weight. Default 0.05.
-        cfg["loss"]["lambda_grad"]     float  Temporal gradient weight. Default 0.2.
-        cfg["loss"]["use_peak_weight"] bool   Enable peak weighting. Default True.
+    Reads from cfg["loss"] with sensible defaults:
+        w_peak:          float  Peak-weighting factor. Default 1.0.
+        w_ccc:           float  Concordance correlation weight. Default 0.5.
+        w_pearson:       float  Pearson correlation timing weight. Default 0.2.
+        w_diff:          float  First-order temporal smoothness weight. Default 0.1.
+        w_rest:          float  Resting L1 penalty weight. Default 0.05.
+        w_reg:           float  KL edge-prior regularization weight. Default 0.001.
+        peak_alpha:      float  Multiplier for burst tips in PeakMSE. Default 3.0.
+        asymmetry:       float  Under-prediction multiplier in PeakMSE. Default 2.0.
     """
-    loss_cfg = cfg.get("loss", cfg if "peak_alpha" in cfg or "threshold" in cfg else cfg.get("loss", {}))
-    return CombinedEMGLoss(
+    loss_cfg = cfg.get("loss", cfg if "peak_alpha" in cfg or "w_peak" in cfg else cfg.get("loss", {}))
+    return CompositeEMGLoss(
+        w_peak=loss_cfg.get("w_peak", 1.0 if loss_cfg.get("use_peak_weight", True) else 0.0),
+        w_ccc=loss_cfg.get("w_ccc", 0.5),
+        w_pearson=loss_cfg.get("w_pearson", 0.2),
+        w_diff=loss_cfg.get("w_diff", loss_cfg.get("lambda_grad", 0.1)),
+        w_rest=loss_cfg.get("w_rest", loss_cfg.get("lambda_l1", 0.05)),
+        w_reg=loss_cfg.get("w_reg", loss_cfg.get("lambda_reg", 0.001)),
         peak_alpha=loss_cfg.get("peak_alpha", loss_cfg.get("peak_weight", 3.0)),
-        lambda_reg=loss_cfg.get("lambda_reg", 0.01),
-        lambda_l1=loss_cfg.get("lambda_l1", 0.05),
-        lambda_grad=loss_cfg.get("lambda_grad", 0.2),
-        use_peak_weight=loss_cfg.get("use_peak_weight", True),
         asymmetry=loss_cfg.get("asymmetry", 2.0),
         rest_threshold=loss_cfg.get("rest_threshold", 0.15),
+        eps=loss_cfg.get("eps", 1e-6),
         threshold=loss_cfg.get("threshold", 1.0),
     )
+
+
+# ============================================================================
+# 6. CORAL-Net Objective (CORALLoss)
+# ============================================================================
+
+class CORALLoss(nn.Module):
+    """Compound objective for CORAL-Net corticomuscular regression.
+
+    Formulation:
+        L_total = w_ccc * L_CCC
+                + w_pearson * L_Pearson
+                + w_diff * L_diff
+                + w_rest * L_rest
+                + w_syn * L_synergy
+
+    Safeguards:
+        1. Lin's CCC operates along time (dim=1) to eliminate Mean Collapse.
+        2. Gated Pearson (dim=1) ignores quiescent noise channels.
+        3. Temporal smoothness matches first-order envelope derivatives.
+        4. Synergy Aux Loss uses strictly non-negative ground truth projection
+           s*(t) = relu(y) @ pinv(W) >= 0.
+    """
+
+    def __init__(
+        self,
+        w_ccc: float = 1.0,
+        w_pearson: float = 0.5,
+        w_diff: float = 0.2,
+        w_rest: float = 0.05,
+        w_syn: float = 0.1,
+        rest_threshold: float = 0.15,
+        eps: float = 1e-6,
+    ) -> None:
+        super().__init__()
+        self.w_ccc = float(w_ccc)
+        self.w_pearson = float(w_pearson)
+        self.w_diff = float(w_diff)
+        self.w_rest = float(w_rest)
+        self.w_syn = float(w_syn)
+        self.rest_threshold = float(rest_threshold)
+        self.eps = float(eps)
+
+        self.ccc = CCCLoss(eps=eps)
+        self.pearson = PearsonCorrelationLoss(eps=eps, min_target_var=1e-4)
+        self.diff = TemporalSmoothnessLoss()
+
+        self.last_components: dict[str, float] = {}
+
+    def forward(
+        self,
+        pred: Tensor,
+        target: Tensor,
+        model: nn.Module | None = None,
+        synergies: Tensor | None = None,
+        return_components: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, float]]:
+        total_loss = torch.zeros(1, device=pred.device, dtype=pred.dtype)
+        loss_components: dict[str, Tensor] = {}
+
+        # 1. CCC Loss (eliminates Mean Collapse)
+        if self.w_ccc > 0:
+            l_ccc = self.ccc(pred, target)
+            loss_components["ccc"] = l_ccc
+            total_loss = total_loss + self.w_ccc * l_ccc
+
+        # 2. Gated Pearson Correlation Loss
+        if self.w_pearson > 0:
+            l_pearson = self.pearson(pred, target)
+            loss_components["pearson"] = l_pearson
+            total_loss = total_loss + self.w_pearson * l_pearson
+
+        # 3. Temporal Smoothness Loss
+        if self.w_diff > 0:
+            l_diff = self.diff(pred, target)
+            loss_components["diff"] = l_diff
+            total_loss = total_loss + self.w_diff * l_diff
+
+        # 4. Resting Baseline L1 Penalty
+        if self.w_rest > 0:
+            t_min = target.amin(dim=1, keepdim=True)
+            t_max = target.amax(dim=1, keepdim=True)
+            t_range = (t_max - t_min).clamp(min=1e-4)
+            norm_target = (target - t_min) / t_range
+            is_resting = (norm_target < self.rest_threshold).float()
+            l_rest = (torch.abs(pred - t_min) * is_resting).sum() / (is_resting.sum() + self.eps)
+            loss_components["rest"] = l_rest
+            total_loss = total_loss + self.w_rest * l_rest
+
+        # 5. Non-negative Synergy Alignment Auxiliary Loss
+        if self.w_syn > 0 and synergies is not None and model is not None:
+            # Extract mixing matrix W from model
+            W = None
+            if hasattr(model, "synergy_decoder") and hasattr(model.synergy_decoder, "W"):
+                W = model.synergy_decoder.W   # (n_synergies, n_muscles)
+            elif hasattr(model, "W"):
+                W = model.W
+
+            if W is not None:
+                # Safeguard: Strictly non-negative ground truth projection
+                y_nonneg = torch.relu(target)
+                pinv_W = torch.linalg.pinv(W)  # (n_muscles, n_synergies)
+                s_target = torch.clamp(torch.matmul(y_nonneg, pinv_W), min=0.0).detach()
+                l_syn = F.mse_loss(synergies, s_target)
+                loss_components["synergy"] = l_syn
+                total_loss = total_loss + self.w_syn * l_syn
+
+        total_loss = total_loss.squeeze()
+
+        self.last_components = {
+            "total": total_loss.item(),
+            "ccc": loss_components.get("ccc", torch.tensor(0.0)).item(),
+            "pearson": loss_components.get("pearson", torch.tensor(0.0)).item(),
+            "diff": loss_components.get("diff", torch.tensor(0.0)).item(),
+            "rest": loss_components.get("rest", torch.tensor(0.0)).item(),
+            "synergy": loss_components.get("synergy", torch.tensor(0.0)).item(),
+        }
+
+        if return_components:
+            return total_loss, self.last_components
+        return total_loss
+
+
+def build_coral_loss_from_config(cfg: dict) -> CORALLoss:
+    """Builds CORALLoss from configuration dictionary."""
+    coral_loss_cfg = cfg.get("coral_loss", cfg.get("loss", {}))
+    return CORALLoss(
+        w_ccc=coral_loss_cfg.get("w_ccc", 1.0),
+        w_pearson=coral_loss_cfg.get("w_pearson", 0.5),
+        w_diff=coral_loss_cfg.get("w_diff", 0.2),
+        w_rest=coral_loss_cfg.get("w_rest", 0.05),
+        w_syn=coral_loss_cfg.get("w_syn", 0.1),
+        rest_threshold=coral_loss_cfg.get("rest_threshold", 0.15),
+        eps=coral_loss_cfg.get("eps", 1e-6),
+    )
+

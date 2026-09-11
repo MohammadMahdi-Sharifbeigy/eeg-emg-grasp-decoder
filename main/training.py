@@ -252,33 +252,64 @@ def _run_epoch(
             n += bs
 
             if _TQDM_AVAILABLE:
-                bar.set_postfix(loss=f"{batch_loss:.4f}")
+                postfix = {"loss": f"{batch_loss:.4f}"}
+                if hasattr(loss_fn, "last_components"):
+                    comps = loss_fn.last_components
+                    if "ccc" in comps and comps["ccc"] > 0:
+                        postfix["ccc_loss"] = f"{comps['ccc']:.3f}"
+                    if "pearson" in comps and comps["pearson"] > 0:
+                        postfix["r_loss"] = f"{comps['pearson']:.3f}"
+                bar.set_postfix(postfix)
     finally:
         if _TQDM_AVAILABLE:
             bar.close()
 
     return total / max(n, 1)
 
-def compute_mean_baseline_loss(loader: DataLoader, loss_fn: nn.Module, device: torch.device) -> float:
+def compute_mean_baseline_loss(
+    loader: DataLoader,
+    loss_fn: nn.Module,
+    device: torch.device,
+    prepare_batch: PrepareBatch | None = None,
+) -> float:
     """Trivial baseline: predict the per-channel training mean for every timestep.
     If Stage-1 train loss converges to ~this value, the model has collapsed
     to a constant predictor and learned nothing beyond the channel mean.
+
+    If prepare_batch is provided, targets are preprocessed through prepare_batch
+    so the baseline MSE/loss is evaluated on the exact scale of the active loss_fn.
     """
-    sums, sq_sums, count = None, None, 0
+    sums = None
+    count = 0
     with torch.no_grad():
-        for _, _, emg in loader:
-            emg = emg.to(device)
-            if sums is None:
-                sums = emg.sum(dim=(0, 1))
-                sq_sums = (emg ** 2).sum(dim=(0, 1))
+        for batch in loader:
+            if prepare_batch is not None:
+                _, target = prepare_batch(*batch)
             else:
-                sums += emg.sum(dim=(0, 1))
-                sq_sums += (emg ** 2).sum(dim=(0, 1))
-            count += emg.shape[0] * emg.shape[1]
-    mean = sums / count                                   # (C,)
-    var = sq_sums / count - mean ** 2
-    # MSE of predicting the mean everywhere == variance of the target
-    return var.mean().item()
+                target = batch[2].to(device)
+            if sums is None:
+                sums = target.sum(dim=(0, 1))
+            else:
+                sums += target.sum(dim=(0, 1))
+            count += target.shape[0] * target.shape[1]
+
+    mean_target = (sums / max(count, 1)).view(1, 1, -1)  # (1, 1, C)
+
+    total_loss = 0.0
+    n_samples = 0
+    with torch.no_grad():
+        for batch in loader:
+            if prepare_batch is not None:
+                _, target = prepare_batch(*batch)
+            else:
+                target = batch[2].to(device)
+            bs = target.shape[0]
+            pred_mean = mean_target.expand_as(target)
+            batch_loss = loss_fn(pred_mean, target).item()
+            total_loss += batch_loss * bs
+            n_samples += bs
+
+    return total_loss / max(n_samples, 1)
 
 
 # ============================================================================
@@ -576,8 +607,9 @@ def train_model(
         result.smoothed_val_history.append(smoothed_vl)
 
         flag = ""
-        # Only start smoothing once we have a full window — avoids penalizing early epochs
-        if len(result.history["val"]) >= SMOOTH_WINDOW and smoothed_vl < result.best_val:
+        n_val = len(result.history["val"])
+        if n_val >= SMOOTH_WINDOW and smoothed_vl < result.best_val:
+            # Normal smoothed best tracking (after warmup window is full)
             result.best_val = smoothed_vl
             result.best_state = {
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
@@ -588,8 +620,20 @@ def train_model(
                 best_ckpt, ep, model, optimizer, scheduler, scaler,
                 result.best_val, result.history, bad, cfg,
             )
-        elif len(result.history["val"]) < SMOOTH_WINDOW:
-            pass  # warm-up period, don't count as bad either
+            print(f"  [best.pt] Saved  (smoothed_val={result.best_val:.4f})")
+        elif n_val < SMOOTH_WINDOW:
+            # Warmup period: still save best on raw val so best.pt always exists
+            if vl < result.best_val:
+                result.best_val = vl
+                result.best_state = {
+                    k: v.detach().cpu().clone() for k, v in model.state_dict().items()
+                }
+                flag = "  <- BEST (warmup)"
+                _save_training_checkpoint(
+                    best_ckpt, ep, model, optimizer, scheduler, scaler,
+                    result.best_val, result.history, bad, cfg,
+                )
+            # don't increment bad during warmup
         else:
             bad += 1
 
@@ -689,32 +733,37 @@ class EvalMetrics:
     vaf:     np.ndarray   # (C,)  Variance Accounted For (%)
     nrmse:   np.ndarray   # (C,)  Normalized RMSE (% of signal range)
     channel_names: list[str]
+    ccc:     np.ndarray | None = None  # (C,)  Lin's Concordance Correlation Coefficient
 
     def as_table(self) -> str:
-        """Format all 6 metrics as an aligned text table for publication reporting."""
+        """Format all metrics as an aligned text table for publication reporting."""
         header = (
             f'{"Channel":18s} {"RMSE":>8s} {"nRMSE%":>8s} {"MAE":>8s}'
-            f' {"Pearson r":>10s} {"R^2":>8s} {"VAF%":>8s}'
+            f' {"Pearson r":>10s} {"CCC":>8s} {"R^2":>8s} {"VAF%":>8s}'
         )
         sep = "-" * len(header)
         lines = [header, sep]
         for c, name in enumerate(self.channel_names):
+            ccc_val = self.ccc[c] if self.ccc is not None else 0.0
             lines.append(
                 f"{name:18s}"
                 f" {self.rmse[c]:8.4f}"
                 f" {self.nrmse[c]:8.2f}"
                 f" {self.mae[c]:8.4f}"
                 f" {self.pearson[c]:10.4f}"
+                f" {ccc_val:8.4f}"
                 f" {self.r2[c]:8.4f}"
                 f" {self.vaf[c]:8.2f}"
             )
         lines.append(sep)
+        mean_ccc = self.ccc.mean() if self.ccc is not None else 0.0
         lines.append(
             f"{' MEAN':18s}"
             f" {self.rmse.mean():8.4f}"
             f" {self.nrmse.mean():8.2f}"
             f" {self.mae.mean():8.4f}"
             f" {self.pearson.mean():10.4f}"
+            f" {mean_ccc:8.4f}"
             f" {self.r2.mean():8.4f}"
             f" {self.vaf.mean():8.2f}"
         )
@@ -757,7 +806,7 @@ def compute_metrics(
     target:        np.ndarray,
     channel_names: list[str] | None = None,
 ) -> EvalMetrics:
-    """Per-channel RMSE, nRMSE, MAE, Pearson r, R\u00b2, and VAF — fully vectorised.
+    """Per-channel RMSE, nRMSE, MAE, Pearson r, CCC, R², and VAF — fully vectorised.
 
     Args:
         pred:          (N_samples, C) predicted EMG envelope.
@@ -765,7 +814,7 @@ def compute_metrics(
         channel_names: Optional list of C channel names for the metrics table.
 
     Returns:
-        EvalMetrics dataclass with per-channel and mean values for all 6 metrics.
+        EvalMetrics dataclass with per-channel and mean values for all 7 metrics.
     """
     pred   = pred.astype(np.float64)
     target = target.astype(np.float64)
@@ -794,6 +843,14 @@ def compute_metrics(
     denom = np.sqrt((p_c ** 2).mean(0)) * np.sqrt((t_c ** 2).mean(0))
     pearson = np.where(denom > 1e-12, num / denom, 0.0)                    # (C,)
 
+    # ── CCC (Lin's Concordance Correlation Coefficient) ────────────────────────
+    cov = (p_c * t_c).mean(0)
+    p_var = (p_c ** 2).mean(0)
+    t_var = (t_c ** 2).mean(0)
+    mean_diff_sq = ((p_mu - t_mu).squeeze(0)) ** 2
+    ccc_denom = p_var + t_var + mean_diff_sq
+    ccc = np.where(ccc_denom > 1e-12, (2.0 * cov) / ccc_denom, 0.0)        # (C,)
+
     # ── R² (Coefficient of Determination) ──────────────────────────────────────
     # R² = 1 - SS_residual / SS_total  (ML / regression convention)
     # SS_total uses the mean-corrected target (same denominator as Pearson).
@@ -819,6 +876,7 @@ def compute_metrics(
         r2=r2,
         vaf=vaf,
         channel_names=channel_names,
+        ccc=ccc,
     )
 
 

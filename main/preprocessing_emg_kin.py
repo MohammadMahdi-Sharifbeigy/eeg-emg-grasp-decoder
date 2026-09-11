@@ -15,7 +15,8 @@ Kinematics pipeline:
 from __future__ import annotations
 
 import numpy as np
-from scipy.signal import butter, sosfiltfilt, decimate, savgol_filter
+from scipy.signal import butter, sosfilt, sosfiltfilt, decimate, savgol_filter, hilbert
+import warnings
 
 
 # ============================================================================
@@ -28,10 +29,15 @@ def bandpass_emg(
     low: float = 30.0,
     high: float = 300.0,
     order: int = 4,
+    causal: bool = True,
 ) -> np.ndarray:
-    """Zero-phase Butterworth bandpass filter (axis=0)."""
+    """Butterworth bandpass filter (axis=0).
+    If causal=True, uses one-pass sosfilt to prevent non-causal lookahead.
+    """
     nyq = fs / 2.0
     sos = butter(order, [low / nyq, high / nyq], btype="bandpass", output="sos")
+    if causal:
+        return sosfilt(sos, emg, axis=0).astype(np.float32)
     return sosfiltfilt(sos, emg, axis=0).astype(np.float32)
 
 
@@ -53,21 +59,31 @@ def lowpass_envelope(
     emg: np.ndarray,
     fs: float,
     cutoff: float = 10.0,
-    order: int = 4,
+    order: int = 2,
+    causal: bool = True,
 ) -> np.ndarray:
-    """Zero-phase Butterworth low-pass to extract smooth activation envelope."""
+    """Causal Butterworth low-pass to extract activation envelope.
+    Default order=2 limits causal group delay to ~22.5 ms (at 10 Hz),
+    matching physiological peripheral transmission latency while eliminating
+    non-causal future leakage.
+    """
     nyq = fs / 2.0
     sos = butter(order, cutoff / nyq, btype="low", output="sos")
+    if causal:
+        return sosfilt(sos, emg, axis=0).astype(np.float32)
     return sosfiltfilt(sos, emg, axis=0).astype(np.float32)
 
 
 def downsample_emg(
     emg: np.ndarray,
     factor: int = 8,
+    causal: bool = True,
 ) -> np.ndarray:
-    """Decimate EMG by integer factor (4000 → 500 Hz with factor=8)."""
+    """Decimate EMG by integer factor (4000 → 500 Hz with factor=8).
+    causal=True sets zero_phase=False to avoid acausal IIR filtering.
+    """
     out = np.stack(
-        [decimate(emg[:, c], factor, zero_phase=True) for c in range(emg.shape[1])],
+        [decimate(emg[:, c], factor, zero_phase=not causal) for c in range(emg.shape[1])],
         axis=1,
     )
     return out.astype(np.float32)
@@ -80,33 +96,64 @@ def preprocess_emg(
     bp_high: float = 300.0,
     filter_order: int = 4,
     lp_cutoff: float = 10.0,
+    lp_order: int = 2,
     downsample_factor: int = 8,
-    use_tkeo: bool = True,
+    use_tkeo: bool | None = None,
+    envelope_method: str = "rectify",
+    causal: bool = True,
 ) -> np.ndarray:
-    """Apply EMG envelope extraction pipeline to one continuous HS series.
+    """Apply strictly causal EMG envelope extraction pipeline.
 
-    Steps: BP 30–300 Hz → TKEO (or |s(t)|) → LP 10 Hz → decimate ×8
-
-    Z-score normalisation is NOT applied here because it requires statistics
-    computed across the whole training set.
+    Steps: BP 30–300 Hz (causal) → Rectify / TKEO → LP 10 Hz (2nd-order causal) → Decimate (causal).
 
     Args:
         emg:              ndarray (T, 5) float32 at `fs` Hz from load_hs()
         fs:               EMG sampling rate (default 4000 Hz)
-        use_tkeo:         whether to use TKEO instead of rectification
+        bp_low:           Bandpass lower cutoff (default 30 Hz)
+        bp_high:          Bandpass upper cutoff (default 300 Hz)
+        filter_order:     Bandpass filter order (default 4)
+        lp_cutoff:        Lowpass cutoff frequency (default 10 Hz)
+        lp_order:         Lowpass filter order (default 2, minimizing group delay to ~22.5 ms)
+        downsample_factor: Integer decimation factor (default 8)
+        use_tkeo:         Legacy toggle: if explicitly True, overrides envelope_method to 'tkeo'
+        envelope_method:  'rectify' (default causal) | 'tkeo' (protected) | 'hilbert' (offline only)
+        causal:           Whether to enforce strict forward-only causal filtering (default True)
 
     Returns:
         ndarray (T // downsample_factor, 5) float32 at 500 Hz
     """
-    emg = bandpass_emg(emg, fs, bp_low, bp_high, filter_order)
-    if use_tkeo:
-        emg = tkeo(emg)
-        # Rectify AND take square root to map energy back to amplitude scale
-        emg = np.sqrt(np.abs(emg))
-    else:
+    if use_tkeo is not None:
+        envelope_method = "tkeo" if use_tkeo else "rectify"
+
+    # 1. Causal Bandpass
+    emg = bandpass_emg(emg, fs, bp_low, bp_high, order=filter_order, causal=causal)
+
+    # 2. Envelope extraction
+    if envelope_method == "rectify":
         emg = rectify(emg)
-    emg = lowpass_envelope(emg, fs, lp_cutoff, filter_order)
-    emg = downsample_emg(emg, downsample_factor)
+    elif envelope_method == "tkeo":
+        e_tkeo = tkeo(emg)
+        # Protect against extreme outlier spikes before sqrt to prevent compression of genuine bursts
+        p99 = np.percentile(np.abs(e_tkeo), 99.5, axis=0, keepdims=True)
+        e_clipped = np.clip(np.abs(e_tkeo), 0.0, p99 * 5.0)
+        emg = np.sqrt(e_clipped)
+    elif envelope_method == "hilbert":
+        if causal:
+            warnings.warn(
+                "scipy.signal.hilbert is non-causal (FFT across entire series). "
+                "Use only for offline reference/benchmarking.",
+                UserWarning,
+                stacklevel=2,
+            )
+        emg = np.abs(hilbert(emg, axis=0)).astype(np.float32)
+    else:
+        raise ValueError(f"Unknown envelope_method: {envelope_method}. Choose 'rectify', 'tkeo', or 'hilbert'.")
+
+    # 3. Causal Lowpass envelope (2nd-order limits group delay to ~22.5 ms)
+    emg = lowpass_envelope(emg, fs, cutoff=lp_cutoff, order=lp_order, causal=causal)
+
+    # 4. Causal Decimation
+    emg = downsample_emg(emg, factor=downsample_factor, causal=causal)
     return emg
 
 
@@ -119,8 +166,11 @@ def preprocess_emg_from_config(emg: np.ndarray, fs: float, cfg: dict) -> np.ndar
         bp_high=cfg.get("bp_high", 300.0),
         filter_order=cfg.get("filter_order", 4),
         lp_cutoff=cfg.get("lp_cutoff", 10.0),
+        lp_order=cfg.get("lp_order", 2),
         downsample_factor=cfg.get("downsample_factor", 8),
-        use_tkeo=cfg.get("use_tkeo", True),
+        use_tkeo=cfg.get("use_tkeo", None),
+        envelope_method=cfg.get("envelope_method", "rectify"),
+        causal=cfg.get("causal", True),
     )
 
 
@@ -479,3 +529,52 @@ def compute_muscle_edge_prior(emg_arrays: list[np.ndarray]) -> np.ndarray:
     corr = np.clip(corr, 0.0, 1.0)
 
     return corr
+
+
+def compute_nnmf_edge_prior(emg_arrays: list[np.ndarray], vaf_threshold: float = 0.90) -> np.ndarray:
+    """Compute a 5x5 adjacency matrix from NNMF synergy loadings of training EMG.
+    
+    Args:
+        emg_arrays: List of (T_i, 5) float32 EMG envelope arrays (training split).
+        vaf_threshold: Threshold for Variance Accounted For to select rank r.
+        
+    Returns:
+        (5, 5) float32 ndarray representing cosine similarity of synergy loadings.
+    """
+    import numpy as np
+    from sklearn.decomposition import NMF
+    from sklearn.metrics.pairwise import cosine_similarity
+    
+    if not emg_arrays:
+        raise ValueError("emg_arrays must be a non-empty list of (T, 5) arrays.")
+        
+    concat = np.concatenate(emg_arrays, axis=0)
+    # Ensure non-negativity
+    V = np.maximum(concat, 0.0)
+    
+    # Calculate total variance for VAF
+    V_norm_sq = np.sum(V ** 2)
+    
+    best_r = 2
+    best_H = None
+    
+    for r in [2, 3, 4, 5]:
+        nmf = NMF(n_components=r, init='nndsvda', random_state=42, max_iter=500)
+        W = nmf.fit_transform(V)
+        H = nmf.components_  # (r, 5)
+        
+        V_approx = W @ H
+        error_sq = np.sum((V - V_approx) ** 2)
+        vaf = 1.0 - (error_sq / V_norm_sq)
+        
+        best_H = H
+        best_r = r
+        if vaf >= vaf_threshold:
+            break
+            
+    # Compute cosine similarity between columns of H (which represent muscles)
+    # H is (r, 5). We want similarity between muscles, so we treat each muscle as an r-dim vector.
+    # Therefore, we compute cosine similarity of H.T
+    sim = cosine_similarity(best_H.T).astype(np.float32)  # (5, 5)
+    
+    return sim

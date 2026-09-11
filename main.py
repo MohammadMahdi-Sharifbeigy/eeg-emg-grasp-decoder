@@ -22,7 +22,8 @@ from main import (
     WAYEEGDataset,
     KGGTModel, build_kg_gt_from_config, CNN1dAligner,
     build_transformer_only_from_config,
-    CombinedEMGLoss, build_loss_from_config,
+    CombinedEMGLoss, CompositeEMGLoss, CCCLoss, PearsonCorrelationLoss, TemporalSmoothnessLoss,
+    build_loss_from_config,
     train_model, TrainConfig, TrainResult,
     collect_predictions, compute_metrics, EvalMetrics,
     prepare_batch_factory, save_checkpoint, load_checkpoint,
@@ -52,7 +53,7 @@ CONFIG = {
         # chunked transformer: 4000 / chunk_size=500 = 8 chunks of 500 → O(500²) not O(4000²)
         "window_size": 500,
         "stride": 500,
-        "latency_shift_ms": 50.0,
+        # latency_shift_ms eliminated: Transformer attention learns asymmetric corticomuscular conduction delay
         "fs_eeg": 500,                   # Hz
         "fs_emg": 4000,                  # Hz (raw); downsampled to fs_eeg after preprocess
         "fs_kin": 500,                   # Hz
@@ -80,8 +81,11 @@ CONFIG = {
             "bp_low": 30.0,              # Hz
             "bp_high": 300.0,            # Hz
             "filter_order": 4,
-            "lp_cutoff": 8.0,           # Hz, low-pass for envelope
-            "downsample_factor": 8       # 4000 -> 500 Hz
+            "lp_cutoff": 10.0,           # Hz, low-pass for envelope
+            "lp_order": 2,               # 2nd-order Butterworth limits group delay to ~22.5 ms
+            "downsample_factor": 8,      # 4000 -> 500 Hz
+            "envelope_method": "rectify", # strictly causal full-wave rectification default
+            "causal": True,              # strict forward-only causal filtering (no lookahead)
         },
         "kinematics": {
             "include_velocity": True,      # if true, output includes velocity
@@ -125,13 +129,17 @@ CONFIG = {
     },
     "training": {
         "loss": {
-            "peak_alpha":      5.0,    # 3× emphasis on EMG burst peaks vs. baseline silence
-            "lambda_reg":      0.001,   # KL anchor strength: GAT edge_bias stays near prior
-            "lambda_l1": 0.05,
-            "lambda_grad":     0.2,
-            "rest_threshold":  0.15,
-            "asymmetry": 2.5,
-            "use_peak_weight": True,   # set False for ablation back to standard MSE
+            "w_peak":          1.0,     # Peak-weighted MSE weight
+            "w_ccc":           0.5,     # Concordance Correlation Coefficient weight (prevents Mean Collapse)
+            "w_pearson":       0.2,     # Pearson correlation timing weight
+            "w_diff":          0.1,     # First-order temporal smoothness weight
+            "w_rest":          0.05,    # Resting baseline L1 penalty
+            "w_reg":           0.001,   # GAT EdgePrior KL divergence anchor
+            "peak_alpha":      3.0,     # Multiplier for burst tips in PeakMSE
+            "asymmetry":       2.0,     # Under-prediction penalty
+            "rest_threshold":  0.15,    # Rest threshold fraction
+            "eps":             1e-6,    # Denominator clamp for AMP FP16 numerical stability
+            "use_peak_weight": True,    # set False for ablation back to standard MSE
         },
         # ── optimizer ─────────────────────────────────────────────────────
         "optimizer":   "adamw",   # 'adam' | 'adamw'
@@ -172,100 +180,83 @@ CONFIG = {
         # Keep in sync with data.window_size / data.stride above
         "window_size": 500,
         "stride": 500,
-        "latency_shift_ms": 0.0,
     }
 }
 notebook_cfg = copy.deepcopy(CONFIG)
 
 
 # %%
+import numpy as np
 import matplotlib.pyplot as plt
 from main.dataloader import load_hs
 from main.preprocessing_emg_kin import preprocess_emg_from_config
-from main.plots import plot_emg_envelope_overlay
+from main.plots import plot_emg_envelope_overlay, plot_emg_method_comparison_grid
 
 # 1. Load the continuous series dictionary
-data_path = "data/way-eeg/raw/P1/HS_P1_S3.mat" # Adjust as needed
-hs_data = load_hs(data_path) 
+data_path = "data/way-eeg/raw/P1/HS_P1_S3.mat"  # Adjust as needed
+hs_data = load_hs(data_path)
 emg_raw = hs_data["emg"]
 fs_raw = float(hs_data["fs_emg"])
 fs_env = 500.0  # Standard downsampled rate
+
+MUSCLE_NAMES = ["FDI", "APB", "ADM", "ECR", "FCR"]  # adjust order to match your emg columns
 
 # 2. Process with the Old Method (Rectify + Lowpass)
 cfg_old = {"bp_low": 30.0, "bp_high": 300.0, "lp_cutoff": 10.0, "use_tkeo": False}
 emg_old = preprocess_emg_from_config(emg_raw, fs=fs_raw, cfg=cfg_old)
 
 # 3. Process with the New Method (TKEO + Lowpass)
-# Change the lp_cutoff from 10.0 to 3.0 (or 5.0) to aggressively smooth the envelope!
 cfg_new = {"bp_low": 30.0, "bp_high": 300.0, "lp_cutoff": 8.0, "use_tkeo": True}
 emg_tkeo = preprocess_emg_from_config(emg_raw, fs=fs_raw, cfg=cfg_new)
 
 # ==========================================
-# 4. Slice a 20-second window
+# 4. Slice a window
 # ==========================================
 start_sec = 0
 end_sec = 10
 
-# Calculate array indices based on sampling rates
 start_idx_raw, end_idx_raw = int(start_sec * fs_raw), int(end_sec * fs_raw)
 start_idx_env, end_idx_env = int(start_sec * fs_env), int(end_sec * fs_env)
 
-# Apply slices
-emg_raw_slice = emg_raw[start_idx_raw:end_idx_raw]
-emg_old_slice = emg_old[start_idx_env:end_idx_env]
+emg_raw_slice  = emg_raw[start_idx_raw:end_idx_raw]
+emg_old_slice  = emg_old[start_idx_env:end_idx_env]
 emg_tkeo_slice = emg_tkeo[start_idx_env:end_idx_env]
 
+empirical_scale_factor = 6.0  # cosmetic only, for visual amplitude matching
 
-# 5. Plot using the built-in overlay function
-channel = 1  # Change this to view different muscles
-
-# Set up a figure with 2 subplots (side-by-side)
-fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(16, 4))
-time_env = np.linspace(start_sec, end_sec, len(emg_tkeo_slice))
-
-# ----------------------------------------------------
-# 1. Plot the OLD Method Envelope (Rectification)
-# ----------------------------------------------------
-ax1.plot(time_env, emg_old_slice[:, channel], color="green", linewidth=2.0)
-ax1.set_title(f"OLD Method Envelope (Rectify + LP) - Ch {channel + 1}")
-ax1.set_xlabel("Time [s]")
-ax1.set_ylabel("Amplitude")
-ax1.grid(True, alpha=0.3)
-
-# ----------------------------------------------------
-# 2. Plot the NEW Method Envelope (TKEO)
-# ----------------------------------------------------
-ax2.plot(time_env, emg_tkeo_slice[:, channel], color="red", linewidth=2.0)
-ax2.set_title(f"NEW Method Envelope (TKEO + sqrt + LP) - Ch {channel + 1}")
-ax2.set_xlabel("Time [s]")
-ax2.set_ylabel("TKEO Amplitude")
-ax2.grid(True, alpha=0.3)
-
-plt.tight_layout()
-plt.show()
-
-
-# Overlay for the Old Method (First 20s)
-fig1 = plot_emg_envelope_overlay(
-    raw_emg=emg_raw_slice, 
-    env_emg=emg_old_slice, 
-    fs_raw=fs_raw, 
-    fs_env=fs_env, 
-    channel_idx=channel, 
-    title=f"Old Method (Rectify) Envelope - Ch {channel + 1} ({start_sec}s - {end_sec}s)"
-)
-
-# Overlay for the New TKEO Method (First 20s)
-empirical_scale_factor = 6.0 
+# ==========================================
+# 5A. Per-muscle TKEO overlay (raw + TKEO envelope), all 5 muscles
+# ==========================================
 emg_tkeo_scaled_for_overlay = emg_tkeo_slice * empirical_scale_factor
 
-fig2 = plot_emg_envelope_overlay(
-    raw_emg=emg_raw_slice, 
-    env_emg=emg_tkeo_scaled_for_overlay, 
-    fs_raw=fs_raw, 
-    fs_env=fs_env, 
-    channel_idx=channel, 
-    title=f"New Method (TKEO) Overlay (Scaled by {empirical_scale_factor}x for Visualization)"
+for ch in range(emg_raw_slice.shape[1]):
+    name = MUSCLE_NAMES[ch] if ch < len(MUSCLE_NAMES) else f"Ch {ch + 1}"
+    fig = plot_emg_envelope_overlay(
+        raw_emg=emg_raw_slice,
+        env_emg=emg_tkeo_scaled_for_overlay,
+        fs_raw=fs_raw,
+        fs_env=fs_env,
+        channel_idx=ch,
+        channel_name=name,
+        title=f"New Method (TKEO) Overlay — {name} "
+              f"(Scaled by {empirical_scale_factor}x for Visualization)",
+    )
+    plt.show()
+
+# ==========================================
+# 5B. Combined comparison grid: Raw + Old + New, all 5 muscles in one figure
+# ==========================================
+fig_combined = plot_emg_method_comparison_grid(
+    raw_emg=emg_raw_slice,
+    env_old=emg_old_slice,
+    env_new=emg_tkeo_slice,
+    fs_raw=fs_raw,
+    fs_env=fs_env,
+    muscle_names=MUSCLE_NAMES,
+    new_method_label="TKEO",
+    old_method_label="Rectify+LP",
+    new_scale_factor=empirical_scale_factor,
+    start_sec=start_sec,
 )
 plt.show()
 
@@ -331,7 +322,7 @@ def build_dataset_split(cfg, participants=None, split="train", root_dir=ROOT):
         split=split,
         window_size=cfg["dataset"]["window_size"],
         stride=cfg["dataset"]["stride"],
-        latency_shift_ms=cfg["dataset"].get("latency_shift_ms", 0.0),
+        latency_shift_ms=0.0,
         preprocess_fn=make_preprocess_fn(cfg),
         cache_dir=root_dir / data_cfg["cache_dir"]
     )
@@ -426,10 +417,11 @@ else:
     for _fold_idx, _p_test in enumerate(participant_list):
         _t_fold = time.time()
 
-        # ── Option 2: one training subject held-out for val ───────────────────
+        # ── Option 2: round-robin training subject held-out for val ───────────
         _train_candidates = [p for p in participant_list if p != _p_test]
-        _val_p     = _train_candidates[-1]       # rotates naturally each fold
-        _train_ps  = _train_candidates[:-1]      # N-2 subjects
+        val_idx    = _fold_idx % len(_train_candidates)
+        _val_p     = _train_candidates[val_idx]
+        _train_ps  = [p for i, p in enumerate(_train_candidates) if i != val_idx]
         _test_ps   = [_p_test]
         _subj      = f"LOSO_P{_p_test}"
 
@@ -561,12 +553,14 @@ else:
             **{f"nRMSE_{n}":   float(_m.nrmse[i])   for i, n in enumerate(EMG_NAMES)},
             **{f"MAE_{n}":     float(_m.mae[i])     for i, n in enumerate(EMG_NAMES)},
             **{f"Pearson_{n}": float(_m.pearson[i])  for i, n in enumerate(EMG_NAMES)},
+            **{f"CCC_{n}":     float(_m.ccc[i])      for i, n in enumerate(EMG_NAMES)},
             **{f"R2_{n}":      float(_m.r2[i])       for i, n in enumerate(EMG_NAMES)},
             **{f"VAF_{n}":     float(_m.vaf[i])      for i, n in enumerate(EMG_NAMES)},
             "RMSE_mean":    float(_m.rmse.mean()),
             "nRMSE_mean":   float(_m.nrmse.mean()),
             "MAE_mean":     float(_m.mae.mean()),
             "Pearson_mean": float(_m.pearson.mean()),
+            "CCC_mean":     float(_m.ccc.mean()),
             "R2_mean":      float(_m.r2.mean()),
             "VAF_mean":     float(_m.vaf.mean()),
         })
@@ -712,7 +706,7 @@ else:
     print("  LEAVE-ONE-SUBJECT-OUT CROSS-VALIDATION SUMMARY")
     print("  Val strategy: Option 2 (training-subject held out for early stopping)")
     print("="*65)
-    summary_cols = ["Fold","val_subject","train_n","RMSE_mean","nRMSE_mean","Pearson_mean","VAF_mean"]
+    summary_cols = ["Fold","val_subject","train_n","RMSE_mean","nRMSE_mean","Pearson_mean","CCC_mean","VAF_mean"]
     print(cv_df[summary_cols].to_string(index=False))
     print("="*65)
 
@@ -727,7 +721,8 @@ else:
 # Build Datasets  (re-run this cell for each LOSOCV fold)
 # ============================================================================
 train_ds = build_dataset_split(notebook_cfg, participants=train_participants, split=split_train)
-val_ds   = build_dataset_split(notebook_cfg, participants=test_participants,  split=split_val)
+val_ps   = [val_participant] if isinstance(val_participant, (int, str)) else val_participant
+val_ds   = build_dataset_split(notebook_cfg, participants=val_ps,             split=split_val)
 test_ds  = build_dataset_split(notebook_cfg, participants=test_participants,  split=split_test)
 print(train_ds)
 print(val_ds)
@@ -944,9 +939,9 @@ if _last_ckpt_path.exists():
           f"resume=True will continue from it. If you intended a FRESH run "
           f"for subject {subject_str}, delete this checkpoint_dir first.")
 
-from training import compute_mean_baseline_loss
+from main.training import compute_mean_baseline_loss
 
-baseline_mse = compute_mean_baseline_loss(train_loader, device=device, loss_fn=loss_fn)
+baseline_mse = compute_mean_baseline_loss(train_loader, loss_fn=loss_fn, device=device, prepare_batch=prepare_batch)
 print(f"[SANITY] Mean-predictor baseline MSE (Stage 1 target): {baseline_mse:.4f}")
 
 result_stage1 = train_model(
@@ -1111,10 +1106,10 @@ print("\n" + metrics.as_table() + "\n")
 rows = list(zip(
     metrics.channel_names,
     metrics.rmse, metrics.nrmse, metrics.mae,
-    metrics.pearson, metrics.r2, metrics.vaf,
+    metrics.pearson, metrics.ccc, metrics.r2, metrics.vaf,
 ))
 df = pd.DataFrame(rows,
-    columns=["Channel", "RMSE", "nRMSE%", "MAE", "Pearson r", "R^2", "VAF%"])
+    columns=["Channel", "RMSE", "nRMSE%", "MAE", "Pearson r", "CCC", "R^2", "VAF%"])
 df.loc["MEAN"] = ["MEAN"] + [df[c].mean() for c in df.columns[1:]]
 #display(df.round(4))
 
@@ -1198,8 +1193,8 @@ fs = CONFIG["data"].get("fs_eeg", 500.0)
 
 # 6. Extract EEG temporal attention: (1, H, T, T) -> (H, T, T)
 
-eeg_attn_np = best_model.encoder.layers[-1].mhsa.last_attn_weights[0].cpu().float().numpy()
-print(f"Raw EEG attention shape: {eeg_attn_np.shape}  (H, T, T)")
+eeg_attn_np = best_model.encoder.layers[-1].mhsa.last_attn_weights[0].mean(dim=1).cpu().float().numpy()
+print(f"Raw EEG attention shape: {eeg_attn_np.shape}  (H, T) (averaged over queries)")
 
 from scipy.ndimage import gaussian_filter1d
 

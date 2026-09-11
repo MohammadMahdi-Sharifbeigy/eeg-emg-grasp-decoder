@@ -81,10 +81,9 @@ class WAYEEGDataset(Dataset):
         split: str = "train",
         window_size: int = 4000,
         stride: int = 250,
-        latency_shift_ms: float = 0.0,   # was 50.0 — lag is now learned in-model via
-                                          # LearnableLagAlignment (model.py), not pre-shifted
-                                          # here. Kept as a scalar knob for optional coarse
-                                          # centering only; leave at 0.0 by default.
+        latency_shift_ms: float = 0.0,   # 0.0 by architectural design: static latency shift is disabled
+                                          # so that temporal Transformer self-attention discovers asymmetric
+                                          # corticomuscular conduction delays (~20-100 ms) directly from data.
         fs: float = 500.0,
         preprocess_fn: "Callable[[dict], dict] | None" = None,
         cache_dir: Union[str, Path, None] = None,

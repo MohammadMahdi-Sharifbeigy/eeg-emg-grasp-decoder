@@ -54,9 +54,25 @@ from .model import (
 )
 from .losses import (
     CombinedEMGLoss,
+    CompositeEMGLoss,
+    CCCLoss,
+    PearsonCorrelationLoss,
+    TemporalSmoothnessLoss,
     PeakWeightedMSELoss,
     EdgePriorKLDivLoss,
+    CORALLoss,
     build_loss_from_config,
+    build_coral_loss_from_config,
+)
+from .coral_net import (
+    CORALNet,
+    LearnableFilterBank,
+    LearnableLagAlignment,
+    SimpleMambaBlock,
+    MambaEncoder,
+    SynergyDecoder,
+    extract_nmf_synergies,
+    build_coral_net_from_config,
 )
 from .training import (
     train_model,
@@ -113,9 +129,13 @@ __all__ = [
     "TransformerEncoder", "build_transformer_from_config",
     "MuscleGATEncoder", "KinematicGuidedMuscleGATEncoder",
     "SinusoidalPositionalEncoding",
-    # losses (SoftDTWLoss / soft_dtw removed — hard-removed from codebase)
-    "CombinedEMGLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
-    "build_loss_from_config",
+    # losses
+    "CombinedEMGLoss", "CompositeEMGLoss", "CCCLoss", "PearsonCorrelationLoss",
+    "TemporalSmoothnessLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
+    "CORALLoss", "build_loss_from_config", "build_coral_loss_from_config",
+    # coral-net
+    "CORALNet", "LearnableFilterBank", "LearnableLagAlignment", "SimpleMambaBlock",
+    "MambaEncoder", "SynergyDecoder", "extract_nmf_synergies", "build_coral_net_from_config",
     # training
     "train_model", "TrainConfig", "TrainResult", "EvalMetrics",
     "collect_predictions", "compute_metrics", "prepare_batch_factory",

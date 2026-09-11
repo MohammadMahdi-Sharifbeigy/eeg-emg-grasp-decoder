@@ -295,7 +295,7 @@ class TransformerEncoder(nn.Module):
         is_chunked = False
         B, T, C = z.shape
         cs = getattr(self, "chunk_size", None)
-        if self.training and cs is not None and T > cs:
+        if self.training and cs is not None and cs > 0 and T > cs:
             if T % cs != 0:
                 warnings.warn(
                     f"TransformerEncoder: T={T} is NOT divisible by chunk_size={cs}. "
@@ -571,9 +571,10 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         self.num_heads  = num_heads
         self.n_nodes    = n_nodes
 
-        # Node Q/K/V projections (unchanged from original)
-        self.node_proj  = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
-        self.value_proj = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)
+        # Node Q/K/V projections
+        self.node_proj  = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)  # Query projection
+        self.key_proj   = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)  # Key projection (directed attention)
+        self.value_proj = nn.Linear(node_dim, hidden_dim * num_heads, bias=False)  # Value projection
         self.out        = nn.Linear(hidden_dim * num_heads, out_dim)
         # Zero-initialize the output projection for perfect identity mapping at start
         nn.init.zeros_(self.out.weight)
@@ -654,9 +655,14 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         flat_nodes = normed_nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
         flat_kin   = kin.reshape(batch_size * steps, -1)              # (B*T, kin_dim)
 
-        # Q and V from nodes
+        # Q, K, and V from nodes
         q = (
             self.node_proj(flat_nodes)
+            .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
+            .permute(0, 2, 1, 3)
+        )  # (B*T, H, N, d_k)
+        k = (
+            self.key_proj(flat_nodes)
             .view(batch_size * steps, n_nodes, self.num_heads, self.hidden_dim)
             .permute(0, 2, 1, 3)
         )  # (B*T, H, N, d_k)
@@ -666,8 +672,8 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
             .permute(0, 2, 1, 3)
         )  # (B*T, H, N, d_v)
 
-        # ── Score Component 1: content-based attention ─────────────────────
-        scores = torch.matmul(q, q.transpose(-2, -1)) * self.scale  # (B*T, H, N, N)
+        # ── Score Component 1: content-based directed attention (Q x K^T) ──
+        scores = torch.matmul(q, k.transpose(-2, -1)) * self.scale  # (B*T, H, N, N)
 
         # ── Score Component 2: static biological synergy bias ──────────────
         # Encodes stable muscle co-activation patterns (e.g. FDI-APB during pinch).
@@ -1012,3 +1018,207 @@ class CNN1dAligner(nn.Module):
         h   = self.pw2(h)                                # (B, C_out, T)
         out = h + self.skip(x_t)
         return self.norm(out.transpose(1, 2))            # (B, T, C_out)
+
+
+# ============================================================================
+# Method 2: Pure EEG KG-GT Model with Temporal Cross-Attention
+# ============================================================================
+
+import torch.nn.functional as F
+
+class TemporalMuscleCrossAttention(nn.Module):
+    """
+    Computes cross-attention between muscle node embeddings and the full temporal EEG sequence.
+    This explicitly learns neuromechanical lags dynamically by attending to relevant past/future EEG timesteps.
+    
+    Args:
+        node_dim: Dimensionality of muscle node embeddings (Queries).
+        d_model: Dimensionality of EEG embeddings (Keys/Values).
+        num_heads: Number of attention heads.
+        dropout: Dropout probability.
+    """
+    def __init__(self, node_dim: int, d_model: int, num_heads: int = 4, dropout: float = 0.1):
+        super().__init__()
+        self.num_heads = num_heads
+        self.d_model = d_model
+        
+        # We can project node_dim to d_model for queries
+        self.q_proj = nn.Linear(node_dim, d_model)
+        self.k_proj = nn.Linear(d_model, d_model)
+        self.v_proj = nn.Linear(d_model, d_model)
+        
+        self.out_proj = nn.Linear(d_model, node_dim)
+        
+        self.dropout = nn.Dropout(dropout)
+        self.norm = nn.LayerNorm(node_dim)
+
+    def forward(self, nodes: torch.Tensor, eeg_seq: torch.Tensor, causal_mask: bool = False) -> torch.Tensor:
+        """
+        nodes: (B, T, N, node_dim) - the muscle node queries at each timestep.
+        eeg_seq: (B, T, d_model) - the full EEG temporal sequence keys/values.
+        
+        Returns:
+            (B, T, N, node_dim) - the context-aware muscle node embeddings.
+        """
+        B, T, N, _ = nodes.shape
+        
+        # Project Q, K, V
+        Q = self.q_proj(nodes)  # (B, T, N, d_model)
+        K = self.k_proj(eeg_seq)  # (B, T, d_model)
+        V = self.v_proj(eeg_seq)  # (B, T, d_model)
+        
+        # Reshape for multi-head attention
+        head_dim = self.d_model // self.num_heads
+        
+        # Q: (B, T, N, num_heads, head_dim) -> (B, num_heads, T, N, head_dim)
+        Q = Q.view(B, T, N, self.num_heads, head_dim).permute(0, 3, 1, 2, 4)
+        # K, V: (B, T, num_heads, head_dim) -> (B, num_heads, T, head_dim)
+        K = K.view(B, T, self.num_heads, head_dim).permute(0, 2, 1, 3)
+        V = V.view(B, T, self.num_heads, head_dim).permute(0, 2, 1, 3)
+        
+        # Q_flat: (B, num_heads, T*N, head_dim) — queries attend over all T EEG steps
+        Q_flat = Q.reshape(B, self.num_heads, T * N, head_dim)
+
+        # ── Memory-efficient SDPA ─────────────────────────────────────────────
+        # Avoids materialising the (B, H, T*N, T) score matrix (~2 GB at T=5000).
+        # PyTorch >= 2.0 selects Flash-Attention (fp16/bf16) or memory-efficient
+        # (fp32) automatically; falls back to math backend otherwise.
+        attn_mask = None
+        if causal_mask:
+            # Boolean mask: True = positions to IGNORE (future tokens).
+            attn_mask = torch.ones(T * N, T, dtype=torch.bool, device=Q_flat.device)
+            for t in range(T):
+                attn_mask[t * N:(t + 1) * N, :t + 1] = False  # allow <= t
+
+        _dropout_p = self.dropout.p if self.training else 0.0
+        out = F.scaled_dot_product_attention(
+            Q_flat, K, V,
+            attn_mask=attn_mask,
+            dropout_p=_dropout_p,
+            scale=head_dim ** -0.5,
+        )  # (B, num_heads, T*N, head_dim) — no giant score matrix allocated
+
+        # Store attention weights for interpretability (eval only).
+        # SDPA doesn't return weights, so recompute a compact snapshot on CPU.
+        if not self.training:
+            with torch.no_grad():
+                _s = torch.matmul(
+                    Q_flat.float(), K.float().transpose(-2, -1)
+                ) * (head_dim ** -0.5)
+                if attn_mask is not None:
+                    _s = _s.masked_fill(
+                        attn_mask.unsqueeze(0).unsqueeze(0), float('-inf')
+                    )
+                self.last_attn_weights = F.softmax(_s, dim=-1).detach()
+
+        # Reshape back: (B, num_heads, T*N, head_dim) -> (B, T, N, d_model)
+        out = out.reshape(B, self.num_heads, T, N, head_dim).permute(0, 2, 3, 1, 4).reshape(B, T, N, self.d_model)
+
+        # Output projection and residual
+        out = self.out_proj(out)
+        return self.norm(nodes + out)
+
+
+class PureEEGKGTModel(nn.Module):
+    """
+    Pure EEG-to-EMG neural decoder.
+    Removes kinematics entirely to prevent "cheating".
+    Adds TemporalMuscleCrossAttention for dynamic lag finding.
+    Retains MuscleGATEncoder with NNMF-based edge_prior.
+    """
+    def __init__(
+        self,
+        transformer_cfg: dict,
+        input_dim: int,
+        node_dim: int = 64,
+        gat_hidden_dim: int = 64,
+        gat_heads: int = 4,
+        out_channels: int = 5,
+        n_gat_layers: int = 2,
+        gat_dropout: float = 0.1,
+        edge_prior: Tensor | None = None,
+        causal_cross_attention: bool = False,
+    ) -> None:
+        super().__init__()
+        self.out_channels = out_channels
+        self.causal_cross_attention = causal_cross_attention
+
+        self.encoder = build_transformer_from_config(transformer_cfg, input_dim)
+        
+        self.node_projection = MuscleNodeProjection(
+            input_dim=self.encoder.d_model,
+            n_nodes=out_channels,
+            node_dim=node_dim,
+        )
+        
+        # New Cross-Attention Module
+        self.cross_attn = TemporalMuscleCrossAttention(
+            node_dim=node_dim, 
+            d_model=self.encoder.d_model, 
+            num_heads=gat_heads,
+            dropout=gat_dropout
+        )
+        
+        # Pure biological GAT without kinematics
+        self.gat = MuscleGATEncoder(
+            node_dim=node_dim,
+            hidden_dim=gat_hidden_dim,
+            num_heads=gat_heads,
+            out_dim=node_dim,
+            n_nodes=out_channels,
+            n_layers=n_gat_layers,
+            dropout=gat_dropout,
+            edge_prior=edge_prior,
+        )
+
+        self.decoder = PerMuscleDecoder(node_dim, out_channels)
+        # Note: We remove LearnableLagAlignment as cross-attention handles lag.
+
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        use_ckpt = self.training and torch.is_grad_enabled()
+
+        # 1. Temporal encoding of EEG
+        # Gradient checkpointing on the transformer stack saves ~N_layer × activation
+        # memory during backward at the cost of one extra forward recomputation.
+        if use_ckpt:
+            from torch.utils.checkpoint import checkpoint as grad_ckpt
+            z = self.encoder.embed(eeg)
+            z = self.encoder.pos_enc(z)
+            # Apply chunking (same logic as TransformerEncoder.forward, training mode)
+            B, T, C = z.shape
+            cs = getattr(self.encoder, "chunk_size", None)
+            is_chunked = False
+            if cs is not None and T > cs and T % cs == 0:
+                num_chunks = T // cs
+                z = z.view(B * num_chunks, cs, C)
+                is_chunked = True
+            for layer in self.encoder.layers:
+                z = grad_ckpt(layer, z, use_reentrant=False)
+            if is_chunked:
+                z = z.view(B, T, C)
+            temporal = z
+        else:
+            temporal = self.encoder(eeg)  # (B, T, d_model)
+
+        # 2. Project to muscle nodes
+        nodes = self.node_projection(temporal)  # (B, T, N, node_dim)
+
+        # 3. Dynamic temporal cross-attention to find lags
+        # Also checkpointed: Q_flat (B, H, T*N, head_dim) leaves large grad buffers.
+        if use_ckpt:
+            nodes = grad_ckpt(
+                self.cross_attn, nodes, temporal,
+                self.causal_cross_attention,
+                use_reentrant=False,
+            )
+        else:
+            nodes = self.cross_attn(nodes, temporal, causal_mask=self.causal_cross_attention)
+
+        # 4. Biological GAT (synergies)
+        refined = self.gat(nodes)
+
+        # 5. Decode
+        out = self.decoder(refined).squeeze(-1)   # (B, T, 5)
+
+        return out
+
