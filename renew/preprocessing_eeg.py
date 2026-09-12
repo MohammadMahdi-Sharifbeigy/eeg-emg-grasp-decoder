@@ -254,12 +254,47 @@ def preprocess_eeg(
 
 
 def preprocess_eeg_from_config(
-    eeg: np.ndarray, fs: float, cfg: dict,
+    eeg: np.ndarray | dict,
+    fs: float | dict | None = None,
+    cfg: dict | None = None,
     channel_names: list | None = None,
 ) -> np.ndarray:
-    """Config-dict wrapper for preprocess_eeg."""
+    """Config-dict wrapper for preprocess_eeg.
+
+    Supports:
+        preprocess_eeg_from_config(eeg_array, fs, cfg, channel_names=...)
+        preprocess_eeg_from_config(series_dict, cfg)
+        preprocess_eeg_from_config(eeg_array, cfg)
+    """
+    if isinstance(eeg, dict):
+        series = eeg
+        eeg_arr = series["eeg"]
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(series.get("fs_eeg", 500.0))
+        elif fs is None:
+            fs = float(series.get("fs_eeg", 500.0))
+        if channel_names is None:
+            channel_names = series.get("eeg_names")
+    else:
+        eeg_arr = eeg
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(cfg.get("fs", cfg.get("fs_eeg", 500.0)))
+        elif fs is None:
+            fs = 500.0
+
+    if cfg is None:
+        cfg = {}
+
+    # Unwrap nested configs if user provided full CONFIG
+    if "preprocessing" in cfg and "eeg" in cfg["preprocessing"]:
+        cfg = cfg["preprocessing"]["eeg"]
+    elif "eeg" in cfg and isinstance(cfg["eeg"], dict):
+        cfg = cfg["eeg"]
+
     return preprocess_eeg(
-        eeg, fs=fs,
+        eeg_arr, fs=float(fs),
         bp_low=cfg.get('bp_low', 0.5),
         bp_high=cfg.get('bp_high', 40.0),
         notch_freq=cfg.get('notch_freq', 50.0),
@@ -274,3 +309,4 @@ def preprocess_eeg_from_config(
         target_channels=cfg.get('target_channels'),
         use_car=cfg.get('use_car', True),
     )
+

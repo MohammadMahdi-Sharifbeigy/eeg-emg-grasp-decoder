@@ -185,7 +185,9 @@ class CorticosynergyDecoder(nn.Module):
 
     def get_lag_ms(self) -> float:
         """Return the current learned corticospinal lag in milliseconds."""
-        return self.lag_align.get_lag_ms()
+        lag = self.lag_align.current_lag_ms
+        return float(lag.mean().item())
+
 
     def count_parameters(self) -> int:
         """Return total number of trainable parameters."""

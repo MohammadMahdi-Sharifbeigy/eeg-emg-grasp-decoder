@@ -6,7 +6,7 @@ BioCLIPTrainer orchestrates the full pre-training loop:
     3. Optionally labels movement phases via PhaseLabeler(kin)
     4. Computes PhaseAwareInfoNCELoss (with false-negative masking)
     5. Optionally adds dense token-level InfoNCE on H_eeg, H_emg
-    6. Logs pre-training metrics; checkpoints best val loss
+    6. Logs pre-training metrics; checkpoints best val loss and last epoch (crash-safe resume)
 
 SSLTrainConfig: dataclass-style configuration container.
 SSLTrainResult: post-training result container with history and metrics.
@@ -15,8 +15,10 @@ SSLTrainResult: post-training result container with history and metrics.
 from __future__ import annotations
 
 import math
+import os
 import time
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
 import torch
@@ -26,6 +28,12 @@ from torch.amp import autocast
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import CosineAnnealingLR
 from torch.utils.data import DataLoader
+
+try:
+    from tqdm.auto import tqdm
+    _TQDM_AVAILABLE = True
+except ImportError:
+    _TQDM_AVAILABLE = False
 
 from .eeg_encoder import EEGEncoder
 from .emg_encoder import EMGEncoder
@@ -54,11 +62,14 @@ class SSLTrainConfig:
         warmup_epochs: Linear warmup epochs (default: 10).
         use_amp: Automatic Mixed Precision with float16 (default: True).
         clip_grad_norm: Gradient norm clipping (default: 1.0).
-        checkpoint_dir: Directory to save best checkpoint.
+        checkpoint_dir: Directory to save checkpoints.
+        checkpoint_every: Save last.pt every N epochs (default: 1).
+        early_stop_patience: Early stopping patience (default: 25).
+        resume: Whether to resume from last.pt if available (default: True).
         log_every: Log every N steps (default: 20).
         val_every: Validate every N epochs (default: 5).
         device: Training device (default: 'auto' → cuda if available else cpu).
-        save_checkpoint: Whether to save best val-loss checkpoint (default: True).
+        save_checkpoint: Whether to save checkpoints (default: True).
     """
     n_epochs: int = 100
     learning_rate: float = 3e-4
@@ -73,6 +84,9 @@ class SSLTrainConfig:
     use_amp: bool = True
     clip_grad_norm: float = 1.0
     checkpoint_dir: str = "outputs/ssl_checkpoints"
+    checkpoint_every: int = 1
+    early_stop_patience: int = 25
+    resume: bool = True
     log_every: int = 20
     val_every: int = 5
     device: str = "auto"
@@ -88,17 +102,142 @@ class SSLTrainResult:
         val_losses: Per-epoch validation loss history (at val_every intervals).
         best_val_loss: Best validation loss achieved.
         best_epoch: Epoch of best validation loss.
+        best_state: Optional dict holding best encoder state dicts.
         temperature_history: Learned temperature per epoch.
         total_time_s: Total training wall-clock time.
         checkpoint_path: Path to saved best checkpoint (if save_checkpoint=True).
+        resumed_from_epoch: Starting epoch if resumed from checkpoint.
     """
     train_losses: List[float] = field(default_factory=list)
     val_losses: List[float] = field(default_factory=list)
     best_val_loss: float = float("inf")
     best_epoch: int = 0
+    best_state: Optional[Dict[str, Any]] = None
     temperature_history: List[float] = field(default_factory=list)
     total_time_s: float = 0.0
     checkpoint_path: Optional[str] = None
+    resumed_from_epoch: int = 0
+    history: Dict[str, List[float]] = field(
+        default_factory=lambda: {
+            "epoch": [],
+            "train_loss": [],
+            "val_loss": [],
+            "temperature": [],
+            "lr": [],
+        }
+    )
+
+    def to_dataframe(self):
+        """Convert history metrics into a pandas DataFrame."""
+        import pandas as pd
+        if not self.history or "epoch" not in self.history or not self.history["epoch"]:
+            return pd.DataFrame()
+        df = pd.DataFrame(self.history)
+        if "epoch" in df.columns:
+            df["epoch"] = df["epoch"].astype(int)
+            df.set_index("epoch", inplace=True)
+        return df
+
+    def to_report(self) -> str:
+        """Generate a formatted markdown/text report of Bio-CLIP SSL metrics."""
+        lines = [
+            "=" * 76,
+            "                   BIO-CLIP SSL PRE-TRAINING METRICS REPORT",
+            "=" * 76,
+            f"  • Completed Epochs: {len(self.history.get('epoch', []))}",
+            f"  • Best Epoch:       {self.best_epoch}",
+            f"  • Best Val Loss:    {self.best_val_loss:.4f}",
+            f"  • Total Time:       {self.total_time_s/60:.2f} min ({self.total_time_s:.1f}s)",
+            f"  • Resumed From:     Epoch {self.resumed_from_epoch}",
+            "-" * 76,
+        ]
+        epochs = self.history.get("epoch", [])
+        if epochs:
+            header = f"{'Epoch':^6} | {'Train Loss':^12} | {'Val Loss':^12} | {'Temp τ':^10} | {'LR':^10} | {'Best':^5}"
+            sep = "-" * len(header)
+            lines.extend([header, sep])
+            for i, ep in enumerate(epochs):
+                tr = self.history.get("train_loss", [0.0]*len(epochs))[i]
+                vl = self.history.get("val_loss", [float("nan")]*len(epochs))[i]
+                vl_str = f"{vl:^12.4f}" if not math.isnan(vl) else f"{'-':^12s}"
+                temp = self.history.get("temperature", [0.0]*len(epochs))[i]
+                lr = self.history.get("lr", [0.0]*len(epochs))[i]
+                star = "  *" if ep == self.best_epoch else ""
+                row = f"{ep:^6d} | {tr:^12.4f} | {vl_str} | {temp:^10.4f} | {lr:^10.2e} |{star:^5s}"
+                lines.append(row)
+            lines.append("=" * 76)
+            lines.append("  * Indicates best validation loss checkpoint")
+        else:
+            lines.append("  [No training history recorded]")
+            lines.append("=" * 76)
+        return "\n".join(lines)
+
+    def summary(self) -> str:
+        """Alias for to_report()."""
+        return self.to_report()
+
+    def save_metrics(self, output_dir: Union[str, Path]) -> Dict[str, str]:
+        """Save history and report to JSON, CSV, and Markdown in output_dir."""
+        import json
+        out_p = Path(output_dir)
+        out_p.mkdir(parents=True, exist_ok=True)
+        paths = {}
+
+        # 1. JSON
+        json_path = out_p / "metrics.json"
+        data = {
+            "best_val_loss": self.best_val_loss,
+            "best_epoch": self.best_epoch,
+            "total_time_s": self.total_time_s,
+            "resumed_from_epoch": self.resumed_from_epoch,
+            "train_losses": self.train_losses,
+            "val_losses": self.val_losses,
+            "temperature_history": self.temperature_history,
+            "history": self.history,
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        paths["json"] = str(json_path)
+
+        # 2. CSV
+        csv_path = out_p / "metrics.csv"
+        try:
+            df = self.to_dataframe()
+            if not df.empty:
+                df.to_csv(csv_path)
+                paths["csv"] = str(csv_path)
+        except Exception:
+            pass
+
+        # 3. Markdown Report
+        md_path = out_p / "metrics_report.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(self.to_report())
+        paths["report"] = str(md_path)
+
+        return paths
+
+    @classmethod
+    def load_metrics(cls, path_or_dir: Union[str, Path]) -> "SSLTrainResult":
+        """Load metrics from a saved JSON or directory to switch to past runs."""
+        import json
+        p = Path(path_or_dir)
+        if p.is_dir():
+            p = p / "metrics.json"
+        if not p.exists():
+            raise FileNotFoundError(f"Metrics file not found: {p}")
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(
+            train_losses=data.get("train_losses", []),
+            val_losses=data.get("val_losses", []),
+            best_val_loss=data.get("best_val_loss", float("inf")),
+            best_epoch=data.get("best_epoch", 0),
+            temperature_history=data.get("temperature_history", []),
+            total_time_s=data.get("total_time_s", 0.0),
+            resumed_from_epoch=data.get("resumed_from_epoch", 0),
+            history=data.get("history", {}),
+        )
 
 
 # ============================================================================
@@ -139,15 +278,6 @@ class DenseTokenInfoNCE(nn.Module):
         """
         B, T, D = H_eeg.shape
 
-        # Average temporal loss across T frames
-        total_loss = torch.tensor(0.0, device=H_eeg.device)
-
-        # Vectorized: reshape to (B*T, D) → compute B*T × B cross-modal similarity
-        # Positive pairs: (b, t) EEG with (b, t) EMG → diagonal of B-block structure
-        eeg_flat = H_eeg.reshape(B * T, D)  # (B*T, D)
-        emg_flat = H_emg.reshape(B * T, D)  # (B*T, D)
-
-        # We only want intra-time-step contrastive loss (across batch, same t)
         # Compute per-frame losses via a loop over T (memory efficient for large T)
         frame_losses = []
         for t in range(T):
@@ -178,7 +308,8 @@ class BioCLIPTrainer:
     - Symmetric PhaseAwareInfoNCELoss (global)
     - Optional dense token-level InfoNCE
     - AMP (Automatic Mixed Precision) with GradScaler
-    - Checkpointing on best validation loss
+    - Crash-safe checkpointing on every epoch (last.pt) and best validation loss (best.pt)
+    - Interactive CLI progress bars via tqdm.auto
 
     Args:
         eeg_encoder: EEGEncoder instance.
@@ -234,12 +365,18 @@ class BioCLIPTrainer:
             eta_min=cfg.learning_rate * 0.01,
         )
 
-        # AMP scaler — use non-deprecated torch.amp.GradScaler for PyTorch 2.x
+        # AMP scaler
         use_cuda_amp = cfg.use_amp and self.device.type == "cuda"
         if use_cuda_amp:
             self.scaler = torch.amp.GradScaler("cuda")
         else:
             self.scaler = torch.amp.GradScaler("cpu", enabled=False)
+
+        # Checkpoints setup
+        self.ckpt_dir = Path(cfg.checkpoint_dir)
+        self.ckpt_dir.mkdir(parents=True, exist_ok=True)
+        self.last_ckpt = self.ckpt_dir / "last.pt"
+        self.best_ckpt = self.ckpt_dir / "best.pt"
 
         # Training state
         self._step = 0
@@ -252,8 +389,66 @@ class BioCLIPTrainer:
             for pg in self.optimizer.param_groups:
                 pg["lr"] = self.config.learning_rate * warmup_factor
 
-    def _train_epoch(self, loader: DataLoader) -> Dict[str, float]:
-        """Run one training epoch.
+    def _save_checkpoint(
+        self,
+        path: Path,
+        epoch: int,
+        val_loss: float,
+        bad_epochs: int,
+        result: SSLTrainResult,
+    ) -> None:
+        """Save a crash-safe, resumable checkpoint."""
+        torch.save(
+            {
+                "epoch": epoch,
+                "eeg_encoder_state_dict": self.eeg_encoder.state_dict(),
+                "emg_encoder_state_dict": self.emg_encoder.state_dict(),
+                "loss_fn_state_dict": self.loss_fn.state_dict(),
+                "dense_loss_fn_state_dict": self.dense_loss_fn.state_dict() if self.dense_loss_fn is not None else None,
+                "optimizer_state_dict": self.optimizer.state_dict(),
+                "scheduler_state_dict": self.scheduler.state_dict(),
+                "scaler_state_dict": self.scaler.state_dict(),
+                "val_loss": val_loss,
+                "best_val_loss": result.best_val_loss,
+                "best_epoch": result.best_epoch,
+                "bad_epochs": bad_epochs,
+                "train_losses": result.train_losses,
+                "val_losses": result.val_losses,
+                "temperature_history": result.temperature_history,
+                "step": self._step,
+            },
+            path,
+        )
+
+    def _load_checkpoint(
+        self,
+        path: Path,
+        result: SSLTrainResult,
+    ) -> Tuple[int, float, int]:
+        """Load checkpoint and restore training states."""
+        ckpt = torch.load(path, map_location=self.device, weights_only=False)
+        self.eeg_encoder.load_state_dict(ckpt["eeg_encoder_state_dict"])
+        self.emg_encoder.load_state_dict(ckpt["emg_encoder_state_dict"])
+        self.loss_fn.load_state_dict(ckpt["loss_fn_state_dict"])
+        if self.dense_loss_fn is not None and ckpt.get("dense_loss_fn_state_dict") is not None:
+            self.dense_loss_fn.load_state_dict(ckpt["dense_loss_fn_state_dict"])
+        self.optimizer.load_state_dict(ckpt["optimizer_state_dict"])
+        self.scheduler.load_state_dict(ckpt["scheduler_state_dict"])
+        if "scaler_state_dict" in ckpt:
+            self.scaler.load_state_dict(ckpt["scaler_state_dict"])
+
+        result.train_losses = ckpt.get("train_losses", result.train_losses)
+        result.val_losses = ckpt.get("val_losses", result.val_losses)
+        result.temperature_history = ckpt.get("temperature_history", result.temperature_history)
+        result.best_val_loss = ckpt.get("best_val_loss", result.best_val_loss)
+        result.best_epoch = ckpt.get("best_epoch", result.best_epoch)
+        self._step = ckpt.get("step", self._step)
+        epoch = ckpt["epoch"]
+        bad_epochs = ckpt.get("bad_epochs", 0)
+        return epoch, result.best_val_loss, bad_epochs
+
+    def _train_epoch(self, loader: DataLoader, epoch: int) -> Dict[str, float]:
+        """Run one training epoch with interactive CLI progress bar.
 
         Returns:
             Dict with 'loss', 'global_loss', 'dense_loss', 'temperature'
@@ -267,15 +462,28 @@ class BioCLIPTrainer:
         epoch_dense_loss = 0.0
         n_batches = 0
 
-        for batch_idx, batch in enumerate(loader):
-            eeg = batch["eeg"].to(self.device)   # (B, T, n_eeg)
-            emg = batch["emg"].to(self.device)   # (B, T, n_emg)
-            kin = batch["kin"].to(self.device)   # (B, T, kin_dim)
-            phases = batch["phase"].to(self.device)  # (B,)
+        phase_str = "SSL-Train"
+        if _TQDM_AVAILABLE:
+            bar = tqdm(
+                loader,
+                desc=f"Epoch {epoch:02d}/{self.config.n_epochs} [{phase_str}]",
+                leave=False,
+                dynamic_ncols=True,
+            )
+        else:
+            bar = loader
+
+        use_cuda_amp = self.config.use_amp and self.device.type == "cuda"
+
+        for batch_idx, batch in enumerate(bar):
+            eeg = batch["eeg"].to(self.device, non_blocking=True)   # (B, T, n_eeg)
+            emg = batch["emg"].to(self.device, non_blocking=True)   # (B, T, n_emg)
+            kin = batch["kin"].to(self.device, non_blocking=True)   # (B, T, kin_dim)
+            phases = batch["phase"].to(self.device, non_blocking=True)  # (B,)
 
             self.optimizer.zero_grad(set_to_none=True)
 
-            with autocast(device_type=self.device.type, enabled=self.config.use_amp and self.device.type == "cuda"):
+            with autocast(device_type=self.device.type, enabled=use_cuda_amp):
                 # Forward pass: encode EEG and EMG
                 z_eeg, H_eeg = self.eeg_encoder(eeg, return_dense=self.config.use_dense_loss)
                 z_emg, H_emg = self.emg_encoder(emg, return_dense=self.config.use_dense_loss)
@@ -312,18 +520,24 @@ class BioCLIPTrainer:
             self.scaler.step(self.optimizer)
             self.scaler.update()
 
-            epoch_loss += total_loss.item()
+            batch_loss = total_loss.item()
+            epoch_loss += batch_loss
             epoch_global_loss += global_loss.item()
             epoch_dense_loss += dense_loss.item()
             n_batches += 1
             self._step += 1
 
-            if self._step % self.config.log_every == 0:
+            if _TQDM_AVAILABLE:
                 temp = float(self.loss_fn.temperature.detach())
-                print(f"  [step {self._step}] loss={total_loss.item():.4f} "
-                      f"global={global_loss.item():.4f} "
-                      f"dense={dense_loss.item():.4f} "
-                      f"τ={temp:.4f}")
+                bar.set_postfix({
+                    "loss": f"{batch_loss:.4f}",
+                    "glob": f"{global_loss.item():.3f}",
+                    "τ": f"{temp:.3f}",
+                    "lr": f"{self.optimizer.param_groups[0]['lr']:.1e}",
+                })
+
+        if _TQDM_AVAILABLE:
+            bar.close()
 
         denom = max(n_batches, 1)
         return {
@@ -334,8 +548,8 @@ class BioCLIPTrainer:
         }
 
     @torch.no_grad()
-    def _val_epoch(self, loader: DataLoader) -> float:
-        """Run one validation epoch.
+    def _val_epoch(self, loader: DataLoader, epoch: int) -> float:
+        """Run one validation epoch with CLI progress bar.
 
         Returns:
             Average validation loss
@@ -347,22 +561,42 @@ class BioCLIPTrainer:
         val_loss = 0.0
         n_batches = 0
 
-        for batch in loader:
-            eeg = batch["eeg"].to(self.device)
-            emg = batch["emg"].to(self.device)
-            kin = batch["kin"].to(self.device)
+        phase_str = "SSL-Val"
+        if _TQDM_AVAILABLE:
+            bar = tqdm(
+                loader,
+                desc=f"Epoch {epoch:02d}/{self.config.n_epochs} [{phase_str}]",
+                leave=False,
+                dynamic_ncols=True,
+            )
+        else:
+            bar = loader
 
-            phases = batch["phase"].to(self.device)
+        use_cuda_amp = self.config.use_amp and self.device.type == "cuda"
+
+        for batch in bar:
+            eeg = batch["eeg"].to(self.device, non_blocking=True)
+            emg = batch["emg"].to(self.device, non_blocking=True)
+            kin = batch["kin"].to(self.device, non_blocking=True)
+
+            phases = batch["phase"].to(self.device, non_blocking=True)
             if self.config.use_phase_masking and self.phase_labeler is not None:
                 phases = self.phase_labeler(kin)
 
-            with autocast(device_type=self.device.type, enabled=self.config.use_amp and self.device.type == "cuda"):
+            with autocast(device_type=self.device.type, enabled=use_cuda_amp):
                 z_eeg, _ = self.eeg_encoder(eeg, return_dense=False)
                 z_emg, _ = self.emg_encoder(emg, return_dense=False)
                 loss = self.loss_fn(z_eeg, z_emg, phases=phases)
 
-            val_loss += loss.item()
+            batch_val_loss = loss.item()
+            val_loss += batch_val_loss
             n_batches += 1
+
+            if _TQDM_AVAILABLE:
+                bar.set_postfix({"val_loss": f"{batch_val_loss:.4f}"})
+
+        if _TQDM_AVAILABLE:
+            bar.close()
 
         return val_loss / max(n_batches, 1)
 
@@ -372,7 +606,7 @@ class BioCLIPTrainer:
         val_loader: Optional[DataLoader] = None,
         verbose: bool = True,
     ) -> SSLTrainResult:
-        """Full Bio-CLIP pre-training loop.
+        """Full Bio-CLIP crash-safe, resumable pre-training loop.
 
         Args:
             train_loader: Training DataLoader (phase-balanced).
@@ -382,23 +616,55 @@ class BioCLIPTrainer:
         Returns:
             SSLTrainResult with training history and best checkpoint info.
         """
-        import os
         result = SSLTrainResult()
         t_start = time.time()
+        start_epoch = 0
         best_val_loss = float("inf")
+        bad_epochs = 0
         cfg = self.config
 
-        if cfg.save_checkpoint:
-            os.makedirs(cfg.checkpoint_dir, exist_ok=True)
+        # Resume from checkpoint if available
+        if cfg.resume and self.last_ckpt.exists():
+            start_epoch, best_val_loss, bad_epochs = self._load_checkpoint(
+                self.last_ckpt, result
+            )
+            result.resumed_from_epoch = start_epoch
+            result.best_val_loss = best_val_loss
 
-        for epoch in range(cfg.n_epochs):
+            if self.best_ckpt.exists():
+                b_ckpt = torch.load(self.best_ckpt, map_location="cpu", weights_only=False)
+                result.best_state = {
+                    "eeg_encoder": b_ckpt.get("eeg_encoder_state_dict"),
+                    "emg_encoder": b_ckpt.get("emg_encoder_state_dict"),
+                }
+                result.best_epoch = b_ckpt.get("epoch", 0)
+                result.checkpoint_path = str(self.best_ckpt)
+
+            if verbose:
+                print(
+                    f"\n[RESUME] Resumed from checkpoint: {self.last_ckpt}\n"
+                    f"  Completed Epochs : {start_epoch}/{cfg.n_epochs}\n"
+                    f"  Best Val Loss    : {best_val_loss:.4f} (at Epoch {result.best_epoch})\n"
+                    f"  Bad Epochs       : {bad_epochs}/{cfg.early_stop_patience}\n"
+                )
+
+            if start_epoch >= cfg.n_epochs or bad_epochs >= cfg.early_stop_patience:
+                if verbose:
+                    print("Training already completed or early-stopping threshold met.")
+                return result
+        else:
+            if verbose:
+                print(f"\n[INIT] Starting fresh Bio-CLIP pre-training (checkpoints -> {self.ckpt_dir})\n")
+
+        for epoch in range(start_epoch + 1, cfg.n_epochs + 1):
             self._epoch = epoch
+            t0 = time.time()
 
             # Linear warmup (overrides cosine schedule during warmup)
-            self._warmup_lr(epoch)
+            self._warmup_lr(epoch - 1)
 
             # Train epoch
-            train_metrics = self._train_epoch(train_loader)
+            train_metrics = self._train_epoch(train_loader, epoch=epoch)
             result.train_losses.append(train_metrics["loss"])
             result.temperature_history.append(train_metrics["temperature"])
 
@@ -406,52 +672,96 @@ class BioCLIPTrainer:
             if epoch >= cfg.warmup_epochs:
                 self.scheduler.step()
 
-            # Validation
-            if val_loader is not None and (epoch + 1) % cfg.val_every == 0:
-                val_loss = self._val_epoch(val_loader)
+            # Validation epoch
+            is_val_epoch = val_loader is not None and (
+                epoch % cfg.val_every == 0 or epoch == cfg.n_epochs
+            )
+
+            if is_val_epoch:
+                val_loss = self._val_epoch(val_loader, epoch=epoch)
                 result.val_losses.append(val_loss)
 
-                if val_loss < best_val_loss:
+                is_best = val_loss < best_val_loss
+                flag = ""
+                if is_best:
                     best_val_loss = val_loss
                     result.best_val_loss = best_val_loss
                     result.best_epoch = epoch
-
+                    result.best_state = {
+                        "eeg_encoder": {k: v.detach().cpu().clone() for k, v in self.eeg_encoder.state_dict().items()},
+                        "emg_encoder": {k: v.detach().cpu().clone() for k, v in self.emg_encoder.state_dict().items()},
+                    }
+                    bad_epochs = 0
+                    flag = "  <-- BEST"
                     if cfg.save_checkpoint:
-                        ckpt_path = os.path.join(
-                            cfg.checkpoint_dir,
-                            f"bioclip_best_epoch{epoch:03d}.pt"
-                        )
-                        torch.save({
-                            "epoch": epoch,
-                            "eeg_encoder_state_dict": self.eeg_encoder.state_dict(),
-                            "emg_encoder_state_dict": self.emg_encoder.state_dict(),
-                            "loss_fn_state_dict": self.loss_fn.state_dict(),
-                            "optimizer_state_dict": self.optimizer.state_dict(),
-                            "val_loss": val_loss,
-                            "temperature": train_metrics["temperature"],
-                        }, ckpt_path)
-                        result.checkpoint_path = ckpt_path
+                        self._save_checkpoint(self.best_ckpt, epoch, val_loss, bad_epochs, result)
+                        result.checkpoint_path = str(self.best_ckpt)
+                else:
+                    bad_epochs += 1
+            else:
+                val_loss = train_metrics["loss"]
+                flag = ""
 
-                if verbose:
+            # Save last.pt every epoch
+            if cfg.save_checkpoint and epoch % cfg.checkpoint_every == 0:
+                self._save_checkpoint(self.last_ckpt, epoch, val_loss, bad_epochs, result)
+
+            epoch_time = time.time() - t0
+            current_lr = self.optimizer.param_groups[0]["lr"]
+
+            # Record full history
+            result.history["epoch"].append(epoch)
+            result.history["train_loss"].append(train_metrics["loss"])
+            result.history["val_loss"].append(val_loss if is_val_epoch else float("nan"))
+            result.history["temperature"].append(train_metrics["temperature"])
+            result.history["lr"].append(current_lr)
+
+            # Auto-save full metrics (JSON, CSV, Markdown) on each epoch
+            if cfg.save_checkpoint:
+                result.save_metrics(self.ckpt_dir)
+
+            if verbose:
+                if is_val_epoch:
                     print(
-                        f"Epoch [{epoch+1:3d}/{cfg.n_epochs}] "
+                        f"Epoch [{epoch:3d}/{cfg.n_epochs}] [{epoch_time:.1f}s] "
                         f"train_loss={train_metrics['loss']:.4f} "
                         f"val_loss={val_loss:.4f} "
                         f"τ={train_metrics['temperature']:.4f} "
-                        f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
+                        f"lr={current_lr:.2e}{flag}"
                     )
-            elif verbose:
-                print(
-                    f"Epoch [{epoch+1:3d}/{cfg.n_epochs}] "
-                    f"train_loss={train_metrics['loss']:.4f} "
-                    f"τ={train_metrics['temperature']:.4f} "
-                    f"lr={self.optimizer.param_groups[0]['lr']:.2e}"
-                )
+                else:
+                    print(
+                        f"Epoch [{epoch:3d}/{cfg.n_epochs}] [{epoch_time:.1f}s] "
+                        f"train_loss={train_metrics['loss']:.4f} "
+                        f"τ={train_metrics['temperature']:.4f} "
+                        f"lr={current_lr:.2e}"
+                    )
+
+            # Early stopping check
+            if bad_epochs >= cfg.early_stop_patience:
+                if verbose:
+                    print(f"\n[EARLY STOP] No improvement in {cfg.early_stop_patience} validation epochs. Stopping.")
+                break
 
         result.total_time_s = time.time() - t_start
+
+        # Load best weights into encoders if available
+        if result.best_state is not None:
+            self.eeg_encoder.load_state_dict(result.best_state["eeg_encoder"])
+            self.emg_encoder.load_state_dict(result.best_state["emg_encoder"])
+
+        # Final persistent metrics save
+        saved_paths = {}
+        if cfg.save_checkpoint:
+            saved_paths = result.save_metrics(self.ckpt_dir)
+
         if verbose:
             print(f"\nPre-training complete in {result.total_time_s/60:.1f} min. "
                   f"Best val_loss={result.best_val_loss:.4f} @ epoch {result.best_epoch}.")
+            print(f"Checkpoints saved to: {self.ckpt_dir.resolve()}")
+            if saved_paths:
+                print(f"Metrics & Report saved: {saved_paths.get('json')} | {saved_paths.get('csv')} | {saved_paths.get('report')}\n")
+
         return result
 
     def load_best_checkpoint(self, checkpoint_path: str) -> None:
@@ -460,12 +770,13 @@ class BioCLIPTrainer:
         Args:
             checkpoint_path: Path to .pt checkpoint file.
         """
-        ckpt = torch.load(checkpoint_path, map_location=self.device)
+        ckpt = torch.load(checkpoint_path, map_location=self.device, weights_only=False)
         self.eeg_encoder.load_state_dict(ckpt["eeg_encoder_state_dict"])
         self.emg_encoder.load_state_dict(ckpt["emg_encoder_state_dict"])
         self.loss_fn.load_state_dict(ckpt["loss_fn_state_dict"])
+        val_loss_str = f"{ckpt['val_loss']:.4f}" if "val_loss" in ckpt else "N/A"
         print(f"Loaded checkpoint: {checkpoint_path} (epoch={ckpt['epoch']}, "
-              f"val_loss={ckpt['val_loss']:.4f})")
+              f"val_loss={val_loss_str})")
 
     @property
     def frozen_eeg_encoder(self) -> EEGEncoder:

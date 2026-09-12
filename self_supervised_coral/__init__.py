@@ -33,7 +33,7 @@ from .linear_probes import (
     evaluate_few_shot_regression,
 )
 from .ssl_dataset import SSLWindowDataset, build_ssl_dataloaders
-from .ssl_trainer import BioCLIPTrainer, SSLTrainConfig, SSLTrainResult
+from .ssl_trainer import BioCLIPTrainer, SSLTrainConfig, SSLTrainResult, DenseTokenInfoNCE
 
 __all__ = [
     # encoders
@@ -45,6 +45,7 @@ __all__ = [
     "PhaseAwareInfoNCELoss",
     "SymmetricInfoNCELoss",
     "NTXentLoss",
+    "DenseTokenInfoNCE",
     # phase labeling
     "PhaseLabeler",
     "MovementPhase",

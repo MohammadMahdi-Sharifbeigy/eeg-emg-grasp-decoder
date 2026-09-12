@@ -6,21 +6,31 @@ Test suite for Pivot 1: Muscle Synergy Latent Space Decoding.
 
 from __future__ import annotations
 
+import os
+import sys
+
+# Ensure workspace root is in sys.path
+sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
+
 import numpy as np
 import pytest
 import torch
 
-from synergy_decoding.nmf_extractor import (
+from synergy_decoding import (
     compute_vaf,
     extract_nmf_synergies,
     vaf_curve,
     align_synergies,
     CrossSubjectSimilarity,
+    SynergyHead,
+    CorticosynergyDecoder,
+    SynergyDualObjectiveLoss,
+    SynergyLossConfig,
+    SynergyDataset,
+    SynergyEvaluator,
+    paired_wilcoxon_test,
 )
-from synergy_decoding.synergy_model import SynergyHead, CorticosynergyDecoder
-from synergy_decoding.losses import SynergyDualObjectiveLoss, SynergyLossConfig
-from synergy_decoding.dataset import SynergyDataset
-from synergy_decoding.evaluator import SynergyEvaluator, paired_wilcoxon_test
+
 
 
 DEVICE = torch.device("cuda" if torch.cuda.is_available() else "cpu")

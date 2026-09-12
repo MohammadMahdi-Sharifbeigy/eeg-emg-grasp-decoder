@@ -157,11 +157,46 @@ def preprocess_emg(
     return emg
 
 
-def preprocess_emg_from_config(emg: np.ndarray, fs: float, cfg: dict) -> np.ndarray:
-    """Convenience wrapper accepting a config dict (preprocessing.emg section)."""
+def preprocess_emg_from_config(
+    emg: np.ndarray | dict,
+    fs: float | dict | None = None,
+    cfg: dict | None = None,
+) -> np.ndarray:
+    """Convenience wrapper accepting a config dict (preprocessing.emg section).
+
+    Supports:
+        preprocess_emg_from_config(emg_array, fs, cfg)
+        preprocess_emg_from_config(series_dict, cfg)
+        preprocess_emg_from_config(emg_array, cfg)
+    """
+    if isinstance(emg, dict):
+        series = emg
+        emg_arr = series["emg"]
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(series.get("fs_emg", 4000.0))
+        elif fs is None:
+            fs = float(series.get("fs_emg", 4000.0))
+    else:
+        emg_arr = emg
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(cfg.get("fs", cfg.get("fs_emg", 4000.0)))
+        elif fs is None:
+            fs = 4000.0
+
+    if cfg is None:
+        cfg = {}
+
+    # Unwrap nested configs if user provided full CONFIG
+    if "preprocessing" in cfg and "emg" in cfg["preprocessing"]:
+        cfg = cfg["preprocessing"]["emg"]
+    elif "emg" in cfg and isinstance(cfg["emg"], dict):
+        cfg = cfg["emg"]
+
     return preprocess_emg(
-        emg,
-        fs=fs,
+        emg_arr,
+        fs=float(fs),
         bp_low=cfg.get("bp_low", 30.0),
         bp_high=cfg.get("bp_high", 300.0),
         filter_order=cfg.get("filter_order", 4),
@@ -172,6 +207,7 @@ def preprocess_emg_from_config(emg: np.ndarray, fs: float, cfg: dict) -> np.ndar
         envelope_method=cfg.get("envelope_method", "rectify"),
         causal=cfg.get("causal", True),
     )
+
 
 
 class EMGNormalizer:
@@ -452,14 +488,45 @@ def preprocess_kinematics(
 
 
 def preprocess_kinematics_from_config(
-    kin: np.ndarray,
-    fs: float,
-    cfg: dict,
+    kin: np.ndarray | dict,
+    fs: float | dict | None = None,
+    cfg: dict | None = None,
 ) -> np.ndarray:
-    """Convenience wrapper accepting a config dict (preprocessing.kinematics section)."""
+    """Convenience wrapper accepting a config dict (preprocessing.kinematics section).
+
+    Supports:
+        preprocess_kinematics_from_config(kin_array, fs, cfg)
+        preprocess_kinematics_from_config(series_dict, cfg)
+        preprocess_kinematics_from_config(kin_array, cfg)
+    """
+    if isinstance(kin, dict):
+        series = kin
+        kin_arr = series["kin"]
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(series.get("fs_kin", 500.0))
+        elif fs is None:
+            fs = float(series.get("fs_kin", 500.0))
+    else:
+        kin_arr = kin
+        if cfg is None and isinstance(fs, dict):
+            cfg = fs
+            fs = float(cfg.get("fs", cfg.get("fs_kin", 500.0)))
+        elif fs is None:
+            fs = 500.0
+
+    if cfg is None:
+        cfg = {}
+
+    # Unwrap nested configs if user provided full CONFIG
+    if "preprocessing" in cfg and "kinematics" in cfg["preprocessing"]:
+        cfg = cfg["preprocessing"]["kinematics"]
+    elif "kinematics" in cfg and isinstance(cfg["kinematics"], dict):
+        cfg = cfg["kinematics"]
+
     return preprocess_kinematics(
-        kin,
-        fs=fs,
+        kin_arr,
+        fs=float(fs),
         include_velocity=cfg.get("include_velocity", False),
         include_acceleration=cfg.get("include_acceleration", False),
         velocity_method=cfg.get("velocity_method", "sg"),
@@ -468,6 +535,7 @@ def preprocess_kinematics_from_config(
         bw_cutoff=cfg.get("bw_cutoff", 20.0),
         bw_order=cfg.get("bw_order", 4),
     )
+
 
 
 # ============================================================================

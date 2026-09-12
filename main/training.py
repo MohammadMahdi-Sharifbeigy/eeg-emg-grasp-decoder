@@ -162,6 +162,125 @@ class TrainResult:
     best_state: dict | None
     history: dict[str, list[float]] = field(default_factory=lambda: {"train": [], "val": [], "lr": []})
     smoothed_val_history: list[float] = field(default_factory=list)   # NEW
+    best_epoch: int = 0
+    total_time_s: float = 0.0
+    resumed_from_epoch: int = 0
+
+    def to_dataframe(self):
+        """Convert history metrics into a pandas DataFrame."""
+        import pandas as pd
+        if not self.history or "train" not in self.history or not self.history["train"]:
+            return pd.DataFrame()
+        n = len(self.history["train"])
+        data = {"epoch": list(range(1, n + 1))}
+        data.update(self.history)
+        if self.smoothed_val_history and len(self.smoothed_val_history) == n:
+            data["smoothed_val"] = self.smoothed_val_history
+        df = pd.DataFrame(data)
+        df.set_index("epoch", inplace=True)
+        return df
+
+    def to_report(self) -> str:
+        """Generate a formatted markdown/text report of training metrics."""
+        n = len(self.history.get("train", []))
+        lines = [
+            "=" * 78,
+            "                   KG-GT REGRESSOR TRAINING METRICS REPORT",
+            "=" * 78,
+            f"  • Completed Epochs: {n}",
+            f"  • Best Epoch:       {self.best_epoch}",
+            f"  • Best Val Loss:    {self.best_val:.4f}",
+            f"  • Total Time:       {self.total_time_s/60:.2f} min ({self.total_time_s:.1f}s)",
+            f"  • Resumed From:     Epoch {self.resumed_from_epoch}",
+            "-" * 78,
+        ]
+        if n > 0:
+            header = f"{'Epoch':^6} | {'Train Loss':^12} | {'Val Loss':^12} | {'Smoothed Val':^14} | {'LR':^10} | {'Best':^5}"
+            sep = "-" * len(header)
+            lines.extend([header, sep])
+            train_l = self.history.get("train", [0.0] * n)
+            val_l = self.history.get("val", [0.0] * n)
+            lr_l = self.history.get("lr", [0.0] * n)
+            smooth_l = self.smoothed_val_history if len(self.smoothed_val_history) == n else val_l
+            for ep in range(1, n + 1):
+                idx = ep - 1
+                tr = train_l[idx]
+                vl = val_l[idx]
+                sm = smooth_l[idx]
+                lr = lr_l[idx] if idx < len(lr_l) else 0.0
+                star = "  *" if ep == self.best_epoch else ""
+                row = f"{ep:^6d} | {tr:^12.4f} | {vl:^12.4f} | {sm:^14.4f} | {lr:^10.2e} |{star:^5s}"
+                lines.append(row)
+            lines.append("=" * 78)
+            lines.append("  * Indicates best validation loss checkpoint")
+        else:
+            lines.append("  [No training history recorded]")
+            lines.append("=" * 78)
+        return "\n".join(lines)
+
+    def summary(self) -> str:
+        """Alias for to_report()."""
+        return self.to_report()
+
+    def save_metrics(self, output_dir: Union[str, Path]) -> dict[str, str]:
+        """Save history and report to JSON, CSV, and Markdown in output_dir."""
+        import json
+        out_p = Path(output_dir)
+        out_p.mkdir(parents=True, exist_ok=True)
+        paths = {}
+
+        # 1. JSON
+        json_path = out_p / "metrics.json"
+        data = {
+            "best_val": self.best_val,
+            "best_epoch": self.best_epoch,
+            "total_time_s": self.total_time_s,
+            "resumed_from_epoch": self.resumed_from_epoch,
+            "history": self.history,
+            "smoothed_val_history": self.smoothed_val_history,
+        }
+        with open(json_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
+        paths["json"] = str(json_path)
+
+        # 2. CSV
+        csv_path = out_p / "metrics.csv"
+        try:
+            df = self.to_dataframe()
+            if not df.empty:
+                df.to_csv(csv_path)
+                paths["csv"] = str(csv_path)
+        except Exception:
+            pass
+
+        # 3. Markdown Report
+        md_path = out_p / "metrics_report.md"
+        with open(md_path, "w", encoding="utf-8") as f:
+            f.write(self.to_report())
+        paths["report"] = str(md_path)
+
+        return paths
+
+    @classmethod
+    def load_metrics(cls, path_or_dir: Union[str, Path]) -> "TrainResult":
+        """Load metrics from a saved JSON or directory to switch to past runs."""
+        import json
+        p = Path(path_or_dir)
+        if p.is_dir():
+            p = p / "metrics.json"
+        if not p.exists():
+            raise FileNotFoundError(f"Metrics file not found: {p}")
+        with open(p, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        return cls(
+            best_val=data.get("best_val", float("inf")),
+            best_state=None,
+            history=data.get("history", {}),
+            smoothed_val_history=data.get("smoothed_val_history", []),
+            best_epoch=data.get("best_epoch", 0),
+            total_time_s=data.get("total_time_s", 0.0),
+            resumed_from_epoch=data.get("resumed_from_epoch", 0),
+        )
 
 # ============================================================================
 # Internal epoch runner
@@ -573,6 +692,7 @@ def train_model(
     else:
         print(f"\nStarting fresh training run  (checkpoint_dir={cfg.checkpoint_dir})\n")
 
+    t_start = time.time()
     ep = start_epoch
     for ep in range(start_epoch + 1, cfg.max_epochs + 1):
         t0 = time.time()
@@ -611,6 +731,7 @@ def train_model(
         if n_val >= SMOOTH_WINDOW and smoothed_vl < result.best_val:
             # Normal smoothed best tracking (after warmup window is full)
             result.best_val = smoothed_vl
+            result.best_epoch = ep
             result.best_state = {
                 k: v.detach().cpu().clone() for k, v in model.state_dict().items()
             }
@@ -625,6 +746,7 @@ def train_model(
             # Warmup period: still save best on raw val so best.pt always exists
             if vl < result.best_val:
                 result.best_val = vl
+                result.best_epoch = ep
                 result.best_state = {
                     k: v.detach().cpu().clone() for k, v in model.state_dict().items()
                 }
@@ -654,11 +776,16 @@ def train_model(
             result.best_val, result.history, bad, cfg,
         )
 
+        # Auto-save full metrics (JSON, CSV, Markdown) on every epoch
+        result.save_metrics(cfg.checkpoint_dir)
+
         if bad >= cfg.early_stop_patience:
             msg = f"Early stop at epoch {ep} (no val improvement for {bad} epochs)."
             print(msg)
             logger.info(msg)
             break
+
+    result.total_time_s = time.time() - t_start
 
     # Save the final epoch state unconditionally for resumability
     _save_training_checkpoint(
@@ -666,11 +793,15 @@ def train_model(
         result.best_val, result.history, bad, cfg,
     )
 
+    # Final persistent metrics save
+    saved_paths = result.save_metrics(cfg.checkpoint_dir)
+
     if result.best_state is not None:
         model.load_state_dict(result.best_state)
 
-    print(f"\nTraining done.  Best val loss = {result.best_val:.4f}")
+    print(f"\nTraining done.  Best val loss = {result.best_val:.4f} (Epoch {result.best_epoch})")
     print(f"Checkpoints saved to: {Path(cfg.checkpoint_dir).resolve()}")
+    print(f"Metrics & Report saved: {saved_paths.get('json')} | {saved_paths.get('csv')} | {saved_paths.get('report')}\n")
     return result
 
 

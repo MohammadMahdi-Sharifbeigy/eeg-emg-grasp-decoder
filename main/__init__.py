@@ -37,6 +37,10 @@ from .preprocessing_emg_kin import (
     KinNormalizer,
     extract_kt_raw,
     extract_kt,
+    extract_kt_with_velocity,
+    estimate_velocity,
+    sg_velocity,
+    bw_velocity,
     compute_muscle_edge_prior,
 )
 from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
@@ -73,6 +77,11 @@ from .coral_net import (
     SynergyDecoder,
     extract_nmf_synergies,
     build_coral_net_from_config,
+)
+from .coral_trainer import (
+    CORALTrainer,
+    CORALTrainConfig,
+    CORALTrainResult,
 )
 from .training import (
     train_model,
@@ -121,7 +130,8 @@ __all__ = [
     "preprocess_eeg", "preprocess_eeg_from_config", "select_channels",
     "preprocess_emg", "preprocess_emg_from_config", "EMGNormalizer",
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
-    "extract_kt_raw", "extract_kt", "compute_muscle_edge_prior",
+    "extract_kt_raw", "extract_kt", "extract_kt_with_velocity",
+    "estimate_velocity", "sg_velocity", "bw_velocity", "compute_muscle_edge_prior",
     # dataset
     "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
     # model
@@ -129,6 +139,7 @@ __all__ = [
     "TransformerEncoder", "build_transformer_from_config",
     "MuscleGATEncoder", "KinematicGuidedMuscleGATEncoder",
     "SinusoidalPositionalEncoding",
+    "TransformerOnlyModel", "build_transformer_only_from_config",
     # losses
     "CombinedEMGLoss", "CompositeEMGLoss", "CCCLoss", "PearsonCorrelationLoss",
     "TemporalSmoothnessLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
@@ -136,6 +147,7 @@ __all__ = [
     # coral-net
     "CORALNet", "LearnableFilterBank", "LearnableLagAlignment", "SimpleMambaBlock",
     "MambaEncoder", "SynergyDecoder", "extract_nmf_synergies", "build_coral_net_from_config",
+    "CORALTrainer", "CORALTrainConfig", "CORALTrainResult",
     # training
     "train_model", "TrainConfig", "TrainResult", "EvalMetrics",
     "collect_predictions", "compute_metrics", "prepare_batch_factory",
