@@ -124,7 +124,7 @@ class TrainConfig:
     # ── differential LR for Transformer+GAT E2E training ─────────────────────
     transformer_lr_scale: float = 1.0   # encoder/node_proj LR = lr * this scale
                                         # set < 1.0 (e.g. 0.2) for E2E warmup Phase 2
-    print_best_every: int = 5           # print [best.pt] saved message every N best epochs (default: 5)
+    print_best_every: int = 10          # print [best.pt] saved message every N best epochs (default: 10)
 
     @classmethod
     def from_config(cls, cfg: dict, max_epochs: int | None = None, lr: float | None = None) -> "TrainConfig":
@@ -154,7 +154,7 @@ class TrainConfig:
             cosine_eta_min=cfg.get("cosine_eta_min", 1e-6),
             transformer_lr_scale=cfg.get("transformer_lr_scale", 1.0),
             warmup_epochs=cfg.get("warmup_epochs", 0),
-            print_best_every=cfg.get("print_best_every", 5),
+            print_best_every=cfg.get("print_best_every", 10),
         )
 
 
@@ -697,7 +697,7 @@ def train_model(
     t_start = time.time()
     ep = start_epoch
     best_save_count = 0
-    print_best_every = getattr(cfg, "print_best_every", 5)
+    print_best_every = getattr(cfg, "print_best_every", 10)
     for ep in range(start_epoch + 1, cfg.max_epochs + 1):
         t0 = time.time()
 

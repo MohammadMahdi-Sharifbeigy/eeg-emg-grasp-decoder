@@ -37,7 +37,7 @@ except ImportError:
 class CORALTrainConfig:
     """Configuration for CORAL-Net training."""
     epochs: int = 25
-    lr: float = 5e-4
+    lr: float = 1e-4
     weight_decay: float = 1e-2
     grad_clip_norm: float = 1.0
     use_amp: bool = True

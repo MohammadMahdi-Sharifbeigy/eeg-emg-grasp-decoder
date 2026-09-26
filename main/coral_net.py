@@ -326,8 +326,8 @@ class MambaEncoder(nn.Module):
         from torch.utils.checkpoint import checkpoint as grad_checkpoint
         for layer in self.layers:
             if self.use_checkpoint and x.requires_grad:
-                # Recompute activations on backward — halves activation memory
-                x = grad_checkpoint(layer, x, use_reentrant=False)
+                # Recompute activations on backward — use_reentrant=True is compatible with JIT selective_scan under AMP
+                x = grad_checkpoint(layer, x, use_reentrant=True)
             else:
                 x = layer(x)
         return self.final_norm(x)
@@ -519,6 +519,7 @@ class CORALNet(nn.Module):
         use_kinematics: bool = True,
         kin_dim: int = 36,
         use_checkpoint: bool = False,
+        dropout: float = 0.1,
     ) -> None:
         super().__init__()
         self.n_eeg_channels = n_eeg_channels
@@ -543,6 +544,8 @@ class CORALNet(nn.Module):
             d_state=d_state,
             use_checkpoint=use_checkpoint,
         )
+        
+        self.dropout = nn.Dropout(dropout)
 
         # [3] Differentiable Corticospinal Conduction Delay
         self.lag = LearnableLagAlignment(
@@ -606,6 +609,9 @@ class CORALNet(nn.Module):
             k = self.kin_proj(kin)                           # (B, T, d_model)
             gate = self.kin_gate(torch.cat([x, k], dim=-1))  # (B, T, d_model)
             x = x * gate + k * (1.0 - gate)
+
+        # Apply dropout before synergy decoding
+        x = self.dropout(x)
 
         # [4] Muscle synergy decoding
         emg_pred, synergies = self.synergy_decoder(x)        # (B, T, 5), (B, T, 3)
@@ -677,6 +683,7 @@ def build_coral_net_from_config(
     max_lag_ms = float(coral_cfg.get("max_lag_ms", 100.0))
     use_kinematics = coral_cfg.get("use_kinematics", True)
     use_checkpoint = coral_cfg.get("use_checkpoint", False)
+    dropout = coral_cfg.get("dropout", 0.1)
 
     model = CORALNet(
         n_eeg_channels=input_dim,
@@ -690,6 +697,7 @@ def build_coral_net_from_config(
         use_kinematics=use_kinematics,
         kin_dim=kin_dim,
         use_checkpoint=use_checkpoint,
+        dropout=dropout,
     )
 
     if nmf_H is not None:

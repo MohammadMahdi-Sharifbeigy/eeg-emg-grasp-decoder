@@ -74,9 +74,7 @@ def save_fig(fig, name, cfg=None, dpi=300, close=False):
     fig.savefig(pdf_path, bbox_inches="tight", facecolor="white")                                                                    
                                                                                                                                     
     if close:                                                                                                                        
-        plt.close(fig)                                                                                                               
-                                                                                                                                    
-    print(f"Saved figure:\n  {png_path}\n  {pdf_path}")                                                                              
+        plt.close(fig)                                                                                                                                                                                                                                                   
     return png_path, pdf_path 
 
 def plot_multichannel_trace(data, fs=500, channel_names=None, title="Signal", max_channels=8, figsize=(12, 6), cfg=None):

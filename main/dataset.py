@@ -87,6 +87,7 @@ class WAYEEGDataset(Dataset):
         fs: float = 500.0,
         preprocess_fn: "Callable[[dict], dict] | None" = None,
         cache_dir: Union[str, Path, None] = None,
+        add_noise: bool = False,
     ) -> None:
         super().__init__()
 
@@ -104,6 +105,7 @@ class WAYEEGDataset(Dataset):
         self.latency_shift_samples = int(round((latency_shift_ms / 1000.0) * fs))
         self.preprocess_fn = preprocess_fn
         self.cache_dir   = Path(cache_dir) if cache_dir else None
+        self.add_noise   = add_noise
 
         self._windows: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
         self._build_index()
@@ -217,9 +219,14 @@ class WAYEEGDataset(Dataset):
         end = start + self.window_size
         shift = self.latency_shift_samples
 
-        eeg_w = torch.from_numpy(eeg_all[start:end])                 # (W, n_eeg) at time t
+        eeg_w = torch.from_numpy(eeg_all[start:end]).clone()                 # (W, n_eeg) at time t
         kin_w = torch.from_numpy(kt_all[start + shift:end + shift])    # (W, K) at time t + shift
         emg_w = torch.from_numpy(emg_all[start + shift:end + shift])   # (W, 5) at time t + shift
+
+        if self.add_noise:
+            # Add Gaussian noise scaled to 1% of signal's standard deviation
+            noise_std = 0.01 * eeg_w.std()
+            eeg_w += torch.randn_like(eeg_w) * noise_std
 
         return eeg_w, kin_w, emg_w
 
