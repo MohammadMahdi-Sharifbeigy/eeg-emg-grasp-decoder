@@ -258,6 +258,50 @@ _KIN_FX1, _KIN_FY1, _KIN_FZ1 = 12, 14, 16   # force plate 1 (index)
 _KIN_FZ2 = 17                                  # force plate 2 (thumb, Z only)
 _EPS = 1.0
 
+# Names of the 13 columns returned by extract_kt_raw(), in order.
+# Columns 0-9 describe the hand pose; columns 10-12 are object force channels.
+KT_RAW_NAMES = [
+    "p_wrist_x", "p_wrist_y", "p_wrist_z",
+    "p_index_x", "p_index_y", "p_index_z",
+    "p_thumb_x", "p_thumb_y", "p_thumb_z",
+    "d_grip", "F_L", "F_G", "rho_GL",
+]
+
+# drop_indices that keep the hand pose only, for the [position(13), velocity(13)]
+# layout (include_velocity=True, include_acceleration=False → 26 columns):
+#   10, 11, 12 = F_L, F_G, rho_GL          (position block)
+#   23, 24, 25 = v_F_L, v_F_G, v_rho_GL    (velocity block)
+# The 20 columns left are [pose(10), pose velocity(10)].
+# Why: the object force channels also move when someone else loads the object
+# while the hand is parked, which made the model predict EMG bursts at rest.
+POSE_DROP_INDICES = [10, 11, 12, 23, 24, 25]
+
+
+def kin_feature_names(
+    include_velocity: bool = False,
+    include_acceleration: bool = False,
+    drop_indices: list[int] | None = None,
+) -> list[str]:
+    """Names of the kinematic features, in the column order produced by
+    preprocess_kinematics() with the same arguments.
+
+    Layout before dropping: [position(13), velocity(13), acceleration(13)], where
+    the velocity / acceleration blocks exist only if requested. Velocity names are
+    prefixed with "v_", acceleration names with "a_". `drop_indices` index into
+    that layout, exactly like CONFIG["preprocessing"]["kinematics"]["drop_indices"].
+
+    Example:
+        kin_feature_names(True, False, POSE_DROP_INDICES)
+        → ['p_wrist_x', ..., 'd_grip', 'v_p_wrist_x', ..., 'v_d_grip']   (20 names)
+    """
+    names = list(KT_RAW_NAMES)
+    if include_velocity:
+        names += ["v_" + n for n in KT_RAW_NAMES]
+    if include_acceleration:
+        names += ["a_" + n for n in KT_RAW_NAMES]
+    dropped = set(drop_indices or [])
+    return [n for i, n in enumerate(names) if i not in dropped]
+
 
 def extract_kt_raw(kin: np.ndarray) -> np.ndarray:
     """Build 13-dim kinematic state vector from raw 36-col kin signal.

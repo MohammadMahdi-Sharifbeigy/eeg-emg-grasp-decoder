@@ -7,8 +7,9 @@ Public API:
     preprocessing_eeg:     preprocess_eeg, preprocess_eeg_from_config
     preprocessing_emg_kin: preprocess_emg, preprocess_emg_from_config,
                            preprocess_kinematics, preprocess_kinematics_from_config,
-                           EMGNormalizer, KinNormalizer, extract_kt
-    dataset:               WAYEEGDataset,
+                           EMGNormalizer, KinNormalizer, extract_kt,
+                           KT_RAW_NAMES, POSE_DROP_INDICES, kin_feature_names
+    dataset:              WAYEEGDataset,
                            resolve_participants (handles "all", single, or list),
                            ALL_PARTICIPANTS
     model:                 KGGTModel, build_kg_gt_from_config, CNN1dAligner,
@@ -42,6 +43,9 @@ from .preprocessing_emg_kin import (
     sg_velocity,
     bw_velocity,
     compute_muscle_edge_prior,
+    KT_RAW_NAMES,
+    POSE_DROP_INDICES,
+    kin_feature_names,
 )
 from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
 from .model import (
@@ -119,6 +123,7 @@ from .plots import(
     plot_neural_mechanical_latency_lag,
     plot_spectral_power_decomposition,
     plot_kinematic_velocity_acceleration_density,
+    plot_kin_smoothing_comparison,
 )
 
 __all__ = [
@@ -132,6 +137,7 @@ __all__ = [
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
     "extract_kt_raw", "extract_kt", "extract_kt_with_velocity",
     "estimate_velocity", "sg_velocity", "bw_velocity", "compute_muscle_edge_prior",
+    "KT_RAW_NAMES", "POSE_DROP_INDICES", "kin_feature_names",
     # dataset
     "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
     # model
@@ -166,4 +172,5 @@ __all__ = [
     "plot_neural_mechanical_latency_lag",
     "plot_spectral_power_decomposition",
     "plot_kinematic_velocity_acceleration_density",
+    "plot_kin_smoothing_comparison",
 ]

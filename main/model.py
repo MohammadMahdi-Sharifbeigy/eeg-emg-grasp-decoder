@@ -835,9 +835,15 @@ class KGGTModel(nn.Module):
         )
 
         if use_kinematic_guidance:
+            # Split the kinematic vector between the two branches (kin is laid out
+            # as [position, velocity(, acceleration)] blocks of equal size):
+            #   36 / 39 → first third (position) to the GAT, vel+acc to the skip highway
+            #   26      → 13 position to the GAT, 13 velocity to the skip highway
+            #   20      → 10 hand-pose to the GAT, 10 pose velocity to the skip highway
+            #   < 20    → too small to be a block layout: all features feed both branches
             if kin_dim >= 24 and kin_dim % 3 == 0:
                 gat_kin_dim = kin_dim // 3
-            elif kin_dim >= 24 and kin_dim % 2 == 0:
+            elif kin_dim >= 20 and kin_dim % 2 == 0:
                 gat_kin_dim = kin_dim // 2
             else:
                 gat_kin_dim = kin_dim
@@ -886,7 +892,7 @@ class KGGTModel(nn.Module):
         return kin[..., :self.gat_kin_dim]
 
     def get_skip_kin(self, kin: torch.Tensor) -> torch.Tensor:
-        """Extract dynamic derivative features (velocity & acceleration) for direct skip highway."""
+        """Extract dynamic derivative features (velocity, plus acceleration if present) for direct skip highway."""
         if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == kin.shape[-1]:
             return kin
         return kin[..., self.gat_kin_dim:]
@@ -921,7 +927,8 @@ def build_kg_gt_from_config(
     Args:
         cfg:        Full project config dict.
         input_dim:  EEG input channels (e.g. 32).
-        kin_dim:    Kinematic feature dimension after preprocessing.
+        kin_dim:    Kinematic feature dimension after preprocessing
+                    (20 = hand pose + pose velocity, see POSE_DROP_INDICES).
         edge_prior: Optional (5, 5) tensor from compute_muscle_edge_prior().
                     If None, edge_bias is initialised to zeros.
                     Compute via:

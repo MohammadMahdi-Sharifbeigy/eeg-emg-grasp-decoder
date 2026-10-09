@@ -822,7 +822,11 @@ def plot_kin_edge_linear_weights(
     elif len(col_labels) != kin_dim:
         col_labels = (col_labels + [f"k{k}" for k in range(kin_dim)])[:kin_dim]
 
-    n_plots = num_heads + 1   # one per head + one mean
+    # Features named in the title hint: only those that are really in the input
+    # (F_L / F_G are absent in the hand-pose-only layout).
+    key_feats = [n for n in ("d_grip", "F_L", "F_G") if n in col_labels]
+
+    n_plots = num_heads + 1  # one per head + one mean
     n_cols  = min(n_plots, 3)
     n_rows  = (n_plots + n_cols - 1) // n_cols
 
@@ -873,7 +877,8 @@ def plot_kin_edge_linear_weights(
         r"($W_{h,\,i\to j,\,k}$: contribution of feature $k$ to edge $i\to j$ in head $h$)"
         "\n\u25ba Red = positive bias (feature increases this edge)"
         "   \u25ba Blue = negative bias (feature suppresses this edge)"
-        "\n\u25ba High |weight| on d_grip / F_L / F_G rows confirms task-relevant synergy routing",
+        + (f"\n\u25ba High |weight| on {' / '.join(key_feats)} columns confirms task-relevant synergy routing"
+           if key_feats else ""),
         fontsize=11, fontweight="bold",
     )
     fig.tight_layout(rect=[0, 0, 1, 0.90])
@@ -1450,6 +1455,180 @@ def plot_kinematic_velocity_acceleration_density(kin_window, emg_target, emg_nam
                  fontweight="bold", fontsize=11)
     fig.tight_layout()
     save_fig(fig, "kinematic_velocity_acceleration_density", cfg)
+    return fig
+
+
+# ============================================================================
+# Kinematic input check: effect of the Savitzky-Golay window on pose velocity
+# ============================================================================
+
+def plot_kin_smoothing_comparison(
+    kin_raw: np.ndarray,
+    fs: float = 500.0,
+    sg_window_old: int = 11,
+    sg_window_new: int = 51,
+    sg_poly: int = 3,
+    start_sec: float = 0.0,
+    end_sec: float = 10.0,
+    rest_sec: float = 1.0,
+    title: str | None = None,
+    figsize: tuple = (14, 13.5),
+    cfg: dict | None = None,
+) -> plt.Figure:
+    """Show what the wider SG window does to the kinematic input, for one time range.
+
+    Five stacked panels sharing the time axis:
+      (a) hand pose for context: grip aperture d_grip and wrist z
+      (b) grip-aperture velocity v_d_grip, old SG window vs new SG window
+      (c) the same velocity zoomed on small amplitudes, so the jitter is visible
+      (d) grip-aperture acceleration (old SG window)   - removed from the model input
+      (e) object force channels F_L and F_G            - removed from the model input
+
+    The "parked" stretch (shaded) is the `rest_sec`-long stretch inside the time
+    range where the hand pose (columns 0-9 of extract_kt_raw) varies least. The
+    standard deviation of the velocity inside it is the rest jitter printed in
+    the title of panel (c).
+
+    Args:
+        kin_raw:        (T, 36) raw kinematic signal from load_hs()["kin"].
+        fs:             kinematic sampling rate in Hz.
+        sg_window_old:  previous Savitzky-Golay window (samples).
+        sg_window_new:  new Savitzky-Golay window (samples).
+        sg_poly:        Savitzky-Golay polynomial order.
+        start_sec / end_sec: time range to show (seconds from series start).
+        rest_sec:       length of the parked stretch used for the jitter numbers.
+        title:          optional figure title.
+        cfg:            optional config dict passed to save_fig().
+
+    Returns:
+        matplotlib Figure. The measured numbers are attached as `fig.rest_jitter`:
+        {"std_old", "std_new", "ratio", "rest_start_sec", "rest_end_sec", "signal", "unit"}.
+    """
+    from .preprocessing_emg_kin import extract_kt_raw, sg_velocity, sg_acceleration
+
+    COL_OLD, COL_NEW = "#9a9a9a", "#1f5fbf"          # old = muted grey, new = strong blue
+    COL_REMOVED_A, COL_REMOVED_B = "#e8590c", "#c92a2a"
+    COL_POSE_A, COL_POSE_B = "#2b2b2b", "#2a9d8f"
+    COL_REST = "#2f9e44"
+
+    kt = extract_kt_raw(np.asarray(kin_raw)).astype(np.float64)   # (T, 13)
+    n_total = kt.shape[0]
+    i0 = max(int(round(start_sec * fs)), 0)
+    i1 = min(int(round(end_sec * fs)), n_total)
+    if i1 - i0 < 2:
+        raise ValueError(
+            f"Time range {start_sec}-{end_sec} s is outside the series "
+            f"({n_total / fs:.1f} s long)."
+        )
+
+    # Derivatives are computed on the whole series (as in preprocessing), then sliced.
+    d_grip = kt[:, 9]
+    vel_old = sg_velocity(d_grip, fs=fs, window=sg_window_old, poly=sg_poly)[i0:i1]
+    vel_new = sg_velocity(d_grip, fs=fs, window=sg_window_new, poly=sg_poly)[i0:i1]
+    acc_old = sg_acceleration(d_grip, fs=fs, window=sg_window_old, poly=sg_poly)[i0:i1]
+    time = np.arange(i0, i1) / float(fs)
+
+    # Parked stretch: where the 10 pose columns vary least (does not use the velocities).
+    pose = kt[i0:i1, :10] - kt[i0:i1, :10].mean(axis=0, keepdims=True)
+    n_rest = int(min(max(round(rest_sec * fs), 2), i1 - i0))
+    csum = np.cumsum(np.vstack([np.zeros((1, 10)), pose]), axis=0)
+    csum2 = np.cumsum(np.vstack([np.zeros((1, 10)), pose ** 2]), axis=0)
+    roll_mean = (csum[n_rest:] - csum[:-n_rest]) / n_rest
+    roll_var = (csum2[n_rest:] - csum2[:-n_rest]) / n_rest - roll_mean ** 2
+    r0 = int(np.argmin(roll_var.sum(axis=1)))
+    r1 = r0 + n_rest
+    rest_t0, rest_t1 = float(time[r0]), float(time[r1 - 1] + 1.0 / fs)
+
+    std_old = float(np.std(vel_old[r0:r1]))
+    std_new = float(np.std(vel_new[r0:r1]))
+    ratio = std_old / max(std_new, 1e-12)
+
+    def _win(w):
+        return f"SG window {w} samples ({1000.0 * w / fs:.0f} ms)"
+
+    fig, axes = plt.subplots(
+        5, 1, figsize=figsize, sharex=True, facecolor="white",
+        gridspec_kw={"height_ratios": [1.0, 1.25, 1.25, 1.0, 1.0]},
+    )
+    title_kw = dict(fontsize=11, fontweight="bold", loc="left")
+    legend_kw = dict(loc="upper right", fontsize=9, framealpha=0.9)
+
+    # (a) pose context
+    ax = axes[0]
+    wrist_z = kt[i0:i1, 2]
+    grip_w = d_grip[i0:i1]
+    ax.plot(time, grip_w - np.median(grip_w), color=COL_POSE_A, lw=1.4,
+            label="grip aperture d_grip")
+    ax.plot(time, wrist_z - np.median(wrist_z), color=COL_POSE_B, lw=1.4,
+            label="wrist z (p_wrist_z)")
+    ax.set_ylabel("Change from\nwindow median (mm)")
+    ax.set_title("(a) Hand pose (kept in the model input)", **title_kw)
+
+    # (b) velocity, old vs new
+    ax = axes[1]
+    ax.plot(time, vel_old, color=COL_OLD, lw=1.0, label=f"old: {_win(sg_window_old)}")
+    ax.plot(time, vel_new, color=COL_NEW, lw=1.6, label=f"new: {_win(sg_window_new)}")
+    ax.set_ylabel("v_d_grip (mm/s)")
+    ax.set_title("(b) Grip-aperture velocity, full range", **title_kw)
+    ax.legend(ncol=2, **legend_kw)
+
+    # (c) same velocity, zoomed on the small-amplitude range
+    ax = axes[2]
+    ax.plot(time, vel_old, color=COL_OLD, lw=1.0, label=f"old: {_win(sg_window_old)}")
+    ax.plot(time, vel_new, color=COL_NEW, lw=1.6, label=f"new: {_win(sg_window_new)}")
+    zoom = max(8.0 * std_old, 1e-6)
+    centre = float(np.mean(vel_new[r0:r1]))
+    ax.set_ylim(centre - zoom, centre + zoom)
+    ax.set_ylabel("v_d_grip (mm/s)\nzoomed")
+    ax.set_title(
+        f"(c) Same velocity, zoomed.  Rest jitter in the parked stretch "
+        f"({rest_t0:.1f}-{rest_t1:.1f} s): std {std_old:.2f} mm/s (old) "
+        f"→ {std_new:.2f} mm/s (new), {ratio:.1f}× smaller",
+        **title_kw,
+    )
+
+    # (d) acceleration, no longer an input
+    ax = axes[3]
+    ax.plot(time, acc_old, color=COL_REMOVED_A, lw=0.9,
+            label=f"a_d_grip, {_win(sg_window_old)}")
+    ax.set_ylabel("a_d_grip (mm/s²)")
+    ax.set_title("(d) Grip-aperture acceleration - REMOVED from the model input", **title_kw)
+    ax.legend(**legend_kw)
+
+    # (e) object forces, no longer an input
+    ax = axes[4]
+    ax.plot(time, kt[i0:i1, 10], color=COL_REMOVED_B, lw=1.3, label="F_L (load force)")
+    ax.plot(time, kt[i0:i1, 11], color=COL_REMOVED_A, lw=1.3, label="F_G (grip force)")
+    ax.set_ylabel("Force (sensor units)")
+    ax.set_title("(e) Object force channels - REMOVED from the model input", **title_kw)
+    ax.legend(ncol=2, **legend_kw)
+    ax.set_xlabel("Time (s)")
+
+    for k, ax in enumerate(axes):
+        ax.axvspan(rest_t0, rest_t1, color=COL_REST, alpha=0.13, lw=0,
+                   label="parked stretch (pose varies least)" if k == 0 else None)
+        ax.grid(True, alpha=0.25)
+    # (c) is zoomed and full of traces: its lines are explained by the legend of (b),
+    # the shaded stretch by the legend of (a).
+    axes[0].legend(ncol=3, **legend_kw)
+    # Headroom above the traces so the legends never cover data.
+    for ax in (axes[0], axes[1], axes[3], axes[4]):
+        lo, hi = ax.get_ylim()
+        ax.set_ylim(lo, hi + 0.30 * (hi - lo))
+    axes[-1].set_xlim(start_sec, float(time[-1] + 1.0 / fs))
+
+    fig.suptitle(
+        title or f"Kinematic input: effect of the Savitzky-Golay window "
+                 f"({sg_window_old} → {sg_window_new} samples) on pose velocity",
+        fontsize=13, fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.rest_jitter = {
+        "std_old": std_old, "std_new": std_new, "ratio": ratio,
+        "rest_start_sec": rest_t0, "rest_end_sec": rest_t1,
+        "signal": "v_d_grip", "unit": "mm/s",
+    }
+    save_fig(fig, "kin_smoothing_comparison", cfg)
     return fig
 
 def plot_pure_eeg_triptych(
