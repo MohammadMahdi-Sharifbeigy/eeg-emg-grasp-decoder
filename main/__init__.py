@@ -21,6 +21,9 @@ Public API:
                            collect_predictions, compute_metrics,
                            EvalMetrics, prepare_batch_factory,
                            save_checkpoint, load_checkpoint
+    ablation:              input_ablation, AblationResult, shuffle_time,
+                           apply_condition, pearson_per_channel,
+                           rest_threshold_from_loader, ABLATION_CONDITIONS
 """
 
 from .device import get_device, set_seed
@@ -103,6 +106,17 @@ from .training import (
     load_checkpoint,
     print_gpu_info,
 )
+from .ablation import (
+    input_ablation,
+    AblationResult,
+    shuffle_time,
+    apply_condition,
+    pearson_per_channel,
+    rest_threshold_from_loader,
+    ABLATION_CONDITIONS,
+    ABLATION_LABELS,
+    ABLATION_COLORS,
+)
 
 from .plots import(
     get_dynamic_fig_dir,
@@ -163,6 +177,10 @@ __all__ = [
     "train_model", "TrainConfig", "TrainResult", "EvalMetrics",
     "collect_predictions", "compute_metrics", "prepare_batch_factory",
     "save_checkpoint", "load_checkpoint", "print_gpu_info",
+    # ablation
+    "input_ablation", "AblationResult", "shuffle_time", "apply_condition",
+    "pearson_per_channel", "rest_threshold_from_loader",
+    "ABLATION_CONDITIONS", "ABLATION_LABELS", "ABLATION_COLORS",
     # plots — core
     "get_dynamic_fig_dir", "save_fig", "plot_multichannel_trace",
     "plot_signal_heatmap", "plot_preprocessing_comparison",
