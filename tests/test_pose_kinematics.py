@@ -122,7 +122,7 @@ def test_public_names_are_exported_from_the_package():
 
 def test_notebook_config_uses_the_pose_layout():
     """main.ipynb CONFIG must match the layout these tests describe."""
-    from main.preprocessing_emg_kin import POSE_DROP_INDICES, kin_feature_names
+    from main.preprocessing_emg_kin import POSE_FORCE_DROP_INDICES, kin_feature_names
 
     nb = json.loads((ROOT / "main.ipynb").read_text(encoding="utf-8"))
     src = next("".join(c["source"]) for c in nb["cells"]
@@ -135,13 +135,15 @@ def test_notebook_config_uses_the_pose_layout():
     assert kin_cfg["include_velocity"] is True
     assert kin_cfg["include_acceleration"] is False
     assert kin_cfg["sg_window"] == 51
-    assert kin_cfg["drop_indices"] == POSE_DROP_INDICES
+    # Package 1: pose + hand-near-object gated forces (see tests/test_force_gate.py)
+    assert kin_cfg["drop_indices"] == POSE_FORCE_DROP_INDICES
     n_features = len(kin_feature_names(
-        kin_cfg["include_velocity"], kin_cfg["include_acceleration"], kin_cfg["drop_indices"]
+        kin_cfg["include_velocity"], kin_cfg["include_acceleration"], kin_cfg["drop_indices"],
+        gated_force=kin_cfg["gated_force"],
     ))
-    assert n_features == 20 == cfg["data"]["n_kin_features"]
-    # A new cache folder, so 39-column caches of the old layout are never loaded.
-    assert cfg["data"]["cache_dir"] == "data/cache_main_stride500_square_pose_sg51"
+    assert n_features == 22 == cfg["data"]["n_kin_features"]
+    # A new cache folder, so caches of older layouts are never loaded.
+    assert cfg["data"]["cache_dir"] == "data/cache_main_stride500_square_pose_force_sg51"
 
 
 # ── (b) object forces can no longer reach the model ───────────────────────────

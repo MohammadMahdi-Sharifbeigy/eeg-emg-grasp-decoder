@@ -51,17 +51,35 @@ class PeakWeightedMSELoss(nn.Module):
         asymmetry: Under-prediction multiplier during peak contractions. Default 2.0.
         threshold: Maintained for backwards config compatibility.
         peak_weight: Optional alias for alpha.
+        huber_delta: None (default) = squared error. A float δ replaces the squared
+            error e² by the robust ρ(e) = e² for |e| ≤ δ and 2δ|e| − δ² beyond
+            (= 2 × Huber, so small errors cost exactly what they did before and
+            large spikes only grow linearly). Same units as the target (z-space).
+        channel_weights: None (default) or a (C,) array; each channel's weighted
+            error is multiplied by w_c (see compute_channel_weights).
     """
 
-    def __init__(self, alpha: float = 3.0, asymmetry: float = 2.0, threshold: float = 1.0, peak_weight: float | None = None) -> None:
+    def __init__(
+        self,
+        alpha: float = 3.0,
+        asymmetry: float = 2.0,
+        threshold: float = 1.0,
+        peak_weight: float | None = None,
+        huber_delta: float | None = None,
+        channel_weights=None,
+    ) -> None:
         super().__init__()
         if peak_weight is not None:
             alpha = peak_weight
         if alpha < 0:
             raise ValueError(f"alpha must be >= 0, got {alpha}")
+        if huber_delta is not None and huber_delta <= 0:
+            raise ValueError(f"huber_delta must be > 0 or None, got {huber_delta}")
         self.alpha = float(alpha)
         self.asymmetry = float(asymmetry)
         self.threshold = float(threshold)  # kept for backwards config compatibility
+        self.huber_delta = None if huber_delta is None else float(huber_delta)
+        self.channel_weights = _as_weight_tensor(channel_weights)
 
     def forward(self, pred: Tensor, target: Tensor) -> Tensor:
         """
@@ -69,7 +87,8 @@ class PeakWeightedMSELoss(nn.Module):
             pred:   (B, T, C) predicted envelope
             target: (B, T, C) ground truth envelope (raw physical scale or z-scored)
         """
-        if self.alpha == 0.0 and self.asymmetry == 1.0:
+        plain = self.huber_delta is None and self.channel_weights is None
+        if plain and self.alpha == 0.0 and self.asymmetry == 1.0:
             return F.mse_loss(pred, target)
 
         # ── 1. SCALE-INVARIANT RELATIVE ACTIVATION (0.0 to 1.0 per channel per window) ─
@@ -91,10 +110,68 @@ class PeakWeightedMSELoss(nn.Module):
         under_prediction = (target > pred).float()
         asym_w = 1.0 + (self.asymmetry - 1.0) * under_prediction * y_norm
 
-        mse_raw = F.mse_loss(pred, target, reduction="none")  
-        loss = (w_t * asym_w * mse_raw).mean()
+        if self.huber_delta is None:
+            mse_raw = F.mse_loss(pred, target, reduction="none")
+        else:
+            # 2 × Huber: e² inside ±δ, 2δ|e| − δ² outside (continuous value and slope)
+            mse_raw = 2.0 * F.huber_loss(pred, target, reduction="none", delta=self.huber_delta)
+        weighted = w_t * asym_w * mse_raw
+        if self.channel_weights is not None:
+            weighted = weighted * self.channel_weights.to(weighted)
+        loss = weighted.mean()
 
         return loss
+
+
+def _as_weight_tensor(w) -> Tensor | None:
+    """None → None; array / list / tensor → 1-D float32 CPU tensor (moved to the
+    prediction's device and dtype at use time)."""
+    if w is None:
+        return None
+    t = torch.as_tensor(w, dtype=torch.float32).detach().cpu().reshape(-1)
+    if not torch.isfinite(t).all() or (t < 0).any():
+        raise ValueError(f"channel weights must be finite and >= 0, got {t.tolist()}")
+    return t
+
+
+def compute_channel_weights(z_targets, q: float = 95.0, eps: float = 1e-6) -> "np.ndarray":
+    """Per-muscle loss weights w_c ∝ 1 / p_q(|z_c|), normalised to mean 1.
+
+    Args:
+        z_targets: (N, C) array of z-scored TRAINING targets, or a list of (T_i, C)
+                   arrays (concatenated).
+        q:         percentile of |z| (default 95).
+
+    Spiky muscles (large |z| tails) get small weights, so they no longer dominate
+    the squared error; quiet muscles get larger ones.
+    """
+    import numpy as np
+
+    if isinstance(z_targets, (list, tuple)):
+        z = np.concatenate([np.asarray(a, dtype=np.float64) for a in z_targets], axis=0)
+    else:
+        z = np.asarray(z_targets, dtype=np.float64)
+    if z.ndim != 2:
+        raise ValueError(f"z_targets must be (N, C), got shape {z.shape}")
+    p = np.percentile(np.abs(z), q, axis=0)
+    w = 1.0 / np.maximum(p, eps)
+    return (w / w.mean()).astype(np.float32)
+
+
+def channel_weights_from_config(training_cfg: dict, z_targets) -> "np.ndarray | None":
+    """Resolve training.loss.channel_weights: None → None, "auto" →
+    compute_channel_weights(z_targets), explicit list → that list as float32."""
+    import numpy as np
+
+    loss_cfg = training_cfg.get("loss", training_cfg)
+    spec = loss_cfg.get("channel_weights")
+    if spec is None:
+        return None
+    if isinstance(spec, str):
+        if spec != "auto":
+            raise ValueError(f"channel_weights must be None, 'auto' or a list, got {spec!r}")
+        return compute_channel_weights(z_targets)
+    return np.asarray(spec, dtype=np.float32)
 # ============================================================================
 # 2. Edge-prior KL divergence regularization
 # ============================================================================
@@ -309,7 +386,14 @@ class CompositeEMGLoss(nn.Module):
                 + w_pearson * L_Pearson
                 + w_diff    * L_diff
                 + w_rest    * L_rest (resting L1)
+                + w_rest_over * L_rest_over (one-sided squared over-prediction at rest)
                 + w_reg     * L_reg  (EdgePrior KL)
+
+    Package 1 options (all off by default → identical to the previous loss):
+        w_rest_over:     weight of mean(rest_mask · w_c · relu(pred − target)²), with
+                         the same window-relative rest mask as L_rest.
+        huber_delta:     robust ρ instead of the squared error in L_PeakMSE.
+        channel_weights: (C,) per-muscle weights on L_PeakMSE and L_rest_over.
     """
 
     def __init__(
@@ -324,6 +408,9 @@ class CompositeEMGLoss(nn.Module):
         asymmetry: float = 2.0,
         rest_threshold: float = 0.15,
         eps: float = 1e-6,
+        w_rest_over: float = 0.0,
+        huber_delta: float | None = None,
+        channel_weights=None,
         # Backward compatibility arguments:
         lambda_reg: float | None = None,
         lambda_l1: float | None = None,
@@ -345,9 +432,14 @@ class CompositeEMGLoss(nn.Module):
         self.w_diff = float(w_diff)
         self.w_rest = float(w_rest)
         self.w_reg = float(w_reg)
+        self.w_rest_over = float(w_rest_over)
         self.rest_threshold = float(rest_threshold)
+        self.channel_weights = _as_weight_tensor(channel_weights)
 
-        self.peak_mse = PeakWeightedMSELoss(alpha=peak_alpha, asymmetry=asymmetry, threshold=threshold)
+        self.peak_mse = PeakWeightedMSELoss(
+            alpha=peak_alpha, asymmetry=asymmetry, threshold=threshold,
+            huber_delta=huber_delta, channel_weights=self.channel_weights,
+        )
         self.ccc = CCCLoss(eps=eps)
         self.pearson = PearsonCorrelationLoss(eps=eps)
         self.diff = TemporalSmoothnessLoss()
@@ -399,15 +491,25 @@ class CompositeEMGLoss(nn.Module):
 
         # 5. Resting Baseline L1 Penalty (Per-window normalized threshold)
         if self.w_rest > 0:
-            t_min = target.amin(dim=1, keepdim=True)
-            target_shifted = target - t_min
-            max_batch = target_shifted.amax(dim=1, keepdim=True)
-            resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-5)).float()
+            t_min, resting_mask = self._rest_mask(target)
             l_rest = torch.mean(torch.abs(pred - t_min) * resting_mask)
             loss_components["rest_l1"] = l_rest
             total_loss = total_loss + self.w_rest * l_rest
         else:
             loss_components["rest_l1"] = torch.tensor(0.0, device=pred.device)
+
+        # 5b. Baseline recovery: one-sided squared over-prediction where the target
+        #     is at rest (same window-relative rest mask as 5).
+        if self.w_rest_over > 0:
+            _, resting_mask = self._rest_mask(target)
+            over = torch.relu(pred - target) ** 2 * resting_mask
+            if self.channel_weights is not None:
+                over = over * self.channel_weights.to(over)
+            l_rest_over = over.mean()
+            loss_components["rest_over"] = l_rest_over
+            total_loss = total_loss + self.w_rest_over * l_rest_over
+        else:
+            loss_components["rest_over"] = torch.tensor(0.0, device=pred.device)
 
         # 6. GAT EdgePrior KL Divergence Regularization
         if model is not None and self.w_reg > 0:
@@ -427,12 +529,22 @@ class CompositeEMGLoss(nn.Module):
             "pearson": loss_components["pearson"].item(),
             "diff": loss_components["diff"].item(),
             "rest_l1": loss_components["rest_l1"].item(),
+            "rest_over": loss_components["rest_over"].item(),
             "kl_reg": loss_components["kl_reg"].item(),
         }
 
         if return_components:
             return total_loss, self.last_components
         return total_loss
+
+    def _rest_mask(self, target: Tensor) -> tuple[Tensor, Tensor]:
+        """Window-relative rest mask: target within rest_threshold of its window
+        range above the window minimum. Returns (t_min, mask) with mask in {0, 1}."""
+        t_min = target.amin(dim=1, keepdim=True)
+        target_shifted = target - t_min
+        max_batch = target_shifted.amax(dim=1, keepdim=True)
+        resting_mask = (target_shifted < self.rest_threshold * (max_batch + 1e-5)).float()
+        return t_min, resting_mask
 
 
 # Backward compatibility alias
@@ -443,7 +555,7 @@ CombinedEMGLoss = CompositeEMGLoss
 # 5. Config builder
 # ============================================================================
 
-def build_loss_from_config(cfg: dict) -> CompositeEMGLoss:
+def build_loss_from_config(cfg: dict, channel_weights=None) -> CompositeEMGLoss:
     """Build CompositeEMGLoss from the project config dictionary.
 
     Reads from cfg["loss"] with sensible defaults:
@@ -455,8 +567,25 @@ def build_loss_from_config(cfg: dict) -> CompositeEMGLoss:
         w_reg:           float  KL edge-prior regularization weight. Default 0.001.
         peak_alpha:      float  Multiplier for burst tips in PeakMSE. Default 3.0.
         asymmetry:       float  Under-prediction multiplier in PeakMSE. Default 2.0.
+        w_rest_over:     float  One-sided squared over-prediction at rest. Default 0.0.
+        huber_delta:     float | None  Robust PeakMSE error (z units). Default None.
+        channel_weights: None | "auto" | list  Per-muscle weights. Default None.
+                         "auto" needs the `channel_weights` argument (computed from
+                         the training targets, see channel_weights_from_config).
+
+    Args:
+        channel_weights: explicit (C,) weights; overrides the config value.
     """
     loss_cfg = cfg.get("loss", cfg if "peak_alpha" in cfg or "w_peak" in cfg else cfg.get("loss", {}))
+    if channel_weights is None:
+        spec = loss_cfg.get("channel_weights")
+        if isinstance(spec, str):
+            raise ValueError(
+                f"loss.channel_weights={spec!r} needs the training targets: pass "
+                "build_loss_from_config(cfg, channel_weights=channel_weights_from_config(cfg, z_train))"
+                if spec == "auto" else f"channel_weights must be None, 'auto' or a list, got {spec!r}"
+            )
+        channel_weights = spec
     return CompositeEMGLoss(
         w_peak=loss_cfg.get("w_peak", 1.0 if loss_cfg.get("use_peak_weight", True) else 0.0),
         w_ccc=loss_cfg.get("w_ccc", 0.5),
@@ -469,6 +598,9 @@ def build_loss_from_config(cfg: dict) -> CompositeEMGLoss:
         rest_threshold=loss_cfg.get("rest_threshold", 0.15),
         eps=loss_cfg.get("eps", 1e-6),
         threshold=loss_cfg.get("threshold", 1.0),
+        w_rest_over=loss_cfg.get("w_rest_over", 0.0),
+        huber_delta=loss_cfg.get("huber_delta"),
+        channel_weights=channel_weights,
     )
 
 

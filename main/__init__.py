@@ -9,14 +9,18 @@ Public API:
     preprocessing_emg_kin: preprocess_emg, preprocess_emg_from_config,
                            preprocess_kinematics, preprocess_kinematics_from_config,
                            EMGNormalizer, KinNormalizer, extract_kt,
-                           KT_RAW_NAMES, POSE_DROP_INDICES, kin_feature_names
+                           KT_RAW_NAMES, POSE_DROP_INDICES, POSE_FORCE_DROP_INDICES,
+                           kin_feature_names, hand_near_object_gate, index_object_distance
     dataset:              WAYEEGDataset,
                            resolve_participants (handles "all", single, or list),
                            ALL_PARTICIPANTS
     model:                 KGGTModel, build_kg_gt_from_config, CNN1dAligner,
                            TransformerOnlyModel, build_transformer_only_from_config
     losses:                CombinedEMGLoss, PeakWeightedMSELoss, EdgePriorKLDivLoss,
-                           build_loss_from_config
+                           build_loss_from_config, compute_channel_weights,
+                           channel_weights_from_config
+    magnitude_eval:        magnitude_report, magnitude_report_by_series,
+                           format_magnitude_table, predict_series, plot_magnitude_report
     training:              train_model, TrainConfig, TrainResult,
                            collect_predictions, compute_metrics,
                            EvalMetrics, prepare_batch_factory,
@@ -52,7 +56,10 @@ from .preprocessing_emg_kin import (
     compute_muscle_edge_prior,
     KT_RAW_NAMES,
     POSE_DROP_INDICES,
+    POSE_FORCE_DROP_INDICES,
     kin_feature_names,
+    hand_near_object_gate,
+    index_object_distance,
 )
 from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
 from .model import (
@@ -78,6 +85,16 @@ from .losses import (
     CORALLoss,
     build_loss_from_config,
     build_coral_loss_from_config,
+    compute_channel_weights,
+    channel_weights_from_config,
+)
+from .magnitude_eval import (
+    MAGNITUDE_COLUMNS,
+    magnitude_report,
+    magnitude_report_by_series,
+    format_magnitude_table,
+    predict_series,
+    plot_magnitude_report,
 )
 from .coral_net import (
     CORALNet,
@@ -142,6 +159,8 @@ from .plots import(
     plot_spectral_power_decomposition,
     plot_kinematic_velocity_acceleration_density,
     plot_kin_smoothing_comparison,
+    plot_kin_force_gate,
+    kin_force_gate_stats,
 )
 
 __all__ = [
@@ -156,7 +175,8 @@ __all__ = [
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
     "extract_kt_raw", "extract_kt", "extract_kt_with_velocity",
     "estimate_velocity", "sg_velocity", "bw_velocity", "compute_muscle_edge_prior",
-    "KT_RAW_NAMES", "POSE_DROP_INDICES", "kin_feature_names",
+    "KT_RAW_NAMES", "POSE_DROP_INDICES", "POSE_FORCE_DROP_INDICES", "kin_feature_names",
+    "hand_near_object_gate", "index_object_distance",
     # dataset
     "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
     # model
@@ -169,6 +189,10 @@ __all__ = [
     "CombinedEMGLoss", "CompositeEMGLoss", "CCCLoss", "PearsonCorrelationLoss",
     "TemporalSmoothnessLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
     "CORALLoss", "build_loss_from_config", "build_coral_loss_from_config",
+    "compute_channel_weights", "channel_weights_from_config",
+    # magnitude evaluation
+    "MAGNITUDE_COLUMNS", "magnitude_report", "magnitude_report_by_series",
+    "format_magnitude_table", "predict_series", "plot_magnitude_report",
     # coral-net
     "CORALNet", "LearnableFilterBank", "LearnableLagAlignment", "SimpleMambaBlock",
     "MambaEncoder", "SynergyDecoder", "extract_nmf_synergies", "build_coral_net_from_config",
@@ -196,4 +220,5 @@ __all__ = [
     "plot_spectral_power_decomposition",
     "plot_kinematic_velocity_acceleration_density",
     "plot_kin_smoothing_comparison",
+    "plot_kin_force_gate", "kin_force_gate_stats",
 ]

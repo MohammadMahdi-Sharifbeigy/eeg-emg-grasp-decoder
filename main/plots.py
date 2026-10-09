@@ -1631,6 +1631,133 @@ def plot_kin_smoothing_comparison(
     save_fig(fig, "kin_smoothing_comparison", cfg)
     return fig
 
+
+def kin_force_gate_stats(
+    kin_raw: np.ndarray,
+    fs: float = 500.0,
+    near_cm: float = 12.0,
+    far_cm: float = 20.0,
+    smooth_s: float = 0.1,
+) -> dict:
+    """Numbers behind plot_kin_force_gate() for a whole recording.
+
+    removed_frac_F_L / _F_G : Σ|F|·(1 − gate) / Σ|F|  (share of force mass gated out)
+    removed_far_frac_*      : Σ|F| over distance > far_cm / Σ|F|  (force while parked)
+    gate_min_near           : smallest gate where distance <= near_cm (1.0 = never lowered)
+    near_frac / far_frac    : share of samples with distance <= near_cm / > far_cm
+    """
+    from main.preprocessing_emg_kin import extract_kt_raw, hand_near_object_gate, index_object_distance
+
+    kt = extract_kt_raw(kin_raw)
+    d = index_object_distance(kin_raw)
+    g = hand_near_object_gate(kin_raw, fs, near_cm=near_cm, far_cm=far_cm, smooth_s=smooth_s)[:, 0]
+    near, far = d <= near_cm, d > far_cm
+    out = {"near_frac": float(near.mean()), "far_frac": float(far.mean()),
+           "gate_min_near": float(g[near].min()) if near.any() else float("nan")}
+    for k, name in ((10, "F_L"), (11, "F_G")):
+        f = np.abs(kt[:, k].astype(np.float64))
+        tot = f.sum()
+        out[f"removed_frac_{name}"] = float((f * (1.0 - g)).sum() / tot) if tot > 0 else float("nan")
+        out[f"removed_far_frac_{name}"] = float(f[far].sum() / tot) if tot > 0 else float("nan")
+    return out
+
+
+def plot_kin_force_gate(
+    kin_raw: np.ndarray,
+    fs: float = 500.0,
+    near_cm: float = 12.0,
+    far_cm: float = 20.0,
+    smooth_s: float = 0.1,
+    start_sec: float = 0.0,
+    end_sec: float = 10.0,
+    title: str | None = None,
+    figsize: tuple = (13, 9.5),
+    cfg: dict | None = None,
+) -> plt.Figure:
+    """Show the hand-near-object force gate on one time range of a raw recording.
+
+    Four stacked panels sharing the time axis:
+      (a) index fingertip - object distance (cm) with the near / far thresholds
+      (b) the gate (1 near the object → 0 far away)
+      (c) load force F_L: raw vs gated (= model input)
+      (d) grip force F_G: raw vs gated (= model input)
+    Stretches where the hand is far (distance > far_cm) are shaded grey.
+
+    Args:
+        kin_raw: (T, 36) raw kinematic signal from load_hs()["kin"].
+        fs, near_cm, far_cm, smooth_s: as in hand_near_object_gate().
+        start_sec / end_sec: time range to show.
+        cfg: optional config dict passed to save_fig().
+
+    Returns:
+        matplotlib Figure; whole-recording numbers (kin_force_gate_stats) are
+        attached as `fig.gate_stats`.
+    """
+    from main.preprocessing_emg_kin import extract_kt_raw, hand_near_object_gate, index_object_distance
+
+    blue, orange, grey = "#2a78d6", "#eb6834", "#8c8c8c"
+    T = kin_raw.shape[0]
+    i0 = max(0, int(round(start_sec * fs)))
+    i1 = min(T, int(round(end_sec * fs)))
+    if i1 <= i0:
+        raise ValueError(f"empty time range {start_sec}-{end_sec} s for a {T / fs:.1f} s recording")
+
+    kt = extract_kt_raw(kin_raw)
+    d = index_object_distance(kin_raw)
+    g = hand_near_object_gate(kin_raw, fs, near_cm=near_cm, far_cm=far_cm, smooth_s=smooth_s)[:, 0]
+    t = np.arange(i0, i1) / fs
+    far = d[i0:i1] > far_cm
+
+    fig, axes = plt.subplots(4, 1, figsize=figsize, sharex=True, facecolor="white",
+                             gridspec_kw={"height_ratios": [1.1, 0.8, 1.0, 1.0]})
+    title_kw = dict(fontsize=11, loc="left")
+    legend_kw = dict(fontsize=8.5, frameon=False, loc="upper left", bbox_to_anchor=(1.0, 1.0))
+
+    ax = axes[0]
+    ax.plot(t, d[i0:i1], color=blue, lw=1.4, label="index–object distance")
+    ax.axhline(near_cm, color=orange, lw=1.0, ls="--", label=f"near = {near_cm:g} cm (gate 1)")
+    ax.axhline(far_cm, color=grey, lw=1.0, ls="--", label=f"far = {far_cm:g} cm (gate 0)")
+    ax.set_ylabel("distance (cm)")
+    ax.set_title("(a) Index fingertip to object distance", **title_kw)
+
+    ax = axes[1]
+    ax.plot(t, g[i0:i1], color=blue, lw=1.4, label=f"gate (ramp + {smooth_s:g} s smoothing)")
+    ax.set_ylim(-0.08, 1.12)
+    ax.set_ylabel("gate")
+    ax.set_title("(b) Hand-near-object gate", **title_kw)
+
+    for ax, k, name, long in ((axes[2], 10, "F_L", "load force"), (axes[3], 11, "F_G", "grip force")):
+        ax.plot(t, kt[i0:i1, k], color=grey, lw=1.2, label=f"{name} raw")
+        ax.plot(t, kt[i0:i1, k] * g[i0:i1], color=orange, lw=1.4, label=f"{name} gated (model input)")
+        ax.set_ylabel(f"{name} (N)")
+        ax.set_title(f"({'c' if k == 10 else 'd'}) {long.capitalize()} {name}: raw vs gated", **title_kw)
+    axes[-1].set_xlabel("Time (s)")
+
+    # shade "far" stretches
+    edges = np.flatnonzero(np.diff(np.r_[0, far.astype(np.int8), 0]))
+    for ax in axes:
+        for a, b in zip(edges[::2], edges[1::2]):
+            ax.axvspan(t[a], t[b - 1] + 1.0 / fs, color=grey, alpha=0.12, lw=0)
+        ax.grid(True, alpha=0.25)
+        ax.spines[["top", "right"]].set_visible(False)
+    axes[0].axvspan(np.nan, np.nan, color=grey, alpha=0.12, lw=0, label=f"hand far (> {far_cm:g} cm)")
+    for ax in axes:
+        ax.legend(**legend_kw)
+    axes[-1].set_xlim(t[0], t[-1] + 1.0 / fs)
+
+    stats = kin_force_gate_stats(kin_raw, fs, near_cm, far_cm, smooth_s)
+    fig.suptitle(
+        title or (f"Force gated by hand position — {start_sec:g}–{end_sec:g} s  "
+                  f"(whole recording: {100 * stats['removed_frac_F_L']:.1f}% of |F_L|, "
+                  f"{100 * stats['removed_frac_F_G']:.1f}% of |F_G| gated out)"),
+        fontsize=12, fontweight="bold",
+    )
+    fig.tight_layout()
+    fig.gate_stats = stats
+    save_fig(fig, "kin_force_gate", cfg)
+    return fig
+
+
 def plot_pure_eeg_triptych(
     pred:              np.ndarray,
     target:            np.ndarray,

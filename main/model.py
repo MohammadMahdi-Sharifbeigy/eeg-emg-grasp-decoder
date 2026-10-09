@@ -822,6 +822,7 @@ class KGGTModel(nn.Module):
         gat_dropout: float = 0.1,
         use_kinematic_guidance: bool = False,
         edge_prior: Tensor | None = None,
+        gat_kin_dim_override: int | None = None,
     ) -> None:
         super().__init__()
         self.use_kinematic_guidance = use_kinematic_guidance
@@ -841,7 +842,17 @@ class KGGTModel(nn.Module):
             #   26      → 13 position to the GAT, 13 velocity to the skip highway
             #   20      → 10 hand-pose to the GAT, 10 pose velocity to the skip highway
             #   < 20    → too small to be a block layout: all features feed both branches
-            if kin_dim >= 24 and kin_dim % 3 == 0:
+            # gat_kin_dim_override (model.gat.kin_gat_dim) sets the split explicitly:
+            #   first override features → GAT edge bias, the rest → skip highway
+            #   (22 = [pose 10, F_L_gated, F_G_gated | pose velocity 10] uses 12).
+            if gat_kin_dim_override is not None:
+                gat_kin_dim = int(gat_kin_dim_override)
+                if not 0 < gat_kin_dim < kin_dim:
+                    raise ValueError(
+                        f"gat_kin_dim_override must be in [1, kin_dim-1] = [1, {kin_dim - 1}], "
+                        f"got {gat_kin_dim_override}"
+                    )
+            elif kin_dim >= 24 and kin_dim % 3 == 0:
                 gat_kin_dim = kin_dim // 3
             elif kin_dim >= 20 and kin_dim % 2 == 0:
                 gat_kin_dim = kin_dim // 2
@@ -928,7 +939,9 @@ def build_kg_gt_from_config(
         cfg:        Full project config dict.
         input_dim:  EEG input channels (e.g. 32).
         kin_dim:    Kinematic feature dimension after preprocessing
-                    (20 = hand pose + pose velocity, see POSE_DROP_INDICES).
+                    (20 = hand pose + pose velocity, see POSE_DROP_INDICES;
+                    22 = + gated F_L/F_G, see POSE_FORCE_DROP_INDICES — use
+                    model.gat.kin_gat_dim = 12 so pose + forces feed the GAT).
         edge_prior: Optional (5, 5) tensor from compute_muscle_edge_prior().
                     If None, edge_bias is initialised to zeros.
                     Compute via:
@@ -957,6 +970,8 @@ def build_kg_gt_from_config(
         gat_dropout=gat_cfg.get("dropout", model_cfg["transformer"].get("dropout", 0.1)),
         use_kinematic_guidance=use_kinematic_guidance,
         edge_prior=edge_prior,
+        # optional explicit GAT / skip split (None = automatic block split)
+        gat_kin_dim_override=gat_cfg.get("kin_gat_dim"),
     )
 
 

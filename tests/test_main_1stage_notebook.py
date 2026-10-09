@@ -111,7 +111,21 @@ def test_no_two_stage_paths_anywhere(nb):
     assert "train_single_stage(" in loso
 
 
-def test_ablation_cell_follows_evaluation(nb):
+def test_magnitude_then_ablation_cells_follow_evaluation(nb):
     cells = nb["cells"]
     i = next(k for k, c in enumerate(cells) if "# EVALUATION — Full metric suite" in _src(c))
-    assert "input_ablation(" in _src(cells[i + 1])
+    mag = _src(cells[i + 1])
+    assert "magnitude_report_by_series(" in mag
+    assert 'MAGNITUDE_CSV = "results/magnitude_report_1stage.csv"' in mag
+    assert 'MAGNITUDE_PNG = "results/magnitude_report_1stage.png"' in mag
+    assert "input_ablation(" in _src(cells[i + 2])
+
+
+def test_package1_config_matches_main(nb, head_nb):
+    cfg, head = _exec_config(nb), _exec_config(head_nb)
+    assert cfg["preprocessing"]["kinematics"]["gated_force"] == {"near_cm": 12.0, "far_cm": 20.0, "smooth_s": 0.1}
+    assert cfg["model"]["gat"]["kin_gat_dim"] == 12
+    loss = cfg["training"]["loss"]
+    assert (loss["asymmetry"], loss["w_rest_over"], loss["huber_delta"], loss["channel_weights"]) == \
+        (1.2, 1.0, 1.0, "auto")
+    assert loss == head["training"]["loss"]

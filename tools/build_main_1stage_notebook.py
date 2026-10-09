@@ -7,7 +7,8 @@ split and loss are untouched; checkpoints/results go to separate *_1stage
 locations so the two notebooks never overwrite each other.
 
 The source is ``git show <rev>:main.ipynb`` (default HEAD) so uncommitted edits
-in the working copy of main.ipynb are not inherited.  Every edit is a substring
+in the working copy of main.ipynb are not inherited (``--rev ""`` reads the
+staged index version).  Every edit is a substring
 lookup that must match exactly once, otherwise the script fails loudly.
 
 Usage:
@@ -104,17 +105,19 @@ every parameter trainable from the first epoch.
 | Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-5, `reduce` scheduler, no warmup | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200 |
 | GAT / decoder init | re-initialised between stages | trained together with the encoder from epoch 1 |
 | Checkpoints | `outputs/checkpoints_main_stage1/…`, `outputs/checkpoints_main_stage2/…` | `outputs/checkpoints_1stage/{subject}/` (`last.pt` + `best.pt`, resumable) |
-| Results | `results/evaluation_report.md`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
+| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
 
 Everything else is identical to `main.ipynb`: same participants and condition-stratified
-train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_sg51`;
-preprocessing is identical, only training differs), same 20 kinematic inputs (10 hand-pose → GAT
-edge bias, 10 SG-51 pose velocities → kin skip highway), same loss weights, batch size,
+train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_force_sg51`;
+preprocessing is identical, only training differs), same 22 kinematic inputs (10 hand-pose + 2
+hand-near-object gated forces F_L, F_G → GAT edge bias, 10 SG-51 pose velocities → kin skip
+highway), same loss (asymmetry 1.2, rest over-prediction term, Huber δ=1, per-muscle weights), batch size,
 gradient accumulation, grad clipping, AMP and seed. The parameter groups used by `train_model`
 are the same as in stage 1 of `main.ipynb` (`transformer_lr_scale`=0.1 → encoder + node projection at
 1e-4, GAT/decoder at 1e-3, kin-skip at lr/3 with stronger weight decay).
 
-There is also a new cell after the evaluation: **"How much does the model use EEG vs kinematics?"**
+After the evaluation come the magnitude evaluation (burst height / rest level per test series, as in
+`main.ipynb`) and a new cell: **"How much does the model use EEG vs kinematics?"**
 — Pearson r on the test set with the kinematics zeroed / time-shuffled and with the EEG time-shuffled.
 
 **How to compare with `main.ipynb`:** run both notebooks on the same `subject_list`; compare
@@ -464,6 +467,10 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     # 2. CONFIG
     i = edit_cell(nb, "CONFIG = {", [
         (
+            '    #   outputs/checkpoints_main_stage1, outputs/checkpoints_main_stage2, outputs/checkpoints_1stage\n',
+            '    #   outputs/checkpoints_1stage (this notebook; main.ipynb uses its own two-stage folders)\n',
+        ),
+        (
             '        "stage2_lr": 1e-5,\n',
             '        "stage2_lr": 1e-5,          # two-stage only (unused here)\n',
         ),
@@ -520,7 +527,20 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     ])
     log["evaluation"] = f"cell {i_eval} edited"
 
-    # 6. new ablation cell right after evaluation
+    # 6. magnitude evaluation (cell copied from main.ipynb): separate output files
+    i_mag = edit_cell(nb, "MAGNITUDE EVALUATION", [
+        ('MAGNITUDE_CSV = "results/magnitude_report.csv"',
+         'MAGNITUDE_CSV = "results/magnitude_report_1stage.csv"   # main.ipynb writes magnitude_report.csv'),
+        ('MAGNITUDE_PNG = "results/magnitude_report.png"',
+         'MAGNITUDE_PNG = "results/magnitude_report_1stage.png"'),
+        ('# S = surface varies, B = both vary). Saves results/magnitude_report.csv / .png',
+         '# S = surface varies, B = both vary). Saves results/magnitude_report_1stage.csv / .png'),
+    ])
+    if i_mag != i_eval + 1:
+        raise AssertionError(f"magnitude cell expected right after evaluation, got {i_mag} vs {i_eval}")
+    log["magnitude"] = f"cell {i_mag} edited"
+
+    # 7. new ablation cell right after the magnitude evaluation
     new_cell = {
         "cell_type": "code",
         "execution_count": None,
@@ -530,10 +550,10 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
         "source": [],
     }
     set_src(new_cell, ABLATION_CELL)
-    nb["cells"].insert(i_eval + 1, new_cell)
-    log["ablation"] = f"cell {i_eval + 1} added"
+    nb["cells"].insert(i_mag + 1, new_cell)
+    log["ablation"] = f"cell {i_mag + 1} added"
 
-    # 7. interpretability: separate output folder
+    # 8. interpretability: separate output folder
     i = edit_cell(nb, "INTERPRETABILITY — Full-Signal Triptych", [
         ('    _save_dir = os.path.join("outputs", "interpretability", _subj)',
          '    _save_dir = os.path.join("outputs", "interpretability_1stage", _subj)'),
@@ -544,7 +564,7 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     ])
     log["interpretability"] = f"cell {i} edited"
 
-    # 8. LOSOCV: single-stage per fold
+    # 9. LOSOCV: single-stage per fold
     i = find_cell(nb, "[OPTIONAL] Automatic LOSOCV")
     text = src(nb["cells"][i])
     text = replace_once(text,
