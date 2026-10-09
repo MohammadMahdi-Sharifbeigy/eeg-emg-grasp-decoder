@@ -11,6 +11,7 @@ so nested MATLAB structs are accessible as Python attributes.
 
 from __future__ import annotations
 
+import functools
 import re
 from pathlib import Path
 from typing import Union
@@ -36,18 +37,140 @@ _SPLIT_MAP = {
 }
 
 
-def get_split_series(split: str) -> list:
+def get_split_series(
+    split: str,
+    participant: "int | None" = None,
+    data_dir: "str | Path | None" = None,
+) -> list:
     """Return series identifiers for the requested split.
 
     Args:
-        split: one of 'train', 'val', 'test', 'stability', 'all'
+        split:       one of 'train', 'val', 'test', 'stability', 'all'
+        participant: if None, return the legacy fixed lists (TRAIN_SERIES etc.).
+                     Otherwise return the per-participant, condition-stratified
+                     split (see ``stratified_split``).
+        data_dir:    raw data root containing ``P{p}/P{p}_AllLifts.mat``
+                     (default: repo ``data/way-eeg/raw``).
 
     Returns:
         List of series identifiers (int or 'ST').
     """
     if split not in _SPLIT_MAP:
         raise ValueError(f"Unknown split '{split}'. Choose from {list(_SPLIT_MAP)}")
-    return _SPLIT_MAP[split]
+    if participant is None:
+        return _SPLIT_MAP[split]
+    return list(stratified_split(participant, data_dir)[split])
+
+
+# ---------------------------------------------------------------------------
+# Per-participant condition-stratified split
+# ---------------------------------------------------------------------------
+# Each participant has 9 series: 5 x W (weight varies), 2 x S (surface
+# varies), 2 x B (both vary).  Series 7-9 are always W; series 1-6 hold
+# 2 W + 2 S + 2 B in a participant-specific order.  Rule:
+#   test  = later W of series 1-6  + later B of series 1-6       -> {W, B}
+#   val   = series 9                                              -> {W}
+#   train = earlier W of 1-6, series 7, 8, both S, earlier B      -> {3W, 2S, 1B}
+
+DEFAULT_RAW_DIR: Path = Path(__file__).resolve().parents[1] / "data" / "way-eeg" / "raw"
+
+_BLOCKTYPE_TO_COND = {1: "W", 2: "S", 3: "B"}
+
+
+def _alllifts_path(participant: int, data_dir: "str | Path | None") -> Path:
+    root = Path(data_dir) if data_dir is not None else DEFAULT_RAW_DIR
+    return root / f"P{int(participant)}" / f"P{int(participant)}_AllLifts.mat"
+
+
+@functools.lru_cache(maxsize=None)
+def _read_alllifts(participant: int, data_dir_str: str) -> tuple[dict, dict]:
+    """Return ({series: cond}, {series: n_lifts}) for one participant."""
+    path = _alllifts_path(participant, data_dir_str)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"AllLifts file not found for participant {participant}: {path}. "
+            "It is required to derive the condition-stratified split."
+        )
+    P = _mat_load(path)["P"]
+    cols = _names_to_list(P.ColNames)
+    lifts = np.atleast_2d(np.asarray(P.AllLifts, dtype=float))
+    run = lifts[:, cols.index("Run")].astype(int)
+    block = lifts[:, cols.index("BlockType")].astype(int)
+
+    cond: dict[int, str] = {}
+    counts: dict[int, int] = {}
+    for r in np.unique(run):
+        bts = np.unique(block[run == r])
+        if len(bts) != 1 or int(bts[0]) not in _BLOCKTYPE_TO_COND:
+            raise ValueError(
+                f"P{participant} series {r}: expected a single BlockType in "
+                f"{{1,2,3}}, got {bts.tolist()}"
+            )
+        cond[int(r)] = _BLOCKTYPE_TO_COND[int(bts[0])]
+        counts[int(r)] = int((run == r).sum())
+    return cond, counts
+
+
+def series_conditions(participant: int, data_dir: "str | Path | None" = None) -> dict[int, str]:
+    """Map series number -> condition 'W' / 'S' / 'B' (from AllLifts BlockType 1/2/3)."""
+    key = str(data_dir if data_dir is not None else DEFAULT_RAW_DIR)
+    return dict(_read_alllifts(int(participant), key)[0])
+
+
+def series_lift_counts(participant: int, data_dir: "str | Path | None" = None) -> dict[int, int]:
+    """Map series number -> number of lifts in AllLifts."""
+    key = str(data_dir if data_dir is not None else DEFAULT_RAW_DIR)
+    return dict(_read_alllifts(int(participant), key)[1])
+
+
+def stratified_split(participant: int, data_dir: "str | Path | None" = None) -> dict:
+    """Per-participant condition-stratified split (see module comment).
+
+    Returns dict with keys 'train', 'val', 'test' (sorted int lists),
+    'stability' (['ST']) and 'all' (train + val + test + ST).
+
+    Raises:
+        FileNotFoundError: AllLifts file missing.
+        ValueError: composition is not exactly 5W/2S/2B over series 1..9
+                    with series 7-9 = W.
+    """
+    cond = series_conditions(participant, data_dir)
+    comp = {c: sorted(s for s, v in cond.items() if v == c) for c in "WSB"}
+    ok = (
+        sorted(cond) == list(range(1, 10))
+        and len(comp["W"]) == 5 and len(comp["S"]) == 2 and len(comp["B"]) == 2
+        and all(cond[s] == "W" for s in (7, 8, 9))
+    )
+    if not ok:
+        raise ValueError(
+            f"P{participant}: expected series 1..9 with composition 5W/2S/2B and "
+            f"series 7-9 = W; got {dict(sorted(cond.items()))}"
+        )
+    w16 = [s for s in comp["W"] if s <= 6]
+    b16 = comp["B"]
+    test = sorted([w16[1], b16[1]])
+    val = [9]
+    train = sorted([w16[0], 7, 8, *comp["S"], b16[0]])
+    return {
+        "train": train,
+        "val": val,
+        "test": test,
+        "stability": ["ST"],
+        "all": train + val + test + ["ST"],
+    }
+
+
+def describe_split(participant: int, data_dir: "str | Path | None" = None) -> str:
+    """Short text table: split -> series ids with W/S/B labels and lift counts."""
+    sp = stratified_split(participant, data_dir)
+    cond = series_conditions(participant, data_dir)
+    counts = series_lift_counts(participant, data_dir)
+    lines = [f"P{participant} stratified split (W=weight, S=surface, B=both varies):"]
+    for k in ("train", "val", "test"):
+        ids = ", ".join(f"S{s}:{cond[s]}" for s in sp[k])
+        n = sum(counts.get(s, 0) for s in sp[k])
+        lines.append(f"  {k:<5} [{ids}]  lifts={n}")
+    return "\n".join(lines)
 
 
 # ---------------------------------------------------------------------------

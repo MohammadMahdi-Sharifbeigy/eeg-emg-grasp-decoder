@@ -3,7 +3,8 @@ main — Method 1 KG-GT pipeline (nb04, no CCA).
 
 Public API:
     device:                get_device, set_seed
-    dataloader:            load_hs, load_ws, load_participant, get_split_series
+    dataloader:            load_hs, load_ws, load_participant, get_split_series,
+                           series_conditions, stratified_split, describe_split
     preprocessing_eeg:     preprocess_eeg, preprocess_eeg_from_config
     preprocessing_emg_kin: preprocess_emg, preprocess_emg_from_config,
                            preprocess_kinematics, preprocess_kinematics_from_config,
@@ -23,7 +24,10 @@ Public API:
 """
 
 from .device import get_device, set_seed
-from .dataloader import load_hs, load_ws, load_participant, get_split_series
+from .dataloader import (
+    load_hs, load_ws, load_participant, get_split_series,
+    series_conditions, stratified_split, describe_split,
+)
 from .preprocessing_eeg import (
     preprocess_eeg,
     preprocess_eeg_from_config,
@@ -131,6 +135,7 @@ __all__ = [
     "get_device", "set_seed",
     # dataloader
     "load_hs", "load_ws", "load_participant", "get_split_series",
+    "series_conditions", "stratified_split", "describe_split",
     # preprocessing
     "preprocess_eeg", "preprocess_eeg_from_config", "select_channels",
     "preprocess_emg", "preprocess_emg_from_config", "EMGNormalizer",

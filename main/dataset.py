@@ -117,9 +117,10 @@ class WAYEEGDataset(Dataset):
     # ------------------------------------------------------------------
 
     def _build_index(self) -> None:
-        target_series = get_split_series(self.split)
-
         for p in self.participants:
+            # Per-participant condition-stratified split (from P{p}_AllLifts.mat).
+            # Raises if AllLifts is missing -- never falls back to the legacy split.
+            target_series = get_split_series(self.split, p, self.data_dir)
             p_dir = self.data_dir / f"P{p}" if self.data_dir else None
 
             for sid in target_series:
