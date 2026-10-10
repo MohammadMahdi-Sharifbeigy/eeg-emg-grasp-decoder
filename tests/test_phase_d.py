@@ -706,7 +706,7 @@ def test_notebook_interpretability_cells_in_order(name, suffix):
     assert interp["cell_type"] == "code" and "INTERPRETABILITY — Full-Signal Triptych" in s
     assert "plot_interp_window(" in s and "decompose_series(" in s and "lift_events(" in s
     assert "plot_interpretability_triptych" not in s and "encoder_key_attn" not in s
-    assert "MAX_WINDOWS_PER_SERIES = 12" in s
+    assert "MAX_WINDOWS_PER_SERIES = None" in s
     assert f'os.path.join("outputs", "interpretability{suffix}", _subj)' in s
     assert 'f"series{_real_series:02d}_window{_w:03d}_{_t_start:.0f}s-{_t_end:.0f}s.png"' in s
     assert "smooth_hz=5.0" not in s
