@@ -900,7 +900,7 @@ def test_notebook_config_turns_phase_b_on(name):
     assert model["eeg_channel_dropout"] == 0.2 and model["eeg_groups"] == len(feats["bands"]) == 4
     assert model["kin_dropout"] == 0.3
     tr = cfg["training"]
-    assert tr["weight_decay"] == 0.05
+    assert tr["weight_decay"] == 0.01
     assert tr["loss"]["w_eeg_only"] == 0.5
     # everything of Step 1 that Phase B does not touch
     assert tr["loss"]["w_height"] == 0.5 and tr["loss"]["channel_weights"] == "auto"
