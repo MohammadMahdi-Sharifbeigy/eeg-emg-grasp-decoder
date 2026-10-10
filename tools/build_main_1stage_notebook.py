@@ -102,22 +102,23 @@ every parameter trainable from the first epoch.
 | | `main.ipynb` (two-stage) | `main_1stage.ipynb` (this notebook) |
 |---|---|---|
 | Stage 1 | Transformer-only EEG model, `stage1_lr`=1e-3, 75 epochs | — (none) |
-| Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-5, `reduce` scheduler, no warmup | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200 |
+| Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200 |
 | GAT / decoder init | re-initialised between stages | trained together with the encoder from epoch 1 |
 | Checkpoints | `outputs/checkpoints_main_stage1/…`, `outputs/checkpoints_main_stage2/…` | `outputs/checkpoints_1stage/{subject}/` (`last.pt` + `best.pt`, resumable) |
-| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
+| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
 
 Everything else is identical to `main.ipynb`: same participants and condition-stratified
 train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_force_sg51`;
-preprocessing is identical, only training differs), same 22 kinematic inputs (10 hand-pose + 2
-hand-near-object gated forces F_L, F_G → GAT edge bias, 10 SG-51 pose velocities → kin skip
-highway), same loss (asymmetry 1.2, rest over-prediction term, Huber δ=1, per-muscle weights), batch size,
+preprocessing is identical, only training differs), same 24 kinematic inputs (10 hand-pose + 2
+hand-near-object gated forces F_L, F_G → GAT edge bias; the gated forces + 10 SG-51 pose velocities +
+2 gated-force velocities → additive kin skip highway), same loss (asymmetry 1.5, rest over-prediction
+term, Huber δ=2.5, active-level term w_height 0.5, per-muscle weights), batch size,
 gradient accumulation, grad clipping, AMP and seed. The parameter groups used by `train_model`
 are the same as in stage 1 of `main.ipynb` (`transformer_lr_scale`=0.1 → encoder + node projection at
 1e-4, GAT/decoder at 1e-3, kin-skip at lr/3 with stronger weight decay).
 
-After the evaluation come the magnitude evaluation (burst height / rest level per test series, as in
-`main.ipynb`) and a new cell: **"How much does the model use EEG vs kinematics?"**
+After the evaluation come the magnitude evaluation (burst height / rest level per test series and
+hold-phase level per weight / surface, as in `main.ipynb`) and a new cell: **"How much does the model use EEG vs kinematics?"**
 — Pearson r on the test set with the kinematics zeroed / time-shuffled and with the EEG time-shuffled.
 
 **How to compare with `main.ipynb`:** run both notebooks on the same `subject_list`; compare
@@ -467,12 +468,14 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     # 2. CONFIG
     i = edit_cell(nb, "CONFIG = {", [
         (
-            '    #   outputs/checkpoints_main_stage1, outputs/checkpoints_main_stage2, outputs/checkpoints_1stage\n',
-            '    #   outputs/checkpoints_1stage (this notebook; main.ipynb uses its own two-stage folders)\n',
+            '    # move aside outputs/checkpoints_main_stage1/2 and outputs/checkpoints_1stage\n',
+            '    # move aside outputs/checkpoints_1stage (this notebook; main.ipynb uses its own two-stage folders)\n',
         ),
         (
-            '        "stage2_lr": 1e-5,\n',
-            '        "stage2_lr": 1e-5,          # two-stage only (unused here)\n',
+            '        "stage2_lr": 1e-4,          # Package 1: 1e-5 was still improving at epoch 200/200\n'
+            '        "stage2_early_stop_patience": 25,   # stage 2 only (stage 1 uses early_stop_patience)\n',
+            '        "stage2_lr": 1e-4,          # two-stage only (unused here)\n'
+            '        "stage2_early_stop_patience": 25,   # two-stage only (unused here)\n',
         ),
         (
             '        "stage1_epochs":       75,\n',
@@ -535,6 +538,12 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
          'MAGNITUDE_PNG = "results/magnitude_report_1stage.png"'),
         ('# S = surface varies, B = both vary). Saves results/magnitude_report.csv / .png',
          '# S = surface varies, B = both vary). Saves results/magnitude_report_1stage.csv / .png'),
+        ('MAGNITUDE_LOAD_CSV = "results/magnitude_by_load.csv"',
+         'MAGNITUDE_LOAD_CSV = "results/magnitude_by_load_1stage.csv"   # main.ipynb writes magnitude_by_load.csv'),
+        ('MAGNITUDE_LOAD_PNG = "results/magnitude_by_load.png"',
+         'MAGNITUDE_LOAD_PNG = "results/magnitude_by_load_1stage.png"'),
+        ('# Saves results/magnitude_by_load.csv / .png (height ratio per muscle per weight).',
+         '# Saves results/magnitude_by_load_1stage.csv / .png (height ratio per muscle per weight).'),
     ])
     if i_mag != i_eval + 1:
         raise AssertionError(f"magnitude cell expected right after evaluation, got {i_mag} vs {i_eval}")
@@ -625,7 +634,7 @@ def main() -> None:
     ap.add_argument("--out", default=str(ROOT / "main_1stage.ipynb"))
     args = ap.parse_args()
     nb, log = build(args.rev)
-    with open(args.out, "w", encoding="utf-8") as f:
+    with open(args.out, "w", encoding="utf-8", newline="\n") as f:   # LF on Windows too
         json.dump(nb, f, indent=1, ensure_ascii=False)
         f.write("\n")
     for k, v in log.items():

@@ -263,3 +263,212 @@ def plot_magnitude_report(
         fig.suptitle(title, fontsize=12)
     fig.tight_layout()
     return fig
+
+
+# ============================================================================
+# Magnitude per weight / per surface over the HOLD phase of each lift
+# ============================================================================
+
+LOAD_COLUMNS = [
+    "grouping", "value", "muscle", "n_lifts",
+    "target_hold", "pred_hold", "height_ratio", "r_lift",
+]
+_LOAD_GROUPS = ("CurW", "CurS")
+_LOAD_LABELS = {"CurW": "weight", "CurS": "surface"}
+
+
+def lift_hold_segments(
+    participant: int,
+    series: int,
+    fs: float = 500.0,
+    data_dir=None,
+    n_samples: int | None = None,
+    margin_s: float = 0.3,
+    min_samples: int = 100,
+) -> list[dict]:
+    """Hold phase of every lift of one series, from ``P{p}_AllLifts.mat``.
+
+    Recipe (series time, sample indices at ``fs``):
+        t0    = StartTime − LEDOn
+        start = int((t0 + tLiftOff + margin_s) · fs)
+        stop  = int((t0 + tReplace − margin_s) · fs)
+    Lifts with stop − start < ``min_samples`` are skipped, and so are lifts with
+    stop > ``n_samples`` when the series length is given.
+
+    Args:
+        participant, series: e.g. 1, 4.
+        data_dir: raw data root holding ``P{p}/P{p}_AllLifts.mat``
+                  (default: repo data/way-eeg/raw).
+
+    Returns:
+        [{"lift", "start", "stop", "CurW", "CurS"}, ...] in AllLifts order;
+        CurW ∈ {1, 2, 4} (weight), CurS ∈ {1, 2, 3} (surface).
+    """
+    from .dataloader import _alllifts_path, _mat_load, _names_to_list
+
+    path = _alllifts_path(participant, data_dir)
+    if not path.exists():
+        raise FileNotFoundError(f"AllLifts file not found: {path}")
+    P = _mat_load(path)["P"]
+    cols = _names_to_list(P.ColNames)
+    lifts = np.atleast_2d(np.asarray(P.AllLifts, dtype=float))
+    col = {n: cols.index(n) for n in
+           ("Run", "Lift", "CurW", "CurS", "StartTime", "LEDOn", "tLiftOff", "tReplace")}
+
+    out = []
+    for row in lifts[lifts[:, col["Run"]].astype(int) == int(series)]:
+        t0 = row[col["StartTime"]] - row[col["LEDOn"]]
+        lo = t0 + row[col["tLiftOff"]] + margin_s
+        hi = t0 + row[col["tReplace"]] - margin_s
+        if not (np.isfinite(lo) and np.isfinite(hi)):
+            continue
+        a, b = int(lo * fs), int(hi * fs)
+        if b - a < min_samples or (n_samples is not None and b > n_samples):
+            continue
+        out.append({"lift": int(row[col["Lift"]]), "start": a, "stop": b,
+                    "CurW": int(row[col["CurW"]]), "CurS": int(row[col["CurS"]])})
+    return out
+
+
+def magnitude_by_load(
+    pred: np.ndarray,
+    target: np.ndarray,
+    segments,
+    group: str = "CurW",
+    channel_names: Sequence[str] | None = None,
+) -> pd.DataFrame:
+    """Hold-phase magnitude per weight (``group="CurW"``) or surface (``"CurS"``).
+
+    Args:
+        pred, target: (T, C) stitched series in original EMG units (sample i =
+                      series sample i, as returned by predict_series).
+        segments:     lift_hold_segments() records (list of dicts or a DataFrame);
+                      segments that do not fit inside ``pred`` are skipped.
+
+    Returns:
+        DataFrame with LOAD_COLUMNS, one row per (group value, muscle) plus the
+        value "all" over every lift:
+            n_lifts       lifts in the group
+            target_hold   mean over lifts of the per-lift mean target
+            pred_hold     same for the prediction
+            height_ratio  Σ pred / Σ target over all hold samples of the group
+            r_lift        Pearson r between per-lift predicted and target means
+                          (NaN with < 4 lifts or when one side is constant)
+    """
+    if group not in _LOAD_GROUPS:
+        raise ValueError(f"group must be one of {_LOAD_GROUPS}, got {group!r}")
+    pred = np.asarray(pred, dtype=np.float64)
+    target = np.asarray(target, dtype=np.float64)
+    if pred.shape != target.shape or pred.ndim != 2:
+        raise ValueError(f"pred and target must be the same (T, C) shape, got {pred.shape} / {target.shape}")
+    T, C = target.shape
+    names = list(channel_names) if channel_names is not None else [f"ch{c}" for c in range(C)]
+    recs = segments.to_dict("records") if isinstance(segments, pd.DataFrame) else list(segments)
+    recs = [s for s in recs if 0 <= int(s["start"]) < int(s["stop"]) <= T]
+
+    def _per_lift(x: np.ndarray, fn) -> np.ndarray:
+        return np.array([fn(x[int(s["start"]):int(s["stop"])], axis=0) for s in recs]).reshape(-1, C)
+
+    lift_p, lift_t = _per_lift(pred, np.mean), _per_lift(target, np.mean)
+    sum_p, sum_t = _per_lift(pred, np.sum), _per_lift(target, np.sum)
+    keys = np.array([s[group] for s in recs])
+
+    def _r(a: np.ndarray, b: np.ndarray) -> float:
+        if len(a) < 4 or np.std(a) == 0 or np.std(b) == 0:
+            return float("nan")
+        return float(np.corrcoef(a, b)[0, 1])
+
+    rows = []
+    for v in sorted(set(keys.tolist())) + ["all"]:
+        sel = np.ones(len(recs), bool) if v == "all" else keys == v
+        n = int(sel.sum())
+        for c, m in enumerate(names):
+            den = sum_t[sel, c].sum()
+            rows.append({
+                "grouping": group, "value": v, "muscle": m, "n_lifts": n,
+                "target_hold": float(lift_t[sel, c].mean()) if n else float("nan"),
+                "pred_hold": float(lift_p[sel, c].mean()) if n else float("nan"),
+                "height_ratio": float(sum_p[sel, c].sum() / den) if n and abs(den) > 1e-15 else float("nan"),
+                "r_lift": _r(lift_p[sel, c], lift_t[sel, c]),
+            })
+    return pd.DataFrame(rows, columns=LOAD_COLUMNS)
+
+
+def format_magnitude_by_load(df: pd.DataFrame, digits: int = 3) -> str:
+    """Compact text table per block (subject / series / grouping, when present):
+    one line per muscle; per group value the height ratio, target|pred hold
+    level and per-lift r."""
+    keys = [k for k in ("subject", "series", "condition", "grouping") if k in df.columns]
+    blocks = df.groupby(keys, sort=False) if keys else [((), df)]
+    lines = []
+    for key, block in blocks:
+        key = key if isinstance(key, tuple) else (key,)
+        label = _LOAD_LABELS.get(block["grouping"].iloc[0], "group")
+        lines.append("  ".join(f"{k}={v}" for k, v in zip(keys, key)))
+        table = {}
+        for v in dict.fromkeys(block["value"]):
+            sub = block[block["value"] == v].set_index("muscle")
+            name = "all" if v == "all" else f"{label} {v}"
+            name += f" (n={int(sub['n_lifts'].iloc[0])})"
+            table[(name, "height")] = sub["height_ratio"].map(lambda x: f"{x:.{digits}f}")
+            table[(name, "tgt|pred")] = [f"{t:.{digits}g}|{p:.{digits}g}"
+                                         for t, p in zip(sub["target_hold"], sub["pred_hold"])]
+            table[(name, "r")] = sub["r_lift"].map(lambda x: "nan" if np.isnan(x) else f"{x:.2f}")
+        out = pd.DataFrame(table, index=list(dict.fromkeys(block["muscle"])))
+        lines.append(out.to_string())
+        lines.append("")
+    return "\n".join(lines).rstrip("\n")
+
+
+def plot_magnitude_by_load(
+    df: pd.DataFrame,
+    muscle_names: Sequence[str],
+    group: str = "CurW",
+    title: str | None = None,
+):
+    """Hold height ratio (Σpred / Σtarget over hold samples) per muscle, one bar
+    per weight (or surface) value, one panel per (subject, series); dashed line
+    at 1.0.
+
+    Args:
+        df: concatenated magnitude_by_load() frames, optionally with "subject" /
+            "series" columns (rows of the other grouping and "all" are ignored).
+    """
+    import matplotlib.pyplot as plt
+
+    d = df[(df["grouping"] == group) & (df["value"] != "all")]
+    keys = [k for k in ("subject", "series") if k in d.columns]
+    panels = list(dict.fromkeys(map(tuple, d[keys].to_numpy().tolist()))) if keys else [()]
+    n = max(1, len(panels))
+    ncols = min(2, n)
+    nrows = int(np.ceil(n / ncols))
+    fig, axes = plt.subplots(nrows, ncols, figsize=(6.4 * ncols, 3.4 * nrows), squeeze=False,
+                             facecolor="white", sharey=True)
+    colors = [COLOR_BLUE, COLOR_ORANGE, "#6a5acd", "#2e8b57"]
+    label = _LOAD_LABELS.get(group, group)
+    x = np.arange(len(muscle_names))
+    for ax, pk in zip(axes.flat, panels):
+        sub = d
+        for k, v in zip(keys, pk):
+            sub = sub[sub[k] == v]
+        values = sorted(sub["value"].unique().tolist())
+        w = 0.8 / max(1, len(values))
+        for j, v in enumerate(values):
+            s = sub[sub["value"] == v].set_index("muscle").reindex(list(muscle_names))
+            ax.bar(x + (j - (len(values) - 1) / 2) * w, s["height_ratio"].to_numpy(dtype=float),
+                   w * 0.92, color=colors[j % len(colors)],
+                   label=f"{label} {v} (n={int(s['n_lifts'].max())})")
+        ax.axhline(1.0, color="black", linewidth=1.0, linestyle="--")
+        ax.set_xticks(x)
+        ax.set_xticklabels(muscle_names)
+        ax.set_title("  ".join(f"{k} {v}" for k, v in zip(keys, pk)) or "all", fontsize=10)
+        ax.grid(axis="y", alpha=0.3)
+        ax.spines[["top", "right"]].set_visible(False)
+        ax.legend(fontsize=8, frameon=False)
+    for ax in list(axes.flat)[n:]:
+        ax.axis("off")
+    for ax in axes[:, 0]:
+        ax.set_ylabel("hold height ratio (pred / target)")
+    fig.suptitle(title or f"Hold-phase magnitude per {label}", fontsize=12)
+    fig.tight_layout()
+    return fig

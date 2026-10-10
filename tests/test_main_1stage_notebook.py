@@ -126,6 +126,9 @@ def test_package1_config_matches_main(nb, head_nb):
     assert cfg["preprocessing"]["kinematics"]["gated_force"] == {"near_cm": 12.0, "far_cm": 20.0, "smooth_s": 0.1}
     assert cfg["model"]["gat"]["kin_gat_dim"] == 12
     loss = cfg["training"]["loss"]
+    # Step 1 values (Package 1 had asymmetry 1.2, huber_delta 1.0, no w_height)
     assert (loss["asymmetry"], loss["w_rest_over"], loss["huber_delta"], loss["channel_weights"]) == \
-        (1.2, 1.0, 1.0, "auto")
+        (1.5, 1.0, 2.5, "auto")
+    assert loss["w_height"] == 0.5
+    assert cfg["model"]["gat"]["kin_skip_indices"] == list(range(10, 24))
     assert loss == head["training"]["loss"]

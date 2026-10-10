@@ -32,6 +32,11 @@ def get_dynamic_fig_dir(cfg):
     lr = cfg["training"].get("lr", cfg["training"].get("stage2_lr", cfg["training"].get("stage1_lr", 1e-4)))
     bs = cfg["training"]["batch_size"]
     config_str = f"ep{max_epochs}_st{stride}_lr{lr}_bs{bs}"
+    # optional CONFIG["outputs"]["run_tag"] keeps a new run's plots out of an older
+    # run's folder with the same hyper-parameters (absent = unchanged name)
+    run_tag = (cfg.get("outputs") or {}).get("run_tag")
+    if run_tag:
+        config_str += f"_{run_tag}"
 
     # Per-subject folder: results/P1/main/<config_str>/
     p_val = cfg["data"].get("participant", cfg["data"].get("participants", []))

@@ -10,6 +10,7 @@ Public API:
                            preprocess_kinematics, preprocess_kinematics_from_config,
                            EMGNormalizer, KinNormalizer, extract_kt,
                            KT_RAW_NAMES, POSE_DROP_INDICES, POSE_FORCE_DROP_INDICES,
+                           POSE_FORCE_RATE_DROP_INDICES,
                            kin_feature_names, hand_near_object_gate, index_object_distance
     dataset:              WAYEEGDataset,
                            resolve_participants (handles "all", single, or list),
@@ -20,7 +21,9 @@ Public API:
                            build_loss_from_config, compute_channel_weights,
                            channel_weights_from_config
     magnitude_eval:        magnitude_report, magnitude_report_by_series,
-                           format_magnitude_table, predict_series, plot_magnitude_report
+                           format_magnitude_table, predict_series, plot_magnitude_report,
+                           lift_hold_segments, magnitude_by_load, format_magnitude_by_load,
+                           plot_magnitude_by_load
     training:              train_model, TrainConfig, TrainResult,
                            collect_predictions, compute_metrics,
                            EvalMetrics, prepare_batch_factory,
@@ -57,6 +60,7 @@ from .preprocessing_emg_kin import (
     KT_RAW_NAMES,
     POSE_DROP_INDICES,
     POSE_FORCE_DROP_INDICES,
+    POSE_FORCE_RATE_DROP_INDICES,
     kin_feature_names,
     hand_near_object_gate,
     index_object_distance,
@@ -95,6 +99,11 @@ from .magnitude_eval import (
     format_magnitude_table,
     predict_series,
     plot_magnitude_report,
+    LOAD_COLUMNS,
+    lift_hold_segments,
+    magnitude_by_load,
+    format_magnitude_by_load,
+    plot_magnitude_by_load,
 )
 from .coral_net import (
     CORALNet,
@@ -175,7 +184,8 @@ __all__ = [
     "preprocess_kinematics", "preprocess_kinematics_from_config", "KinNormalizer",
     "extract_kt_raw", "extract_kt", "extract_kt_with_velocity",
     "estimate_velocity", "sg_velocity", "bw_velocity", "compute_muscle_edge_prior",
-    "KT_RAW_NAMES", "POSE_DROP_INDICES", "POSE_FORCE_DROP_INDICES", "kin_feature_names",
+    "KT_RAW_NAMES", "POSE_DROP_INDICES", "POSE_FORCE_DROP_INDICES",
+    "POSE_FORCE_RATE_DROP_INDICES", "kin_feature_names",
     "hand_near_object_gate", "index_object_distance",
     # dataset
     "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
@@ -193,6 +203,8 @@ __all__ = [
     # magnitude evaluation
     "MAGNITUDE_COLUMNS", "magnitude_report", "magnitude_report_by_series",
     "format_magnitude_table", "predict_series", "plot_magnitude_report",
+    "LOAD_COLUMNS", "lift_hold_segments", "magnitude_by_load", "format_magnitude_by_load",
+    "plot_magnitude_by_load",
     # coral-net
     "CORALNet", "LearnableFilterBank", "LearnableLagAlignment", "SimpleMambaBlock",
     "MambaEncoder", "SynergyDecoder", "extract_nmf_synergies", "build_coral_net_from_config",

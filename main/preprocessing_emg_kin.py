@@ -285,6 +285,13 @@ POSE_DROP_INDICES = [10, 11, 12, 23, 24, 25]
 # left are [pose(10), F_L_gated, F_G_gated, pose velocity(10)].
 POSE_FORCE_DROP_INDICES = [12, 23, 24, 25]
 
+# Step 1 (magnitude): same 26-column cache, but keep the velocities of the GATED
+# F_L, F_G (columns 23, 24 = SG derivative taken after gating, so they are 0 while
+# the hand is far) as force-rate features; drop only rho_GL and its velocity.
+# The 24 columns left are
+#   [pose(10), F_L_gated, F_G_gated, pose velocity(10), v_F_L_gated, v_F_G_gated].
+POSE_FORCE_RATE_DROP_INDICES = [12, 25]
+
 
 def kin_feature_names(
     include_velocity: bool = False,
@@ -307,6 +314,9 @@ def kin_feature_names(
         → ['p_wrist_x', ..., 'd_grip', 'v_p_wrist_x', ..., 'v_d_grip']   (20 names)
         kin_feature_names(True, False, POSE_FORCE_DROP_INDICES, gated_force=True)
         → [... 'd_grip', 'F_L_gated', 'F_G_gated', 'v_p_wrist_x', ...]   (22 names)
+        kin_feature_names(True, False, POSE_FORCE_RATE_DROP_INDICES, gated_force=True)
+        → [... 'F_L_gated', 'F_G_gated', 'v_p_wrist_x', ..., 'v_d_grip',
+           'v_F_L_gated', 'v_F_G_gated']                                  (24 names)
     """
     base = list(KT_RAW_NAMES)
     if gated_force:

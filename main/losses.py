@@ -387,13 +387,30 @@ class CompositeEMGLoss(nn.Module):
                 + w_diff    * L_diff
                 + w_rest    * L_rest (resting L1)
                 + w_rest_over * L_rest_over (one-sided squared over-prediction at rest)
+                + w_height  * L_height (active-level relative error, Step 1)
                 + w_reg     * L_reg  (EdgePrior KL)
 
     Package 1 options (all off by default → identical to the previous loss):
         w_rest_over:     weight of mean(rest_mask · w_c · relu(pred − target)²), with
                          the same window-relative rest mask as L_rest.
         huber_delta:     robust ρ instead of the squared error in L_PeakMSE.
-        channel_weights: (C,) per-muscle weights on L_PeakMSE and L_rest_over.
+        channel_weights: (C,) per-muscle weights on L_PeakMSE, L_rest_over and L_height.
+
+    Step 1 option (off by default):
+        w_height:   weight of L_height. Per window b and channel c, with the same
+                    window-relative rest mask as L_rest (active = NOT rest) and the
+                    target window minimum t_min:
+                        m_pred = mean over active samples of (pred − t_min)
+                        m_tgt  = mean over active samples of (target − t_min)
+                        rel    = (m_pred − m_tgt) / (m_tgt + height_eps)
+                        l_bc   = smoothL1_{δ=1}(rel) · (asymmetry if rel < 0 else 1)
+                    L_height = mean over (b, c) of w_c · l_bc; (b, c) without active
+                    samples contribute exactly 0. Scale-free burst/hold LEVEL error
+                    (the window shape is left to the other terms).
+        height_eps: floor of the denominator, in target units (z-space in training).
+                    Keeps windows whose active part is barely above the minimum
+                    (noise-only rest windows, ~0.05 z) from turning tiny absolute
+                    errors into huge relative ones. Default 0.5.
     """
 
     def __init__(
@@ -411,6 +428,8 @@ class CompositeEMGLoss(nn.Module):
         w_rest_over: float = 0.0,
         huber_delta: float | None = None,
         channel_weights=None,
+        w_height: float = 0.0,
+        height_eps: float = 0.5,
         # Backward compatibility arguments:
         lambda_reg: float | None = None,
         lambda_l1: float | None = None,
@@ -433,6 +452,11 @@ class CompositeEMGLoss(nn.Module):
         self.w_rest = float(w_rest)
         self.w_reg = float(w_reg)
         self.w_rest_over = float(w_rest_over)
+        self.w_height = float(w_height)
+        if height_eps <= 0:
+            raise ValueError(f"height_eps must be > 0, got {height_eps}")
+        self.height_eps = float(height_eps)
+        self.height_asymmetry = float(asymmetry)   # same convention as L_PeakMSE
         self.rest_threshold = float(rest_threshold)
         self.channel_weights = _as_weight_tensor(channel_weights)
 
@@ -511,6 +535,14 @@ class CompositeEMGLoss(nn.Module):
         else:
             loss_components["rest_over"] = torch.tensor(0.0, device=pred.device)
 
+        # 5c. Active-level (burst / hold height) relative error.
+        if self.w_height > 0:
+            l_height = self._height_loss(pred, target)
+            loss_components["height"] = l_height
+            total_loss = total_loss + self.w_height * l_height
+        else:
+            loss_components["height"] = torch.tensor(0.0, device=pred.device)
+
         # 6. GAT EdgePrior KL Divergence Regularization
         if model is not None and self.w_reg > 0:
             l_reg = self.reg(model)
@@ -530,12 +562,32 @@ class CompositeEMGLoss(nn.Module):
             "diff": loss_components["diff"].item(),
             "rest_l1": loss_components["rest_l1"].item(),
             "rest_over": loss_components["rest_over"].item(),
+            "height": loss_components["height"].item(),
             "kl_reg": loss_components["kl_reg"].item(),
         }
 
         if return_components:
             return total_loss, self.last_components
         return total_loss
+
+    def _height_loss(self, pred: Tensor, target: Tensor) -> Tensor:
+        """L_height (see class docstring); computed in float32."""
+        pred = pred.float()
+        target = target.float()
+        t_min, resting_mask = self._rest_mask(target)
+        active = 1.0 - resting_mask                                  # (B, T, C)
+        n_act = active.sum(dim=1)                                    # (B, C)
+        denom = n_act.clamp(min=1.0)
+        m_pred = ((pred - t_min) * active).sum(dim=1) / denom
+        m_tgt = ((target - t_min) * active).sum(dim=1) / denom
+        rel = (m_pred - m_tgt) / (m_tgt + self.height_eps)
+        rel = torch.where(n_act > 0, rel, torch.zeros_like(rel))
+        rho = F.smooth_l1_loss(rel, torch.zeros_like(rel), reduction="none", beta=1.0)
+        rho = rho * torch.where(rel < 0, torch.full_like(rel, self.height_asymmetry),
+                                torch.ones_like(rel))
+        if self.channel_weights is not None:
+            rho = rho * self.channel_weights.to(rho)
+        return rho.mean()
 
     def _rest_mask(self, target: Tensor) -> tuple[Tensor, Tensor]:
         """Window-relative rest mask: target within rest_threshold of its window
@@ -569,6 +621,8 @@ def build_loss_from_config(cfg: dict, channel_weights=None) -> CompositeEMGLoss:
         asymmetry:       float  Under-prediction multiplier in PeakMSE. Default 2.0.
         w_rest_over:     float  One-sided squared over-prediction at rest. Default 0.0.
         huber_delta:     float | None  Robust PeakMSE error (z units). Default None.
+        w_height:        float  Active-level relative error (Step 1). Default 0.0.
+        height_eps:      float  Denominator floor of L_height (target units). Default 0.5.
         channel_weights: None | "auto" | list  Per-muscle weights. Default None.
                          "auto" needs the `channel_weights` argument (computed from
                          the training targets, see channel_weights_from_config).
@@ -601,6 +655,8 @@ def build_loss_from_config(cfg: dict, channel_weights=None) -> CompositeEMGLoss:
         w_rest_over=loss_cfg.get("w_rest_over", 0.0),
         huber_delta=loss_cfg.get("huber_delta"),
         channel_weights=channel_weights,
+        w_height=loss_cfg.get("w_height", 0.0),
+        height_eps=loss_cfg.get("height_eps", 0.5),
     )
 
 

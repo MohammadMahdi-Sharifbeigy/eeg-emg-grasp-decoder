@@ -271,16 +271,21 @@ def _notebook_config(name: str) -> dict:
 
 @pytest.mark.parametrize("name", ["main.ipynb", "main_1stage.ipynb"])
 def test_notebook_config_turns_package1_on(name):
+    # Step 1 (tests/test_step1_magnitude.py) keeps the Package-1 gate, cache and GAT
+    # split, and also keeps the gated-force velocities: 22 -> 24 features.
+    from main.preprocessing_emg_kin import POSE_FORCE_RATE_DROP_INDICES
+
     cfg = _notebook_config(name)
     kin = cfg["preprocessing"]["kinematics"]
     assert kin["gated_force"] == GATE_CFG
-    assert kin["drop_indices"] == POSE_FORCE_DROP_INDICES
-    assert cfg["data"]["n_kin_features"] == 22
+    assert kin["drop_indices"] == POSE_FORCE_RATE_DROP_INDICES
+    assert set(kin["drop_indices"]) < set(POSE_FORCE_DROP_INDICES)
+    assert cfg["data"]["n_kin_features"] == 24
     assert cfg["data"]["cache_dir"] == "data/cache_main_stride500_square_pose_force_sg51"
     assert cfg["model"]["gat"]["kin_gat_dim"] == 12
     n = len(kin_feature_names(kin["include_velocity"], kin["include_acceleration"],
                               kin["drop_indices"], gated_force=kin["gated_force"]))
-    assert n == 22
+    assert n == 24
 
 
 # ── real data (skipped when the raw folder is absent) ─────────────────────────

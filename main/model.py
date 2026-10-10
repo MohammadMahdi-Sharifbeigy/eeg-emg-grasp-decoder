@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import math
+import numbers
 import warnings
 
 import torch
@@ -823,10 +824,14 @@ class KGGTModel(nn.Module):
         use_kinematic_guidance: bool = False,
         edge_prior: Tensor | None = None,
         gat_kin_dim_override: int | None = None,
+        kin_skip_indices: "list[int] | None" = None,
     ) -> None:
         super().__init__()
         self.use_kinematic_guidance = use_kinematic_guidance
         self.out_channels = out_channels
+        # None (default) = the skip highway gets the features after the GAT block.
+        self.skip_kin_indices: tuple[int, ...] | None = None
+        self._skip_slice: slice | None = None
 
         self.encoder = build_transformer_from_config(transformer_cfg, input_dim)
         self.node_projection = MuscleNodeProjection(
@@ -845,6 +850,11 @@ class KGGTModel(nn.Module):
             # gat_kin_dim_override (model.gat.kin_gat_dim) sets the split explicitly:
             #   first override features → GAT edge bias, the rest → skip highway
             #   (22 = [pose 10, F_L_gated, F_G_gated | pose velocity 10] uses 12).
+            # kin_skip_indices (model.gat.kin_skip_indices) picks the skip-highway
+            # features explicitly (indices into the final kin vector; may overlap the
+            # GAT block). 24 = [pose 10, F_L_g, F_G_g | pose vel 10, v F_L_g, v F_G_g]
+            # uses kin_gat_dim 12 and kin_skip_indices 10..23 (forces + all velocities),
+            # so load force reaches the additive amplitude path, not only the edge bias.
             if gat_kin_dim_override is not None:
                 gat_kin_dim = int(gat_kin_dim_override)
                 if not 0 < gat_kin_dim < kin_dim:
@@ -860,6 +870,12 @@ class KGGTModel(nn.Module):
                 gat_kin_dim = kin_dim
             skip_kin_dim = kin_dim - gat_kin_dim if kin_dim > gat_kin_dim else kin_dim
             self.gat_kin_dim = gat_kin_dim
+            if kin_skip_indices is not None:
+                idx = _validate_kin_indices(kin_skip_indices, kin_dim)
+                self.skip_kin_indices = idx
+                if idx == tuple(range(idx[0], idx[-1] + 1)):
+                    self._skip_slice = slice(idx[0], idx[-1] + 1)
+                skip_kin_dim = len(idx)
 
             self.gat = KinematicGuidedMuscleGATEncoder(
                 node_dim=node_dim,
@@ -892,6 +908,8 @@ class KGGTModel(nn.Module):
                 edge_prior=edge_prior,
             )
             self.kin_skip_proj = None
+            if kin_skip_indices is not None:
+                raise ValueError("kin_skip_indices needs use_kinematic_guidance=True")
 
         self.decoder = PerMuscleDecoder(node_dim, out_channels)
         self.lag_align = LearnableLagAlignment(n_channels=out_channels, max_lag_samples=150)  # ±300ms at 500Hz
@@ -903,10 +921,32 @@ class KGGTModel(nn.Module):
         return kin[..., :self.gat_kin_dim]
 
     def get_skip_kin(self, kin: torch.Tensor) -> torch.Tensor:
-        """Extract dynamic derivative features (velocity, plus acceleration if present) for direct skip highway."""
+        """Features for the direct skip highway: kin_skip_indices if set, else the
+        features after the GAT block (velocity, plus acceleration if present)."""
+        idx = getattr(self, "skip_kin_indices", None)
+        if idx is not None:
+            sl = getattr(self, "_skip_slice", None)
+            return kin[..., sl] if sl is not None else kin[..., list(idx)]
         if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == kin.shape[-1]:
             return kin
         return kin[..., self.gat_kin_dim:]
+
+    def gat_kin_feature_names(self, names: "list[str]") -> list[str]:
+        """Names of the kin features the GAT edge bias sees (``names`` = all kin features)."""
+        names = list(names)
+        if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == len(names):
+            return names
+        return names[:self.gat_kin_dim]
+
+    def skip_kin_feature_names(self, names: "list[str]") -> list[str]:
+        """Names of the kin features the skip highway sees, same selection as get_skip_kin()."""
+        names = list(names)
+        idx = getattr(self, "skip_kin_indices", None)
+        if idx is not None:
+            return [names[i] for i in idx]
+        if not hasattr(self, "gat_kin_dim") or self.gat_kin_dim == len(names):
+            return names
+        return names[self.gat_kin_dim:]
 
     def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
         temporal = self.encoder(eeg)
@@ -927,6 +967,23 @@ class KGGTModel(nn.Module):
         out = self.decoder(refined).squeeze(-1)   # (B, T, 5)
         return self.lag_align(out)
 
+def _validate_kin_indices(indices, kin_dim: int) -> tuple[int, ...]:
+    """Check an explicit list of kin feature indices: non-empty, unique ints in [0, kin_dim)."""
+    idx = list(indices)
+    if not idx:
+        raise ValueError("kin_skip_indices must not be empty (use None for the default split)")
+    for i in idx:
+        if isinstance(i, bool) or not isinstance(i, numbers.Integral):
+            raise TypeError(f"kin_skip_indices must be integers, got {i!r}")
+    idx = [int(i) for i in idx]
+    if len(set(idx)) != len(idx):
+        raise ValueError(f"kin_skip_indices must be unique, got {idx}")
+    bad = [i for i in idx if not 0 <= i < kin_dim]
+    if bad:
+        raise ValueError(f"kin_skip_indices {bad} outside [0, {kin_dim - 1}] (kin_dim={kin_dim})")
+    return tuple(idx)
+
+
 def build_kg_gt_from_config(
     cfg: dict,
     input_dim: int,
@@ -941,7 +998,10 @@ def build_kg_gt_from_config(
         kin_dim:    Kinematic feature dimension after preprocessing
                     (20 = hand pose + pose velocity, see POSE_DROP_INDICES;
                     22 = + gated F_L/F_G, see POSE_FORCE_DROP_INDICES — use
-                    model.gat.kin_gat_dim = 12 so pose + forces feed the GAT).
+                    model.gat.kin_gat_dim = 12 so pose + forces feed the GAT;
+                    24 = + velocities of the gated forces, see
+                    POSE_FORCE_RATE_DROP_INDICES — use kin_gat_dim 12 and
+                    model.gat.kin_skip_indices = list(range(10, 24))).
         edge_prior: Optional (5, 5) tensor from compute_muscle_edge_prior().
                     If None, edge_bias is initialised to zeros.
                     Compute via:
@@ -972,6 +1032,8 @@ def build_kg_gt_from_config(
         edge_prior=edge_prior,
         # optional explicit GAT / skip split (None = automatic block split)
         gat_kin_dim_override=gat_cfg.get("kin_gat_dim"),
+        # optional explicit skip-highway features (None = features after the GAT block)
+        kin_skip_indices=gat_cfg.get("kin_skip_indices"),
     )
 
 
