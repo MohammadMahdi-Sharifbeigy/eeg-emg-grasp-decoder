@@ -490,11 +490,17 @@ def plot_interpretability_triptych(
     Args:
         pred:              (T, C) predicted EMG envelope.
         target:            (T, C) ground-truth EMG envelope.
-        eeg_attn:          (H, T, T) EEG self-attention weights from the last encoder layer.
-                           Obtain via: model.encoder.layers[-1].mhsa.last_attn_weights[0]
-        kin_edge_bias:     (T, H, N, N) per-timestep kinematic edge bias (dynamic component).
-                           Obtain via: model.gat.last_kin_edge_bias[0]
-        muscle_names:      List of C muscle channel names, e.g. ['FDI', 'APB', 'ADM', 'ECR', 'FCR'].
+        eeg_attn:          (H, T, T) EEG self-attention weights from the last encoder layer
+                           (model.encoder.layers[-1].mhsa.last_attn_weights[0]), or (H, T)
+                           key attention already averaged over queries. For a stretch longer
+                           than the model window pass the (H, T) form stitched from the 1 s
+                           model windows: main.inference.predict_series_stitched(...,
+                           return_internals=True)[-1]["encoder_key_attn_stitched"][a:b, -1].T
+        kin_edge_bias:     (T, H, N, N) per-timestep kinematic edge bias (dynamic component):
+                           model.gat.last_kin_edge_bias[0] or
+                           internals["kin_edge_bias_stitched"][a:b].
+        muscle_names:      List of C muscle channel names in data order, e.g.
+                           main.dataloader.emg_channel_names(participant) -> ['AD', 'BR', 'FD', 'ED', 'FDI'].
         kin_feature_names: Optional list of kin_dim feature names for tooltips/legends.
         fs:                Sampling rate in Hz (for time axis). Default 500.
         smooth_hz:         Optional low-pass cutoff frequency in Hz to remove high-freq jitter for publication figures.
@@ -892,6 +898,17 @@ def plot_kin_edge_linear_weights(
 
 
 # DIAGNOSTIC PLOT 1: Residual Decomposition â€” GAT nodes vs. Kinematic Skip
+def _flatten_windows(x):
+    """(B, T, C) tensor -> (B*T, C) numpy array.
+
+    The decomposition plots below accept either one window (1, T, .) or B stacked
+    consecutive model windows (B, W, .) from main.inference.window_batch, so the
+    model always sees windows of the training size; the B windows are plotted as
+    one stretch of B*W samples.  B = 1 is unchanged.
+    """
+    return x.reshape(-1, x.shape[-1]).float().cpu().numpy()
+
+
 def plot_residual_decomposition(model, eeg_window, kin_window, emg_target,
                                  emg_names=None, fs=500,
                                  emg_mean=None, emg_std=None,
@@ -938,9 +955,10 @@ def plot_residual_decomposition(model, eeg_window, kin_window, emg_target,
         kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
 
         # Decode each component independently — all in normalized model space
-        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()  # (T, 5)
-        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()             # (T, 5)
-        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()            # (T, 5)
+        # (B, T, C) -> (B*T, C): B stacked consecutive model windows are stitched in time
+        full_out  = _flatten_windows(model.decoder(gat_out + kin_skip).squeeze(-1))  # (B*T, 5)
+        gat_only  = _flatten_windows(model.decoder(gat_out).squeeze(-1))             # (B*T, 5)
+        skip_only = _flatten_windows(model.decoder(kin_skip).squeeze(-1))            # (B*T, 5)
 
     # Un-normalize to physical EMG scale so they match emg_target
     if emg_mean is not None and emg_std is not None:
@@ -1156,10 +1174,10 @@ def plot_kin_skip_over_time(model, eeg_window, kin_window, emg_target,
         kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)  # (1, T, 5, node_dim)
 
         # L2 norm over node_dim â†’ (T, 5): how strongly does kin highway fire per muscle per timestep?
-        kin_skip_norm = kin_skip.squeeze(0).norm(dim=-1).cpu().numpy()                  # (T, 5)
+        kin_skip_norm = _flatten_windows(kin_skip.norm(dim=-1))                         # (B*T, 5)
 
         # Final decoded skip contribution â€” in model's normalized output space
-        kin_skip_decoded = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy() # (T, 5)
+        kin_skip_decoded = _flatten_windows(model.decoder(kin_skip).squeeze(-1))        # (B*T, 5)
 
     # Un-normalize kin_skip_decoded to physical EMG scale so it is comparable to emg_target
     if emg_mean is not None and emg_std is not None:
@@ -1177,7 +1195,7 @@ def plot_kin_skip_over_time(model, eeg_window, kin_window, emg_target,
         sos = butter(4, smooth_hz / (fs / 2.0), btype="low", output="sos")
         kin_skip_decoded = sosfiltfilt(sos, kin_skip_decoded, axis=0)
 
-    time = np.arange(T) / float(fs)
+    time = np.arange(kin_skip_decoded.shape[0]) / float(fs)
     n_ch = model.out_channels
 
     fig, axes = plt.subplots(n_ch, 1, figsize=(14, 2.5 * n_ch), sharex=True)
@@ -1243,9 +1261,10 @@ def plot_neural_mechanical_latency_lag(model, eeg_window, kin_window, emg_target
         B, T, _ = kin_w.shape
         kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
 
-        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
-        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()
-        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+        # (B, T, C) -> (B*T, C): B stacked consecutive model windows are stitched in time
+        full_out  = _flatten_windows(model.decoder(gat_out + kin_skip).squeeze(-1))
+        gat_only  = _flatten_windows(model.decoder(gat_out).squeeze(-1))
+        skip_only = _flatten_windows(model.decoder(kin_skip).squeeze(-1))
 
     if hasattr(emg_target, "cpu"):
         emg_target = emg_target.cpu().numpy()
@@ -1347,9 +1366,10 @@ def plot_spectral_power_decomposition(model, eeg_window, kin_window, emg_target,
         B, T, _ = kin_w.shape
         kin_skip = model.kin_skip_proj(k_skip).view(B, T, model.out_channels, -1)
 
-        full_out  = model.decoder(gat_out + kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
-        gat_only  = model.decoder(gat_out).squeeze(-1).squeeze(0).cpu().numpy()
-        skip_only = model.decoder(kin_skip).squeeze(-1).squeeze(0).cpu().numpy()
+        # (B, T, C) -> (B*T, C): B stacked consecutive model windows are stitched in time
+        full_out  = _flatten_windows(model.decoder(gat_out + kin_skip).squeeze(-1))
+        gat_only  = _flatten_windows(model.decoder(gat_out).squeeze(-1))
+        skip_only = _flatten_windows(model.decoder(kin_skip).squeeze(-1))
 
     if hasattr(emg_target, "cpu"):
         emg_target = emg_target.cpu().numpy()
@@ -1414,11 +1434,11 @@ def plot_kinematic_velocity_acceleration_density(kin_window, emg_target, emg_nam
         emg_target = emg_target.cpu().numpy()
 
     if hasattr(kin_window, "cpu"):
-        kin_np = kin_window.squeeze(0).cpu().numpy()
+        kin_np = kin_window.float().cpu().numpy()
     else:
         kin_np = np.asarray(kin_window)
-    if kin_np.ndim == 3:
-        kin_np = kin_np[0]
+    if kin_np.ndim == 3:      # (B, W, K): B consecutive windows -> one stretch (B = 1 unchanged)
+        kin_np = kin_np.reshape(-1, kin_np.shape[-1])
 
     # Calculate L2 magnitudes of kinematic position, velocity, acceleration
     # Columns 0-8 contain spatial position features (wrist, index, thumb)

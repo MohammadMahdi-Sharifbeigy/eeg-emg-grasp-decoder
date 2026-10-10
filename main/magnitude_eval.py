@@ -13,6 +13,12 @@ prediction returns to baseline. These metrics do, in original EMG units:
     under_area    Σ relu(target − pred) / Σ target
 plus r, CCC, RMSE and VAF% (same definitions as main.training.compute_metrics).
 
+Oracle diagnostic (uses the TEST target, so it is NOT a model result):
+    gain          least-squares scalar g = Σ(pred · target) / Σ(pred²) that best
+                  rescales the prediction of this series onto its target
+                  (1 = no series-level amplitude drift, > 1 = prediction too small).
+    vaf_gain      VAF% of g · pred          rmse_gain   RMSE of g · pred
+
 Usage in the notebook (per subject):
     series = {s: predict_series(model, eeg, kin, emg, prepare_batch, emg_mean, emg_std,
                                 window=cfg["dataset"]["window_size"], device=device)
@@ -34,7 +40,9 @@ from .training import compute_metrics
 MAGNITUDE_COLUMNS = [
     "r", "ccc", "rmse", "vaf",
     "height_ratio", "rest_pred", "rest_target", "over_area", "under_area",
+    "gain", "vaf_gain", "rmse_gain",     # oracle diagnostic (uses the test target)
 ]
+GAIN_COLUMNS = ["gain", "vaf_gain", "rmse_gain"]
 
 COLOR_BLUE = "#2a78d6"
 COLOR_ORANGE = "#eb6834"
@@ -65,7 +73,11 @@ def magnitude_report(
 
     Returns:
         DataFrame with one row per muscle plus a "MEAN" row; columns
-        ["muscle", *MAGNITUDE_COLUMNS, "duration_s"].
+        ["muscle", *MAGNITUDE_COLUMNS, "duration_s"].  The last three magnitude
+        columns are an ORACLE diagnostic computed with the target itself:
+        gain = Σ(pred·target)/Σ(pred²) (least-squares scalar, original units, nothing
+        subtracted; NaN for an all-zero prediction), vaf_gain / rmse_gain = VAF% and
+        RMSE of gain·pred.
     """
     pred = np.asarray(pred, dtype=np.float64)
     target = np.asarray(target, dtype=np.float64)
@@ -89,11 +101,19 @@ def magnitude_report(
     over = _ratio(np.maximum(pred - target, 0.0).sum(0), t_sum)
     under = _ratio(np.maximum(target - pred, 0.0).sum(0), t_sum)
 
+    # oracle series-level gain (least squares through the origin) and the metrics after it
+    gain = _ratio((pred * target).sum(0), (pred * pred).sum(0))
+    has_gain = np.isfinite(gain)
+    m_gain = compute_metrics(pred * np.where(has_gain, gain, 0.0), target, channel_names=names)
+    vaf_gain = np.where(has_gain, m_gain.vaf, np.nan)
+    rmse_gain = np.where(has_gain, m_gain.rmse, np.nan)
+
     df = pd.DataFrame({
         "muscle": names,
         "r": m.pearson, "ccc": m.ccc, "rmse": m.rmse, "vaf": m.vaf,
         "height_ratio": height, "rest_pred": rest_pred, "rest_target": rest_target,
         "over_area": over, "under_area": under,
+        "gain": gain, "vaf_gain": vaf_gain, "rmse_gain": rmse_gain,
     })
     df["duration_s"] = target.shape[0] / float(fs)
     mean = df[MAGNITUDE_COLUMNS + ["duration_s"]].mean().to_dict()
@@ -151,19 +171,34 @@ def format_magnitude_table(df: pd.DataFrame, digits: int = 3) -> str:
     show = df[cols + MAGNITUDE_COLUMNS].copy()
     show = show.rename(columns={
         "height_ratio": "height", "rest_pred": "rest_pred", "rest_target": "rest_tgt",
-        "over_area": "over", "under_area": "under", "vaf": "VAF%",
+        "over_area": "over", "under_area": "under", "vaf": "VAF%", "vaf_gain": "VAF%_gain",
     })
     if "group" in show.columns:     # print each group label once
         dup = show["group"].eq(show["group"].shift())
         show.loc[dup, "group"] = ""
-    fmt = {c: (lambda v, d=digits: f"{v:.{d}g}") for c in ("rmse", "rest_pred", "rest_tgt")}
-    for c in ("r", "ccc", "height", "over", "under"):
+    fmt = {c: (lambda v, d=digits: f"{v:.{d}g}") for c in ("rmse", "rest_pred", "rest_tgt", "rmse_gain")}
+    for c in ("r", "ccc", "height", "over", "under", "gain"):
         fmt[c] = lambda v, d=digits: f"{v:.{d}f}"
-    fmt["VAF%"] = lambda v: f"{v:.1f}"
+    fmt["VAF%"] = fmt["VAF%_gain"] = lambda v: f"{v:.1f}"
     return show.to_string(index=False, formatters=fmt)
 
 
-@torch.no_grad()
+def format_gain_table(df: pd.DataFrame, column: str = "gain", digits: int = 3) -> str:
+    """Per-series oracle gain: one line per "series …" group of a
+    magnitude_report_by_series() frame, one column per muscle (+ MEAN).
+
+    The gain uses the test target (see magnitude_report), so this table is a
+    diagnostic of series-level amplitude drift, not a model result.
+    """
+    d = df[df["group"].astype(str).str.startswith("series ")]
+    groups = list(dict.fromkeys(d["group"]))
+    muscles = list(dict.fromkeys(d["muscle"]))
+    table = d.pivot(index="group", columns="muscle", values=column).reindex(index=groups, columns=muscles)
+    table.index.name = None
+    table.columns.name = None
+    return table.to_string(float_format=lambda v: f"{v:.{digits}f}")
+
+
 def predict_series(
     model: torch.nn.Module,
     eeg: np.ndarray,
@@ -176,36 +211,31 @@ def predict_series(
     device: torch.device,
     use_amp: bool = False,
     batch_size: int = 32,
+    tail: str = "drop",
 ) -> tuple[np.ndarray, np.ndarray]:
     """Run the model over one full series in consecutive non-overlapping windows
-    (the incomplete tail is dropped, as in the test loader with stride = window)
-    and return (pred, target) stitched and denormalised (x * emg_std + emg_mean),
-    i.e. the same code path as the notebook's interpretability cell.
+    and return (pred, target) stitched and denormalised (x * emg_std + emg_mean).
 
-    Returns two (n_windows * window, C) float64 arrays.
+    Thin wrapper around ``main.inference.predict_series_stitched`` — the one
+    inference path shared with the interpretability / diagnostic cells.
+
+    ``tail="drop"`` (default, unchanged behaviour): the incomplete tail is dropped,
+    exactly like the test loader with stride = window -> (n_windows * window, C).
+    ``tail="align_end"``: the tail is covered by one extra window aligned to the
+    series end -> (T, C).
+
+    Returns two float64 arrays in original EMG units.
     """
-    model.eval()
-    n_win = eeg.shape[0] // window
-    if n_win == 0:
-        raise ValueError(f"series of {eeg.shape[0]} samples is shorter than one window ({window})")
+    from .inference import predict_series_stitched
+
+    pred_z, target_z = predict_series_stitched(
+        model, eeg, kin, prepare_batch, window=window, device=device,
+        batch_size=batch_size, emg=emg, use_amp=use_amp, tail=tail,
+    )
     mean = torch.as_tensor(emg_mean).detach().float().cpu().numpy()
     std = torch.as_tensor(emg_std).detach().float().cpu().numpy()
-    amp = use_amp and device.type == "cuda"
-
-    preds, targets = [], []
-    for b0 in range(0, n_win, batch_size):
-        idx = range(b0, min(b0 + batch_size, n_win))
-        e = torch.stack([torch.as_tensor(eeg[i * window:(i + 1) * window]) for i in idx])
-        k = torch.stack([torch.as_tensor(kin[i * window:(i + 1) * window]) for i in idx])
-        m = torch.stack([torch.as_tensor(emg[i * window:(i + 1) * window]) for i in idx])
-        inputs, y = prepare_batch(e, k, m)
-        with torch.autocast(device_type="cuda" if device.type == "cuda" else "cpu", enabled=amp):
-            p = model(inputs["eeg"], inputs["kin"])
-        c = y.shape[-1]
-        preds.append(p.float().cpu().numpy().reshape(-1, c))
-        targets.append(y.float().cpu().numpy().reshape(-1, c))
-    pred = np.concatenate(preds).astype(np.float64) * std + mean
-    target = np.concatenate(targets).astype(np.float64) * std + mean
+    pred = pred_z.astype(np.float64) * std + mean
+    target = target_z.astype(np.float64) * std + mean
     return pred, target
 
 

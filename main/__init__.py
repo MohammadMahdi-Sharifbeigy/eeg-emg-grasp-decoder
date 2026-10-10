@@ -4,7 +4,8 @@ main — Method 1 KG-GT pipeline (nb04, no CCA).
 Public API:
     device:                get_device, set_seed
     dataloader:            load_hs, load_ws, load_participant, get_split_series,
-                           series_conditions, stratified_split, describe_split
+                           series_conditions, stratified_split, describe_split,
+                           emg_channel_names, short_emg_label
     preprocessing_eeg:     preprocess_eeg, preprocess_eeg_from_config
     preprocessing_emg_kin: preprocess_emg, preprocess_emg_from_config,
                            preprocess_kinematics, preprocess_kinematics_from_config,
@@ -21,7 +22,8 @@ Public API:
                            build_loss_from_config, compute_channel_weights,
                            channel_weights_from_config
     magnitude_eval:        magnitude_report, magnitude_report_by_series,
-                           format_magnitude_table, predict_series, plot_magnitude_report,
+                           format_magnitude_table, format_gain_table, predict_series,
+                           plot_magnitude_report,
                            lift_hold_segments, magnitude_by_load, format_magnitude_by_load,
                            plot_magnitude_by_load
     training:              train_model, TrainConfig, TrainResult,
@@ -31,12 +33,16 @@ Public API:
     ablation:              input_ablation, AblationResult, shuffle_time,
                            apply_condition, pearson_per_channel,
                            rest_threshold_from_loader, ABLATION_CONDITIONS
+    inference:             predict_series_stitched (the one inference path: windows of
+                           the training window size), window_batch, window_starts,
+                           stitch_windows
 """
 
 from .device import get_device, set_seed
 from .dataloader import (
     load_hs, load_ws, load_participant, get_split_series,
     series_conditions, stratified_split, describe_split,
+    emg_channel_names, short_emg_label, EMG_SHORT_LABELS,
 )
 from .preprocessing_eeg import (
     preprocess_eeg,
@@ -97,6 +103,7 @@ from .magnitude_eval import (
     magnitude_report,
     magnitude_report_by_series,
     format_magnitude_table,
+    format_gain_table,
     predict_series,
     plot_magnitude_report,
     LOAD_COLUMNS,
@@ -143,6 +150,12 @@ from .ablation import (
     ABLATION_LABELS,
     ABLATION_COLORS,
 )
+from .inference import (
+    predict_series_stitched,
+    window_batch,
+    window_starts,
+    stitch_windows,
+)
 
 from .plots import(
     get_dynamic_fig_dir,
@@ -178,6 +191,7 @@ __all__ = [
     # dataloader
     "load_hs", "load_ws", "load_participant", "get_split_series",
     "series_conditions", "stratified_split", "describe_split",
+    "emg_channel_names", "short_emg_label", "EMG_SHORT_LABELS",
     # preprocessing
     "preprocess_eeg", "preprocess_eeg_from_config", "select_channels",
     "preprocess_emg", "preprocess_emg_from_config", "EMGNormalizer",
@@ -202,7 +216,7 @@ __all__ = [
     "compute_channel_weights", "channel_weights_from_config",
     # magnitude evaluation
     "MAGNITUDE_COLUMNS", "magnitude_report", "magnitude_report_by_series",
-    "format_magnitude_table", "predict_series", "plot_magnitude_report",
+    "format_magnitude_table", "format_gain_table", "predict_series", "plot_magnitude_report",
     "LOAD_COLUMNS", "lift_hold_segments", "magnitude_by_load", "format_magnitude_by_load",
     "plot_magnitude_by_load",
     # coral-net
@@ -217,6 +231,8 @@ __all__ = [
     "input_ablation", "AblationResult", "shuffle_time", "apply_condition",
     "pearson_per_channel", "rest_threshold_from_loader",
     "ABLATION_CONDITIONS", "ABLATION_LABELS", "ABLATION_COLORS",
+    # inference (one path: windows of the training window size)
+    "predict_series_stitched", "window_batch", "window_starts", "stitch_windows",
     # plots — core
     "get_dynamic_fig_dir", "save_fig", "plot_multichannel_trace",
     "plot_signal_heatmap", "plot_preprocessing_comparison",

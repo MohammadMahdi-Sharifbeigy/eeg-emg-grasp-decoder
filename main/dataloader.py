@@ -174,6 +174,92 @@ def describe_split(participant: int, data_dir: "str | Path | None" = None) -> st
 
 
 # ---------------------------------------------------------------------------
+# EMG channel names (true order, read from the participant's HS files)
+# ---------------------------------------------------------------------------
+# hs.emg.names of WAY-EEG-GAL (identical for P1..P12, series 1..9):
+#   0 Anterior Deltoid, 1 Brachoradial, 2 Flexor Digitorum,
+#   3 Common Extensor Digitorum, 4 First Dorsal Interosseus
+# The notebooks used to hard-code the labels FDI / APB / ADM / ECR / FCR, which is
+# NOT this order (old "FDI" = anterior deltoid, old "FCR" = the real FDI).
+
+EMG_SHORT_LABELS: dict[str, str] = {
+    "anterior deltoid": "AD",
+    "brachoradial": "BR",            # spelling used in the data files
+    "brachioradial": "BR",
+    "brachioradialis": "BR",
+    "flexor digitorum": "FD",
+    "common extensor digitorum": "ED",
+    "first dorsal interosseus": "FDI",
+}
+
+
+def short_emg_label(name: str) -> str:
+    """Short label of an ``hs.emg.names`` entry ("Anterior Deltoid" -> "AD");
+    unknown names are returned unchanged (stripped)."""
+    key = " ".join(str(name).strip().lower().split())
+    return EMG_SHORT_LABELS.get(key, str(name).strip())
+
+
+def _participant_number(participant: "int | str") -> int:
+    """3, "3", "P3" or "LOSO_P3" -> 3."""
+    if isinstance(participant, (int, np.integer)):
+        return int(participant)
+    m = re.search(r"(\d+)\s*$", str(participant))
+    if m is None:
+        raise ValueError(f"cannot read a participant number from {participant!r}")
+    return int(m.group(1))
+
+
+@functools.lru_cache(maxsize=None)
+def _read_emg_names(participant: int, data_dir_str: str) -> tuple[str, ...]:
+    p_dir = Path(data_dir_str) / f"P{participant}"
+    files = sorted(p_dir.glob(f"HS_P{participant}_S*.mat"))
+    if not files:
+        raise FileNotFoundError(f"No HS files found for P{participant} in {p_dir}")
+    per_file: dict[str, tuple[str, ...]] = {}
+    for f in files:
+        hs = _mat_load(f)["hs"]
+        if not hasattr(hs, "emg"):          # HS_P{p}_ST.mat holds EEG only
+            continue
+        per_file[f.name] = tuple(_names_to_list(hs.emg.names))
+    if not per_file:
+        raise FileNotFoundError(f"No HS file with an EMG block for P{participant} in {p_dir}")
+    distinct = set(per_file.values())
+    if len(distinct) != 1:
+        raise ValueError(
+            f"P{participant}: EMG channel names differ between series: "
+            + "; ".join(f"{k}: {list(v)}" for k, v in per_file.items())
+        )
+    return next(iter(distinct))
+
+
+def emg_channel_names(
+    participant: "int | str",
+    data_dir: "str | Path | None" = None,
+    short: bool = True,
+) -> list[str]:
+    """EMG channel names of one participant, in the channel order of the data.
+
+    Read from ``hs.emg.names`` of every ``HS_P{p}_S*.mat`` of the participant
+    (cached per participant and data_dir; files without an EMG block, i.e. the ST
+    series, are skipped).
+
+    Args:
+        participant: participant number, or a string ending in it ("P3", "LOSO_P3").
+        data_dir:    raw data root containing ``P{p}/`` (default: repo data/way-eeg/raw).
+        short:       True -> short labels via ``short_emg_label`` (AD, BR, FD, ED, FDI;
+                     unknown names stay as they are); False -> the strings of the file.
+
+    Raises:
+        FileNotFoundError: no HS file (with EMG) for the participant.
+        ValueError:        the series of the participant do not agree on the names.
+    """
+    key = str(data_dir if data_dir is not None else DEFAULT_RAW_DIR)
+    names = list(_read_emg_names(_participant_number(participant), key))
+    return [short_emg_label(n) for n in names] if short else names
+
+
+# ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
 

@@ -101,11 +101,11 @@ every parameter trainable from the first epoch.
 
 | | `main.ipynb` (two-stage) | `main_1stage.ipynb` (this notebook) |
 |---|---|---|
-| Stage 1 | Transformer-only EEG model, `stage1_lr`=1e-3, 75 epochs | — (none) |
-| Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200 |
+| Stage 1 | Transformer-only EEG model, `stage1_lr`=1e-3, 75 epochs, early stop after 10 epochs (`stage1_early_stop_patience`) | — (none) |
+| Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200, early stop after 20 epochs (`single_stage.early_stop_patience`) |
 | GAT / decoder init | re-initialised between stages | trained together with the encoder from epoch 1 |
 | Checkpoints | `outputs/checkpoints_main_stage1/…`, `outputs/checkpoints_main_stage2/…` | `outputs/checkpoints_1stage/{subject}/` (`last.pt` + `best.pt`, resumable) |
-| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
+| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `results/input_ablation.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
 
 Everything else is identical to `main.ipynb`: same participants and condition-stratified
 train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_force_sg51`;
@@ -118,14 +118,20 @@ are the same as in stage 1 of `main.ipynb` (`transformer_lr_scale`=0.1 → encod
 1e-4, GAT/decoder at 1e-3, kin-skip at lr/3 with stronger weight decay).
 
 After the evaluation come the magnitude evaluation (burst height / rest level per test series and
-hold-phase level per weight / surface, as in `main.ipynb`) and a new cell: **"How much does the model use EEG vs kinematics?"**
+hold-phase level per weight / surface) and the cell **"How much does the model use EEG vs kinematics?"**
 — Pearson r on the test set with the kinematics zeroed / time-shuffled and with the EEG time-shuffled.
+Both cells are the ones of `main.ipynb` (only the output file names differ), and so are the
+interpretability / diagnostic cells: every prediction of a whole series goes through
+`main.inference.predict_series_stitched` (1 s windows of the training window size).
+
+Early stopping and the choice of the best epoch use a **smoothed** validation loss (mean of the last
+5 epochs, `main/training.py`): `best.pt` is the epoch at which that moving average was lowest.
 
 **How to compare with `main.ipynb`:** run both notebooks on the same `subject_list`; compare
 `results/evaluation_report.md` (two-stage) with `results/evaluation_report_1stage.md` (this one) —
-same test series, same metrics — and the best epoch / final val loss printed by the training loops.
-The input-ablation cell can also be pasted into `main.ipynb` to see whether the two training schemes
-rely on EEG and kinematics differently.
+same test series, same metrics — and the best epoch / final val loss printed by the training loops;
+`results/input_ablation.csv` vs `results/input_ablation_1stage.csv` shows whether the two training
+schemes rely on EEG and kinematics differently.
 """
 
 SINGLE_STAGE_HELPER = '''
@@ -138,9 +144,13 @@ def train_single_stage(cfg, subj, eeg_dim, kin_dim, edge_prior,
     """Train the full KG-GT model jointly in ONE stage (no Transformer-only
     pre-training, nothing frozen).
 
-    Hyper-parameters: lr / epochs from cfg["training"]["single_stage"]; optimizer,
-    scheduler (cosine), warmup_epochs, transformer_lr_scale, early_stop_patience,
-    grad clipping, AMP and grad accumulation from the shared cfg["training"] keys.
+    Hyper-parameters: lr / epochs / early_stop_patience from
+    cfg["training"]["single_stage"]; optimizer, scheduler (cosine), warmup_epochs,
+    transformer_lr_scale, grad clipping, AMP and grad accumulation from the shared
+    cfg["training"] keys.
+    Early stopping and best.pt use the SMOOTHED validation loss (mean of the last 5
+    epochs' val losses, main/training.py): best.pt = the epoch at which that moving
+    average was lowest; patience = epochs without a new smoothed best.
     Checkpoints: {cfg["training"]["checkpoint_dir"]}/{subj}/ (last.pt + best.pt);
     an interrupted run resumes from last.pt.
 
@@ -163,6 +173,8 @@ def train_single_stage(cfg, subj, eeg_dim, kin_dim, edge_prior,
 
     tc = TrainConfig.from_config(tr, max_epochs=ss["epochs"], lr=ss["lr"])
     tc.checkpoint_dir = ckpt_dir
+    # single-stage patience (the shared early_stop_patience stays for other uses)
+    tc.early_stop_patience = ss.get("early_stop_patience", tc.early_stop_patience)
     print(f"  Trainable parameters : {n_trainable:,} / {n_all:,}")
     print(f"  Optimizer / schedule : {tc.optimizer} | {tc.scheduler} | warmup {tc.warmup_epochs} ep "
           f"| lr {tc.lr:.1e} (encoder x{tc.transformer_lr_scale}) | max {tc.max_epochs} ep "
@@ -317,113 +329,6 @@ print(f"  ALL SUBJECTS TRAINED (single stage): {list(per_subject_results.keys())
 print(f"{'='*70}")
 '''
 
-ABLATION_CELL = '''\
-# ============================================================================
-# HOW MUCH DOES THE MODEL USE EEG vs KINEMATICS?  (test set, input ablation)
-# ============================================================================
-# For each subject the best model is run on the TEST loader through the same
-# prepare_batch (normalisation + kin column drop) as the evaluation above; the
-# normalised inputs are then perturbed:
-#   full         unchanged
-#   kin_zero     kinematics = 0 in z-space (= per-feature training mean)
-#   kin_shuffle  kinematics time-shuffled within each window (fixed, seeded permutation)
-#   eeg_shuffle  EEG time-shuffled within each window (fixed, seeded permutation)
-# Reported: Pearson r per muscle + mean, and the mean predicted level during
-# rest (test target below the per-muscle 10th percentile of the TRAINING target;
-# the notebook has no absolute rest threshold — the loss uses a per-window
-# relative one), full vs kin-zeroed.  All values in normalised (z) units.
-# ─────────────────────────────────────────────────────────────────────────────
-import os
-import numpy as np
-import pandas as pd
-import matplotlib.pyplot as plt
-from torch.utils.data import DataLoader
-from main import (
-    input_ablation, rest_threshold_from_loader,
-    ABLATION_CONDITIONS, ABLATION_LABELS, ABLATION_COLORS,
-)
-
-EMG_NAMES       = ["FDI", "APB", "ADM", "ECR", "FCR"]
-REST_PERCENTILE = 10.0
-ABLATION_SEED   = CONFIG["training"]["seed"]
-
-ablation_results = {}
-_abl_rows = []
-for _subj, _res in per_subject_results.items():
-    _cfg = _res["cfg"]
-    _pb  = _res["prepare_batch"]
-    _bm  = _res["model"]          # best.pt already loaded by the training loop
-    _bm.eval()
-
-    # rest threshold from the training targets (unshuffled, no dropped windows)
-    _train_eval_loader = DataLoader(_res["train_ds"], batch_size=_cfg["training"]["batch_size"],
-                                    shuffle=False, num_workers=0)
-    _rest_thr = rest_threshold_from_loader(_train_eval_loader, _pb, q=REST_PERCENTILE)
-
-    _abl = input_ablation(
-        _bm, _res["test_loader"], _pb, device,
-        seed=ABLATION_SEED,
-        use_amp=_cfg["training"].get("use_amp", False),
-        rest_threshold=_rest_thr,
-    )
-    _abl.predictions.clear()      # keep only the summaries in memory
-    ablation_results[_subj] = _abl
-
-    print(f"\\n{'─'*60}\\n  {_subj}\\n{'─'*60}")
-    print(_abl.as_table(EMG_NAMES))
-    _rf = _abl.r_mean["full"]
-    print(f"  Δr (full − kin_zero)    = {_rf - _abl.r_mean['kin_zero']:+.3f}")
-    print(f"  Δr (full − kin_shuffle) = {_rf - _abl.r_mean['kin_shuffle']:+.3f}")
-    print(f"  Δr (full − eeg_shuffle) = {_rf - _abl.r_mean['eeg_shuffle']:+.3f}")
-    _abl_rows.append({
-        "Subject": _subj,
-        **{f"r_{c}": _abl.r_mean[c] for c in ABLATION_CONDITIONS},
-        "rest_target": float(np.nanmean(_abl.rest_target)),
-        "rest_pred_full": float(np.nanmean(_abl.rest_pred["full"])),
-        "rest_pred_kin_zero": float(np.nanmean(_abl.rest_pred["kin_zero"])),
-    })
-
-ablation_df = pd.DataFrame(_abl_rows)
-if len(ablation_df) > 1:
-    _gm = ablation_df.drop(columns="Subject").mean().to_dict()
-    _gm["Subject"] = "GRAND MEAN"
-    ablation_df = pd.concat([ablation_df, pd.DataFrame([_gm])], ignore_index=True)
-print("\\n" + "=" * 65)
-print("  INPUT ABLATION SUMMARY (mean Pearson r over muscles; rest level in z units)")
-print("=" * 65)
-print(ablation_df.round(3).to_string(index=False))
-
-# ── Bar plot: r per muscle, one bar per condition, one panel per subject ────
-_n = len(ablation_results)
-_ncols = min(3, _n)
-_nrows = int(np.ceil(_n / _ncols))
-fig_abl, _axes = plt.subplots(_nrows, _ncols, figsize=(4.8 * _ncols, 3.2 * _nrows),
-                              squeeze=False, sharey=True, facecolor="white")
-_x = np.arange(len(EMG_NAMES) + 1)
-_w = 0.8 / len(ABLATION_CONDITIONS)
-for _ax, (_subj, _abl) in zip(_axes.flat, ablation_results.items()):
-    for _k, _c in enumerate(ABLATION_CONDITIONS):
-        _vals = list(_abl.r[_c]) + [_abl.r_mean[_c]]
-        _ax.bar(_x + (_k - (len(ABLATION_CONDITIONS) - 1) / 2) * _w, _vals, _w,
-                color=ABLATION_COLORS[_c], label=ABLATION_LABELS[_c])
-    _ax.axhline(0, color="black", linewidth=0.6)
-    _ax.set_xticks(_x)
-    _ax.set_xticklabels(EMG_NAMES + ["mean"])
-    _ax.set_title(_subj, fontsize=10)
-    _ax.grid(axis="y", alpha=0.3)
-for _ax in list(_axes.flat)[_n:]:
-    _ax.axis("off")
-_axes[0, 0].set_ylabel("Pearson r (test)")
-_axes[0, 0].legend(fontsize=7, frameon=False)
-fig_abl.suptitle("EEG vs kinematics: input ablation (single-stage KG-GT)", fontsize=11)
-fig_abl.tight_layout()
-os.makedirs("results", exist_ok=True)
-fig_abl.savefig("results/input_ablation_1stage.png", dpi=200, bbox_inches="tight")
-ablation_df.to_csv("results/input_ablation_1stage.csv", index=False)
-plt.show()
-print("✓  Saved results/input_ablation_1stage.png and results/input_ablation_1stage.csv")
-'''
-
 LOSO_TRAIN = '''\
         # ── SINGLE STAGE: full KG-GT trained jointly (same routine as above) ──
         _ss = notebook_cfg["training"]["single_stage"]
@@ -472,10 +377,23 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
             '    # move aside outputs/checkpoints_1stage (this notebook; main.ipynb uses its own two-stage folders)\n',
         ),
         (
-            '        "stage2_lr": 1e-4,          # Package 1: 1e-5 was still improving at epoch 200/200\n'
-            '        "stage2_early_stop_patience": 25,   # stage 2 only (stage 1 uses early_stop_patience)\n',
-            '        "stage2_lr": 1e-4,          # two-stage only (unused here)\n'
+            '    # * stage 1: early stop after 10 epochs without val improvement (stage1_early_stop_patience)\n',
+            '    # * stage 1: early stop after 10 epochs without val improvement (stage1_early_stop_patience)\n'
+            '    # * single stage (this notebook): early stop after 20 epochs (single_stage.early_stop_patience)\n',
+        ),
+        (
+            '        "stage2_lr": 1e-4,          # Package 1: 1e-5 was still improving at epoch 200/200\n',
+            '        "stage2_lr": 1e-4,          # two-stage only (unused here)\n',
+        ),
+        (
+            '        "stage1_early_stop_patience": 10,   # stage 1 only (Transformer-only pre-training)\n'
+            '        "stage2_early_stop_patience": 25,   # stage 2 only\n',
+            '        "stage1_early_stop_patience": 10,   # two-stage only (unused here)\n'
             '        "stage2_early_stop_patience": 25,   # two-stage only (unused here)\n',
+        ),
+        (
+            '        "early_stop_patience": 50,   # shared default; stage 1 / stage 2 use their own keys above\n',
+            '        "early_stop_patience": 50,   # shared default (not used by the single stage: single_stage.early_stop_patience)\n',
         ),
         (
             '        "stage1_epochs":       75,\n',
@@ -488,14 +406,16 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
             '        # Checkpoints -> outputs/checkpoints_1stage/{subject}/ — never the two-stage folders.\n'
             '        "checkpoint_dir": "outputs/checkpoints_1stage",\n'
             '        # The full KG-GT model is trained ONCE, jointly, nothing frozen.\n'
-            '        # Only lr / epochs live here; everything else is the shared key above:\n'
+            '        # Only lr / epochs / patience live here; everything else is the shared key above:\n'
             '        #   optimizer="adamw", scheduler="cosine" (eta_min 1e-6), warmup_epochs=5,\n'
             '        #   transformer_lr_scale=0.1 (encoder+node-proj at lr*0.1, as in stage 1),\n'
-            '        #   early_stop_patience=50, grad_clip_norm, use_amp, batch_size,\n'
-            '        #   gradient_accumulation_steps, seed.\n'
+            '        #   grad_clip_norm, use_amp, batch_size, gradient_accumulation_steps, seed.\n'
             '        "single_stage": {\n'
             '            "lr":     1e-3,     # = stage1_lr (GAT/decoder group; encoder x transformer_lr_scale)\n'
             '            "epochs": 200,      # = max_epochs\n'
+            '            # epochs without a new best of the SMOOTHED val loss (5-epoch moving average,\n'
+            '            # main/training.py; best.pt is selected on that smoothed value too)\n'
+            '            "early_stop_patience": 20,\n'
             '        },\n',
         ),
         (
@@ -549,18 +469,18 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
         raise AssertionError(f"magnitude cell expected right after evaluation, got {i_mag} vs {i_eval}")
     log["magnitude"] = f"cell {i_mag} edited"
 
-    # 7. new ablation cell right after the magnitude evaluation
-    new_cell = {
-        "cell_type": "code",
-        "execution_count": None,
-        "id": "abl1stage",
-        "metadata": {},
-        "outputs": [],
-        "source": [],
-    }
-    set_src(new_cell, ABLATION_CELL)
-    nb["cells"].insert(i_mag + 1, new_cell)
-    log["ablation"] = f"cell {i_mag + 1} added"
+    # 7. EEG-vs-kinematics ablation cell (inherited from main.ipynb): separate output files
+    i_abl = edit_cell(nb, "HOW MUCH DOES THE MODEL USE EEG vs KINEMATICS?", [
+        ('ABLATION_PNG    = "results/input_ablation.png"',
+         'ABLATION_PNG    = "results/input_ablation_1stage.png"   # main.ipynb writes input_ablation.png'),
+        ('ABLATION_CSV    = "results/input_ablation.csv"',
+         'ABLATION_CSV    = "results/input_ablation_1stage.csv"'),
+        ('"EEG vs kinematics: input ablation (two-stage KG-GT)"',
+         '"EEG vs kinematics: input ablation (single-stage KG-GT)"'),
+    ])
+    if i_abl != i_mag + 1:
+        raise AssertionError(f"ablation cell expected right after magnitude, got {i_abl} vs {i_mag}")
+    log["ablation"] = f"cell {i_abl} edited (inherited from main.ipynb)"
 
     # 8. interpretability: separate output folder
     i = edit_cell(nb, "INTERPRETABILITY — Full-Signal Triptych", [
