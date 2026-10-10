@@ -707,7 +707,8 @@ def test_notebook_interpretability_cells_in_order(name, suffix):
     assert "plot_interp_window(" in s and "decompose_series(" in s and "lift_events(" in s
     assert "plot_interpretability_triptych" not in s and "encoder_key_attn" not in s
     assert "MAX_WINDOWS_PER_SERIES = None" in s
-    assert f'os.path.join("outputs", "interpretability{suffix}", _subj)' in s
+    # Phase B: output folders carry the run tag (tagged_output, tests/test_phase_b.py)
+    assert f'os.path.join(tagged_output("interpretability{suffix}"), _subj)' in s
     assert 'f"series{_real_series:02d}_window{_w:03d}_{_t_start:.0f}s-{_t_end:.0f}s.png"' in s
     assert "smooth_hz=5.0" not in s
     for exported in ("eeg_b ", "kin_b ", "true_np ", "pred_np ", "EMG_NAMES ", "KIN_FEATURE_NAMES "):
@@ -719,7 +720,7 @@ def test_notebook_interpretability_cells_in_order(name, suffix):
     for needle in ("plot_event_locked(", "event_locked_windows(", "event_locked_summary(",
                    "eeg_effect_size(", '"lift_off"', '"first_touch"', "per_subject_results"):
         assert needle in e, needle
-    assert f'os.path.join("outputs", "interpretability{suffix}_event", _subj)' in e
+    assert f'os.path.join(tagged_output("interpretability{suffix}_event"), _subj)' in e
     other = "" if suffix else "_1stage"
     assert f'"interpretability{other}_event"' not in e
     assert "faithfulness" in e and "effect size" in e

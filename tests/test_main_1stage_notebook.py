@@ -72,7 +72,9 @@ def test_all_code_cells_compile(nb):
 def test_config_single_stage_and_unchanged_preprocessing(nb, head_nb):
     cfg, head = _exec_config(nb), _exec_config(head_nb)
     tr = cfg["training"]
-    assert tr["checkpoint_dir"] == "outputs/checkpoints_1stage"
+    # Phase B: every output path carries the run tag (tests/test_phase_b.py)
+    assert tr["checkpoint_dir"] == "outputs/checkpoints_1stage_p2b"
+    assert head["training"]["checkpoint_dir"] == "outputs/checkpoints_main_p2b"
     assert tr["single_stage"]["lr"] == 1e-3
     assert tr["single_stage"]["epochs"] == 200
     assert tr["scheduler"] == "cosine" and tr["optimizer"] == "adamw" and tr["warmup_epochs"] == 5
@@ -82,10 +84,11 @@ def test_config_single_stage_and_unchanged_preprocessing(nb, head_nb):
     assert cfg["dataset"] == head["dataset"]
     assert cfg["model"] == head["model"]
     assert tr["loss"] == head["training"]["loss"]
-    # only additions in training: checkpoint_dir, single_stage, lr (plot folder key)
+    # only differences in training: checkpoint_dir (own folder), single_stage, lr (plot folder key)
     for k, v in head["training"].items():
-        assert tr[k] == v, k
-    assert set(tr) - set(head["training"]) == {"checkpoint_dir", "single_stage", "lr"}
+        if k != "checkpoint_dir":
+            assert tr[k] == v, k
+    assert set(tr) - set(head["training"]) == {"single_stage", "lr"}
 
 
 def test_training_cell_is_single_stage(nb):
@@ -116,8 +119,9 @@ def test_magnitude_then_ablation_cells_follow_evaluation(nb):
     i = next(k for k, c in enumerate(cells) if "# EVALUATION — Full metric suite" in _src(c))
     mag = _src(cells[i + 1])
     assert "magnitude_report_by_series(" in mag
-    assert 'MAGNITUDE_CSV = "results/magnitude_report_1stage.csv"' in mag
-    assert 'MAGNITUDE_PNG = "results/magnitude_report_1stage.png"' in mag
+    # Phase B: results go to RESULTS_DIR = results/<run tag>/
+    assert 'MAGNITUDE_CSV = f"{RESULTS_DIR}/magnitude_report_1stage.csv"' in mag
+    assert 'MAGNITUDE_PNG = f"{RESULTS_DIR}/magnitude_report_1stage.png"' in mag
     assert "input_ablation(" in _src(cells[i + 2])
 
 

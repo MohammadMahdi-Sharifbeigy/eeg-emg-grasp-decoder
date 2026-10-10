@@ -16,7 +16,8 @@ round-off) plus three OCCLUSION effects, which are not exact shares:
 
     graph_no_kin_bias     the graph path recomputed with the kinematic edge bias of the
                           GAT set to 0 (the graph path still depends on kinematics
-                          through that bias; this variant is the EEG-only part)
+                          through that bias; this variant is the EEG-only part and is
+                          exactly the model's EEG-only output ``model(eeg, use_kin=False)``)
     kin_force_effect      kin path − kin path with the force / force-rate inputs replaced
     kin_velocity_effect   kin path − kin path with the pose-velocity inputs replaced
     (the kin skip MLP is non-linear, so the two effects need not add up to the kin path)
@@ -629,6 +630,7 @@ def eeg_occlusion_attribution(
     time_bin: int = 25,
     electrode_groups=None,
     query: int | None = None,
+    band_groups=None,
 ) -> dict:
     """Occlusion attribution of the EEG input: what changes when a piece is removed?
 
@@ -642,9 +644,13 @@ def eeg_occlusion_attribution(
         model:   called as ``model(eeg=…, kin=…)`` -> (B, W, C); put in eval mode.
         eeg:     (B, W, E) normalised EEG windows.   kin: (B, W, K) or None.
         time_bin: bin width in samples (25 = 50 ms at 500 Hz).
-        electrode_groups: None (every electrode alone), a dict name -> indices, or a
-                 list of index lists.
+        electrode_groups: None (every input column alone), a dict name -> indices, or a
+                 list of index lists.  With band-power features an electrode is a group
+                 of n_bands columns: pass ``main.eeg_features.eeg_electrode_groups(names,
+                 n_bands)`` so the result still refers to the electrodes.
         query:   sample at which the signed change is read (default: window centre).
+        band_groups: optional dict band -> indices (``main.eeg_features.eeg_band_groups``):
+                 additionally occlude every band (all electrodes, all time steps).
 
     Returns (numpy float32):
         "time_abs"         (B, n_bins, C)  mean |Δ| over the window
@@ -652,6 +658,7 @@ def eeg_occlusion_attribution(
         "electrode_abs"    (B, G, C)       "electrode_signed" (B, G, C)
         "bins"             (n_bins, 2) [start, stop) samples;  "bin_centers" (n_bins,)
         "electrode_labels" group names / indices;  "query";  "output" (B, W, C)
+        with ``band_groups``: "band_abs", "band_signed" (B, n_bands, C);  "band_labels"
     """
     model.eval()
     dev = _device_of(model)
@@ -692,12 +699,23 @@ def eeg_occlusion_attribution(
         return torch.stack(lst, dim=1).float().cpu().numpy()
 
     bins_np = np.asarray(bins, dtype=np.int64)
-    return {
+    result = {
         "time_abs": _np(t_abs), "time_signed": _np(t_sig),
         "electrode_abs": _np(e_abs), "electrode_signed": _np(e_sig),
         "bins": bins_np, "bin_centers": (bins_np[:, 0] + bins_np[:, 1] - 1) / 2.0,
         "electrode_labels": labels, "query": q, "output": out.cpu().numpy(),
     }
+    if band_groups is not None:
+        b_labels, b_groups = _electrode_groups(E, band_groups)
+        b_abs, b_sig = [], []
+        for g in b_groups:
+            def _mask(x, g=g):
+                x[:, :, g] = base[:, :, g]
+            d_abs, d_sig = _delta(_mask)
+            b_abs.append(d_abs)
+            b_sig.append(d_sig)
+        result.update(band_abs=_np(b_abs), band_signed=_np(b_sig), band_labels=b_labels)
+    return result
 
 
 def _deletion_summary(fractions, top_w, rand_w, full_w) -> dict:
@@ -849,6 +867,7 @@ _PER_LIFT_KEYS = (
     "pred", "target", "pred_z", "target_z",
     "graph", "kin", "graph_no_kin_bias", "kin_force_effect", "kin_velocity_effect",
     "rollout", "occ_time_abs", "occ_time_signed", "occ_electrode_abs", "occ_electrode_signed",
+    "occ_band_abs", "occ_band_signed",
 )
 
 
@@ -874,6 +893,7 @@ def event_locked_windows(
     kin_baseline=None,
     time_bin: int = 25,
     electrode_groups=None,
+    band_groups=None,
     rollout: bool = True,
     occlusion: bool = True,
     deletion: bool = True,
@@ -896,7 +916,8 @@ def event_locked_windows(
         meta:          one dict per lift (e.g. the ``lift_events`` dicts: CurW, CurS, lift).
         emg_mean, emg_std: (C,) to return the prediction in original EMG units.
         force_cols, vel_cols, kin_baseline: see ``decompose_prediction``.
-        time_bin, electrode_groups: see ``eeg_occlusion_attribution``.
+        time_bin, electrode_groups, band_groups: see ``eeg_occlusion_attribution``
+                       (band-power input: ``eeg_electrode_groups`` / ``eeg_band_groups``).
         rollout / occlusion / deletion: switch the EEG evidence parts off.
 
     Returns (n = kept lifts, W = pre + post, C muscles, E electrodes / groups):
@@ -908,10 +929,11 @@ def event_locked_windows(
         "rollout"                  (n, W) rollout row of the query at the event sample
         "occ_time_abs", "occ_time_signed"            (n, n_bins, C)
         "occ_electrode_abs", "occ_electrode_signed"  (n, E, C)
+        "occ_band_abs", "occ_band_signed"            (n, n_bands, C)  (only with band_groups)
         "bin_centers"              (n_bins,) samples RELATIVE to the event
         "deletion"                 ``deletion_curve`` result pooled over the lifts
         "kept"  (n,) positions into ``samples``;  "event_samples" (n,);  "meta" list of n dicts
-        "pre", "post", "window", "query" (= pre), "electrode_labels"
+        "pre", "post", "window", "query" (= pre), "electrode_labels", "band_labels"
     """
     pre, post = int(pre), int(post)
     window = pre + post
@@ -926,7 +948,7 @@ def event_locked_windows(
     acc: dict[str, list] = {}
     del_parts = {"top": [], "random": [], "full": []}
     del_fractions = None
-    bin_centers, electrode_labels = None, None
+    bin_centers, electrode_labels, band_labels = None, None, None
     for bi, b0 in enumerate(range(0, len(starts), int(batch_size))):
         b_starts = starts[b0:b0 + int(batch_size)]
         inputs, y = window_batch(eeg, kin, prepare_batch, window, emg=emg, starts=b_starts)
@@ -946,12 +968,16 @@ def event_locked_windows(
         occ = None
         if occlusion or deletion:
             occ = eeg_occlusion_attribution(model, e_t, k_t, time_bin=time_bin,
-                                            electrode_groups=electrode_groups, query=pre)
+                                            electrode_groups=electrode_groups, query=pre,
+                                            band_groups=band_groups if occlusion else None)
             bin_centers = occ["bin_centers"] - pre
             electrode_labels = occ["electrode_labels"]
+            band_labels = occ.get("band_labels", band_labels)
         if occlusion:
-            for k in ("time_abs", "time_signed", "electrode_abs", "electrode_signed"):
-                acc.setdefault("occ_" + k, []).append(occ[k])
+            for k in ("time_abs", "time_signed", "electrode_abs", "electrode_signed",
+                      "band_abs", "band_signed"):
+                if k in occ:
+                    acc.setdefault("occ_" + k, []).append(occ[k])
         if deletion:
             d = deletion_curve(model, e_t, k_t, attribution=occ["time_abs"].mean(axis=-1),
                                time_bin=time_bin, seed=int(seed) + bi, **del_kw)
@@ -981,6 +1007,7 @@ def event_locked_windows(
                        if del_parts["top"] else None)
     out["bin_centers"] = bin_centers
     out["electrode_labels"] = electrode_labels
+    out["band_labels"] = band_labels
     out["kept"] = kept
     out["event_samples"] = np.asarray([samples[i] for i in kept], dtype=np.int64)
     out["meta"] = [dict(meta[i]) for i in kept] if meta is not None else [{} for _ in kept]
@@ -1014,7 +1041,7 @@ def concat_event_locked(parts: Sequence[Mapping]) -> dict:
                                          np.concatenate([d["random_per_window"] for d in dels]),
                                          np.concatenate([d["full_per_window"] for d in dels]))
                        if dels else None)
-    for k in ("bin_centers", "electrode_labels", "pre", "post", "window", "query", "units"):
+    for k in ("bin_centers", "electrode_labels", "band_labels", "pre", "post", "window", "query", "units"):
         out[k] = ref.get(k)
     return out
 
@@ -1043,14 +1070,14 @@ def event_locked_summary(ev: Mapping, group_by: str | None = None) -> dict:
 
     Returns:
         {"n", "<key>_mean", "<key>_sd" for every per-lift array (lift axis removed),
-         "t" (W,) samples relative to the event, "bin_centers", "electrode_labels",
+         "t" (W,) samples relative to the event, "bin_centers", "electrode_labels", "band_labels",
          "deletion", "pre", "post", "units",
          "group_by", "groups": {value: {"n", "<key>_mean", "<key>_sd"}}}
     """
     n = len(ev["kept"])
     out = _summarise(ev, np.arange(n))
     out["t"] = np.arange(-int(ev["pre"]), int(ev["post"]))
-    for k in ("bin_centers", "electrode_labels", "deletion", "pre", "post", "units"):
+    for k in ("bin_centers", "electrode_labels", "band_labels", "deletion", "pre", "post", "units"):
         out[k] = ev.get(k)
     out["group_by"] = group_by
     out["groups"] = {}

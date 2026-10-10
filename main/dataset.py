@@ -69,9 +69,16 @@ class WAYEEGDataset(Dataset):
 
     Yields:
         (eeg_window, kin_window, emg_window)
-        eeg_window : Tensor (window_size, n_eeg_channels)
+        eeg_window : Tensor (window_size, n_eeg_channels)  (or n_eeg_features with eeg_transform)
         kin_window : Tensor (window_size, n_kin_features)  (k_t)
         emg_window : Tensor (window_size, n_emg_channels)
+
+    eeg_transform (optional): callable ``(T, C) array -> (T, F) array`` applied to the EEG
+    of every series right after it is loaded from the cache or preprocessed, BEFORE the
+    windows are indexed (e.g. ``main.eeg_features.build_eeg_transform_from_config``: log
+    band power computed on the full series).  The result lives in memory only: the cache
+    always holds the untransformed EEG, so an existing cache folder stays valid and is
+    not modified.  None (default) = the cached / preprocessed EEG as it is.
     """
 
     def __init__(
@@ -88,6 +95,7 @@ class WAYEEGDataset(Dataset):
         preprocess_fn: "Callable[[dict], dict] | None" = None,
         cache_dir: Union[str, Path, None] = None,
         add_noise: bool = False,
+        eeg_transform: "Callable[[np.ndarray], np.ndarray] | None" = None,
     ) -> None:
         super().__init__()
 
@@ -106,11 +114,13 @@ class WAYEEGDataset(Dataset):
         self.preprocess_fn = preprocess_fn
         self.cache_dir   = Path(cache_dir) if cache_dir else None
         self.add_noise   = add_noise
+        self.eeg_transform = eeg_transform
 
         self._windows: list[tuple[np.ndarray, np.ndarray, np.ndarray, int]] = []
         self._build_index()
-        # Drop closure after indexing to allow Windows multiprocessing
+        # Drop closures after indexing to allow Windows multiprocessing
         self.preprocess_fn = None
+        self.eeg_transform = None
 
     # ------------------------------------------------------------------
     # Index construction
@@ -131,7 +141,7 @@ class WAYEEGDataset(Dataset):
                     cached = self._load_cache(cache_key)
                     if cached is not None:
                         eeg_all, kin_all, emg_all = cached
-                        self._slide_windows(eeg_all, kin_all, emg_all)
+                        self._slide_windows(self._transform_eeg(eeg_all), kin_all, emg_all)
                         continue
 
                 # 2. If not cached, find and load ONLY this single series file
@@ -167,9 +177,20 @@ class WAYEEGDataset(Dataset):
         eeg, kt, emg = eeg[:T], kt[:T], emg[:T]
 
         if self.cache_dir is not None:
-            self._save_cache(cache_key, eeg, kt, emg)
+            self._save_cache(cache_key, eeg, kt, emg)   # always the untransformed EEG
 
-        self._slide_windows(eeg, kt, emg)
+        self._slide_windows(self._transform_eeg(eeg), kt, emg)
+
+    def _transform_eeg(self, eeg: np.ndarray) -> np.ndarray:
+        """Apply ``eeg_transform`` to the EEG of one full series (identity when None)."""
+        if self.eeg_transform is None:
+            return eeg
+        out = np.ascontiguousarray(self.eeg_transform(eeg), dtype=np.float32)
+        if out.ndim != 2 or out.shape[0] != eeg.shape[0]:
+            raise ValueError(
+                f"eeg_transform must return (T, F) with T = {eeg.shape[0]}, got shape {out.shape}"
+            )
+        return out
 
     def _slide_windows(
         self,

@@ -4,7 +4,9 @@ main_1stage.ipynb = main.ipynb with the two-stage scheme (Transformer-only
 pre-training -> frozen-encoder KG-GT fine-tuning) replaced by ONE stage that
 trains the full KG-GT model jointly from scratch.  Preprocessing, cache, data
 split and loss are untouched; checkpoints/results go to separate *_1stage
-locations so the two notebooks never overwrite each other.
+locations so the two notebooks never overwrite each other.  Both notebooks derive
+every output path from CONFIG["outputs"]["run_tag"] (RESULTS_DIR / tagged_output(),
+training.checkpoint_dir), so a new run never overwrites an older one either.
 
 The source is ``git show <rev>:main.ipynb`` (default HEAD) so uncommitted edits
 in the working copy of main.ipynb are not inherited (``--rev ""`` reads the
@@ -97,6 +99,36 @@ This notebook is a copy of `main.ipynb` that trains **one stage**: the full KG-G
 plus the kinematic skip highway and lag alignment) is trained **jointly from scratch**, with
 every parameter trainable from the first epoch.
 
+## Package 2 — Phase B: make the EEG path contribute (run tag `p2b`)
+
+The Step-1 model reached Pearson r 0.89 on the P1 test series, but time-shuffling the EEG changed r by 0.003 and zeroing the kinematics gave r ≈ 0: the output came from the kinematics and the gated forces, not from the EEG. Phase B changes four things, all switched on in `CONFIG` (the library defaults are unchanged, so older configs behave as before):
+
+1. **EEG input = log band power** (`preprocessing.eeg_features`). Per electrode: power in 4–8, 8–13, 13–30 and 30–40 Hz (zero-phase band-pass → squared Hilbert envelope → zero-phase smoothing at 5 Hz → log, with a floor at 1e-3 × the median of that electrode and band). 32 electrodes × 4 bands = 128 inputs, band-major (band 0 of all electrodes, then band 1, …). The features are computed on each full series after the cache is read, so the cache folder is the same as before and is not modified. Each feature is z-scored with the mean and SD of the **training** series and clipped to ±5 inside `prepare_batch`, which every cell uses.
+2. **Kinematic-pathway dropout** (`model.kin_dropout` = 0.3). In training, for 30 % of the windows both kinematic pathways are switched off for the whole window: the kinematic edge bias of the GAT (the static edge bias stays) and the kin skip highway. For those windows the output has to come from the EEG.
+3. **EEG-only auxiliary loss** (`training.loss.w_eeg_only` = 0.5). Every training step also scores the EEG-only prediction of the same batch (same encoder and node projection; GAT without kinematic edge bias; no kin skip; same decoder and lag alignment) with the same loss terms, weighted 0.5. The validation loss does not contain this term, so training and validation loss are not on the same scale.
+4. **Smaller, more regularised EEG encoder**: 2 layers, 4 heads, d_model 64, dropout 0.3; electrode dropout 0.2 (`model.eeg_channel_dropout` with `model.eeg_groups` = 4: a whole electrode, all four bands, is zeroed for the whole window); weight decay 0.05.
+
+`model(eeg, kin, use_kin=False)` is the EEG-only prediction at evaluation time (both kinematic pathways off). It is not the same as feeding zero kinematics, which still pass through the skip MLP and the edge-bias layer.
+
+**Acceptance criteria** (printed by the cell "How much does the model use EEG vs kinematics?"):
+
+- EEG-only r ≥ 0.35 — row `kin_off` of the ablation table (model run with `use_kin=False`);
+- time-shuffling the EEG lowers r measurably — Δr (full − eeg_shuffle) clearly above the 0.003 of the Step-1 model;
+- full-model r ≥ 0.88, and height ratio and rest level (magnitude cell) not worse than in the Step-1 run.
+
+**Nothing of an earlier run is overwritten.** Every file this notebook writes depends on `CONFIG["outputs"]["run_tag"]` (= `p2b`); for the next experiment change the tag and `training.checkpoint_dir` together (the CONFIG cell checks that they match).
+
+| Output | Path |
+|---|---|
+| Checkpoints | `outputs/checkpoints_1stage_p2b/{subject}/` (`last.pt` + `best.pt`, resumable) |
+| Evaluation report | `results/p2b/evaluation_report_1stage.md` |
+| Magnitude evaluation | `results/p2b/magnitude_report_1stage.csv` / `.png`, `results/p2b/magnitude_by_load_1stage.csv` / `.png` |
+| Input ablation | `results/p2b/input_ablation_1stage.csv` / `.png` |
+| Interpretability figures | `outputs/interpretability_1stage_p2b/{subject}/`, `outputs/interpretability_1stage_event_p2b/{subject}/` |
+| Figures saved by `main.plots` | `results/P{id}/main/<config>_p2b/plots/` |
+| Kin-gate sanity figures | `outputs/kin_gate_p2b/` |
+| LOSOCV (optional cell) | `outputs/figures_p2b/*_1stage_*.png`, `outputs/losocv_results_1stage_p2b.csv` |
+
 **What is different from `main.ipynb`**
 
 | | `main.ipynb` (two-stage) | `main_1stage.ipynb` (this notebook) |
@@ -104,22 +136,24 @@ every parameter trainable from the first epoch.
 | Stage 1 | Transformer-only EEG model, `stage1_lr`=1e-3, 75 epochs, early stop after 10 epochs (`stage1_early_stop_patience`) | — (none) |
 | Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200, early stop after 20 epochs (`single_stage.early_stop_patience`) |
 | GAT / decoder init | re-initialised between stages | trained together with the encoder from epoch 1 |
-| Checkpoints | `outputs/checkpoints_main_stage1/…`, `outputs/checkpoints_main_stage2/…` | `outputs/checkpoints_1stage/{subject}/` (`last.pt` + `best.pt`, resumable) |
-| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `results/input_ablation.*`, `outputs/interpretability/`, `outputs/interpretability_event/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/interpretability_1stage_event/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
+| Checkpoints | `outputs/checkpoints_main_p2b_stage1/…`, `outputs/checkpoints_main_p2b_stage2/…` | `outputs/checkpoints_1stage_p2b/{subject}/` (`last.pt` + `best.pt`, resumable) |
+| Results (all under `results/p2b/`) | `evaluation_report.md`, `magnitude_report.*`, `magnitude_by_load.*`, `input_ablation.*` | `evaluation_report_1stage.md`, `magnitude_report_1stage.*`, `magnitude_by_load_1stage.*`, `input_ablation_1stage.*` |
+| Figures / LOSOCV (under `outputs/`) | `interpretability_p2b/`, `interpretability_event_p2b/`, `losocv_results_p2b.csv` | `interpretability_1stage_p2b/`, `interpretability_1stage_event_p2b/`, `losocv_results_1stage_p2b.csv` |
 
 Everything else is identical to `main.ipynb`: same participants and condition-stratified
 train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_force_sg51`;
-preprocessing is identical, only training differs), same 24 kinematic inputs (10 hand-pose + 2
-hand-near-object gated forces F_L, F_G → GAT edge bias; the gated forces + 10 SG-51 pose velocities +
-2 gated-force velocities → additive kin skip highway), same loss (asymmetry 1.5, rest over-prediction
-term, Huber δ=2.5, active-level term w_height 0.5, per-muscle weights), batch size,
-gradient accumulation, grad clipping, AMP and seed. The parameter groups used by `train_model`
-are the same as in stage 1 of `main.ipynb` (`transformer_lr_scale`=0.1 → encoder + node projection at
+the cache holds the raw EEG, the band-power features are computed when it is read), same 24 kinematic
+inputs (10 hand-pose + 2 hand-near-object gated forces F_L, F_G → GAT edge bias; the gated forces + 10 SG-51
+pose velocities + 2 gated-force velocities → additive kin skip highway), same model and loss (asymmetry 1.5,
+rest over-prediction term, Huber δ=2.5, active-level term w_height 0.5, per-muscle weights, EEG-only term
+w_eeg_only 0.5), batch size, gradient accumulation, grad clipping, AMP and seed. The parameter groups used by
+`train_model` are the same as in stage 1 of `main.ipynb` (`transformer_lr_scale`=0.1 → encoder + node projection at
 1e-4, GAT/decoder at 1e-3, kin-skip at lr/3 with stronger weight decay).
 
 After the evaluation come the magnitude evaluation (burst height / rest level per test series and
 hold-phase level per weight / surface) and the cell **"How much does the model use EEG vs kinematics?"**
-— Pearson r on the test set with the kinematics zeroed / time-shuffled and with the EEG time-shuffled.
+— Pearson r on the test set with the kinematics zeroed / time-shuffled, with both kinematic pathways off
+(`kin_off` = EEG only) and with the EEG time-shuffled, followed by the Phase B acceptance printout.
 Both cells are the ones of `main.ipynb` (only the output file names differ), and so are the
 interpretability / diagnostic cells: every prediction of a whole series goes through
 `main.inference.predict_series_stitched` (1 s windows of the training window size). The interpretability
@@ -131,10 +165,12 @@ Early stopping and the choice of the best epoch use a **smoothed** validation lo
 5 epochs, `main/training.py`): `best.pt` is the epoch at which that moving average was lowest.
 
 **How to compare with `main.ipynb`:** run both notebooks on the same `subject_list`; compare
-`results/evaluation_report.md` (two-stage) with `results/evaluation_report_1stage.md` (this one) —
+`results/p2b/evaluation_report.md` (two-stage) with `results/p2b/evaluation_report_1stage.md` (this one) —
 same test series, same metrics — and the best epoch / final val loss printed by the training loops;
-`results/input_ablation.csv` vs `results/input_ablation_1stage.csv` shows whether the two training
-schemes rely on EEG and kinematics differently.
+`results/p2b/input_ablation.csv` vs `results/p2b/input_ablation_1stage.csv` shows whether the two training
+schemes rely on EEG and kinematics differently. The Step-1 results of this notebook are the untagged files
+`results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/input_ablation_1stage.*`
+and the checkpoints in `outputs/checkpoints_1stage/` (not touched by a `p2b` run).
 """
 
 SINGLE_STAGE_HELPER = '''
@@ -155,15 +191,19 @@ def train_single_stage(cfg, subj, eeg_dim, kin_dim, edge_prior,
     epochs' val losses, main/training.py): best.pt = the epoch at which that moving
     average was lowest; patience = epochs without a new smoothed best.
     Checkpoints: {cfg["training"]["checkpoint_dir"]}/{subj}/ (last.pt + best.pt);
-    an interrupted run resumes from last.pt.
+    an interrupted run resumes from last.pt. The folder carries the run tag
+    (cfg["outputs"]["run_tag"]), so checkpoints of an earlier run are never touched.
+    Phase B (all from cfg): electrode dropout and kinematic-pathway dropout in the model,
+    EEG-only auxiliary loss in loss_fn (training only; the val loss is the main loss).
 
     Returns (end_of_training_model, best_model, TrainResult, ckpt_dir).
     """
     tr = cfg["training"]
     ss = tr["single_stage"]
     ckpt_dir = str(Path(tr["checkpoint_dir"]) / subj)
-    # never write into the two-stage notebook's folders
+    # never write into the two-stage notebook's folders or into an untagged (older) folder
     assert "checkpoints_main" not in Path(ckpt_dir).as_posix(), ckpt_dir
+    assert Path(tr["checkpoint_dir"]).name.endswith("_" + str(cfg["outputs"]["run_tag"])), ckpt_dir
 
     model = build_kg_gt_from_config(
         cfg, input_dim=eeg_dim, kin_dim=kin_dim, edge_prior=edge_prior,
@@ -183,6 +223,9 @@ def train_single_stage(cfg, subj, eeg_dim, kin_dim, edge_prior,
           f"| lr {tc.lr:.1e} (encoder x{tc.transformer_lr_scale}) | max {tc.max_epochs} ep "
           f"| early-stop patience {tc.early_stop_patience}")
     print(f"  Checkpoints          : {ckpt_dir}")
+    print(f"  Phase B              : EEG input dim {eeg_dim} | electrode dropout {model.eeg_channel_dropout} "
+          f"(x{model.eeg_groups} columns) | kin_dropout {model.kin_dropout} "
+          f"| w_eeg_only {getattr(loss_fn, 'w_eeg_only', 0.0)} | weight_decay {tc.weight_decay}")
 
     result = train_model(
         model=model,
@@ -216,8 +259,13 @@ TRAINING_CELL = '''\
 # decoder + kin skip highway) is trained ONCE, from scratch, with every
 # parameter trainable (see train_single_stage in the helper cell).
 #
-# Checkpoints are saved to:
-#   outputs/checkpoints_1stage/{subject}/   (last.pt + best.pt, resumable)
+# Checkpoints are saved to (training.checkpoint_dir ends in the run tag):
+#   <checkpoint_dir>/{subject}/   (last.pt + best.pt, resumable)   e.g. outputs/checkpoints_1stage_p2b/P1/
+#
+# Phase B: the model trains with electrode dropout, kinematic-pathway dropout and the
+# EEG-only auxiliary loss (model.eeg_channel_dropout, model.kin_dropout,
+# training.loss.w_eeg_only). The training loss contains the EEG-only term, the
+# validation loss does not (main loss only), so the two are not on the same scale.
 #
 # After the loop, the LAST subject's variables are exported to global scope
 # so all downstream single-subject cells (evaluation, interpretability) work
@@ -285,6 +333,8 @@ for _fold_idx, (_subj, _sd) in enumerate(subject_data.items()):
         prepare_batch=_prepare_batch,
         emg_mean=_emg_mean, emg_std=_emg_std,
         kin_mean=_kin_mean, kin_std=_kin_std,
+        eeg_mean=_sd["eeg_mean"], eeg_std=_sd["eeg_std"],                    # EEG feature stats (inside prepare_batch)
+        eeg_groups=_sd["eeg_groups"], eeg_band_groups=_sd["eeg_band_groups"],  # electrode / band columns for the EEG occlusion
         result_stage1=_r, result_stage2=_r, result_single=_r,
         cfg=_cfg,
         edge_prior=_edge_prior,
@@ -355,7 +405,7 @@ LOSO_HIST = '''\
 
         plt.suptitle(f"Single-stage Training History — {_subj}", fontweight="bold")
         plt.tight_layout()
-        plt.savefig(f"outputs/figures/history_1stage_{_subj}.png", dpi=300)
+        plt.savefig(f"{_fig_dir}/history_1stage_{_subj}.png", dpi=300)
         plt.close(fig_hist)
 
 '''
@@ -375,10 +425,6 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
     # 2. CONFIG
     i = edit_cell(nb, "CONFIG = {", [
-        (
-            '    # move aside outputs/checkpoints_main_stage1/2 and outputs/checkpoints_1stage\n',
-            '    # move aside outputs/checkpoints_1stage (this notebook; main.ipynb uses its own two-stage folders)\n',
-        ),
         (
             '    # * stage 1: early stop after 10 epochs without val improvement (stage1_early_stop_patience)\n',
             '    # * stage 1: early stop after 10 epochs without val improvement (stage1_early_stop_patience)\n'
@@ -403,11 +449,15 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
             '        "stage1_epochs":       75,  # two-stage only (unused here)\n',
         ),
         (
-            '        "checkpoint_every":     1,\n',
+            '        "checkpoint_every":     1,\n'
+            '        # Checkpoints of THIS run (must end in the run tag, checked below the dict):\n'
+            '        # stage 1 → <checkpoint_dir>_stage1/{subject}/, stage 2 → <checkpoint_dir>_stage2/{subject}/\n'
+            '        "checkpoint_dir": "outputs/checkpoints_main_p2b",\n',
             '        "checkpoint_every":     1,\n'
             '        # ── single-stage (this notebook) ──────────────────────────────────\n'
-            '        # Checkpoints -> outputs/checkpoints_1stage/{subject}/ — never the two-stage folders.\n'
-            '        "checkpoint_dir": "outputs/checkpoints_1stage",\n'
+            '        # Checkpoints of THIS run -> <checkpoint_dir>/{subject}/ — never the two-stage folders;\n'
+            '        # must end in the run tag (checked below the dict).\n'
+            '        "checkpoint_dir": "outputs/checkpoints_1stage_p2b",\n'
             '        # The full KG-GT model is trained ONCE, jointly, nothing frozen.\n'
             '        # Only lr / epochs / patience live here; everything else is the shared key above:\n'
             '        #   optimizer="adamw", scheduler="cosine" (eta_min 1e-6), warmup_epochs=5,\n'
@@ -444,9 +494,11 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
     # 5. evaluation: single-stage checkpoints + separate report
     i_eval = edit_cell(nb, "# EVALUATION — Full metric suite", [
-        ('REPORT_PATH = "results/evaluation_report.md"',
-         'REPORT_PATH = "results/evaluation_report_1stage.md"   # main.ipynb writes evaluation_report.md'),
-        ('    _ckpt = f"outputs/checkpoints_main_stage2/{_subj}/best.pt"',
+        ('REPORT_PATH = f"{RESULTS_DIR}/evaluation_report.md"',
+         'REPORT_PATH = f"{RESULTS_DIR}/evaluation_report_1stage.md"   # main.ipynb writes evaluation_report.md'),
+        ('saves {RESULTS_DIR}/evaluation_report.md  (results/<run tag>/…)',
+         'saves {RESULTS_DIR}/evaluation_report_1stage.md  (results/<run tag>/…)'),
+        ('    _ckpt = _cfg["training"]["checkpoint_dir"] + f"_stage2/{_subj}/best.pt"',
          '    _ckpt = os.path.join(_cfg["training"]["checkpoint_dir"], _subj, "best.pt")   # single-stage'),
         ('_md  = f"# EMG Decoding Evaluation Report\\n\\n"',
          '_md  = f"# EMG Decoding Evaluation Report (single-stage KG-GT)\\n\\n"'),
@@ -455,18 +507,18 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
     # 6. magnitude evaluation (cell copied from main.ipynb): separate output files
     i_mag = edit_cell(nb, "MAGNITUDE EVALUATION", [
-        ('MAGNITUDE_CSV = "results/magnitude_report.csv"',
-         'MAGNITUDE_CSV = "results/magnitude_report_1stage.csv"   # main.ipynb writes magnitude_report.csv'),
-        ('MAGNITUDE_PNG = "results/magnitude_report.png"',
-         'MAGNITUDE_PNG = "results/magnitude_report_1stage.png"'),
-        ('# S = surface varies, B = both vary). Saves results/magnitude_report.csv / .png',
-         '# S = surface varies, B = both vary). Saves results/magnitude_report_1stage.csv / .png'),
-        ('MAGNITUDE_LOAD_CSV = "results/magnitude_by_load.csv"',
-         'MAGNITUDE_LOAD_CSV = "results/magnitude_by_load_1stage.csv"   # main.ipynb writes magnitude_by_load.csv'),
-        ('MAGNITUDE_LOAD_PNG = "results/magnitude_by_load.png"',
-         'MAGNITUDE_LOAD_PNG = "results/magnitude_by_load_1stage.png"'),
-        ('# Saves results/magnitude_by_load.csv / .png (height ratio per muscle per weight).',
-         '# Saves results/magnitude_by_load_1stage.csv / .png (height ratio per muscle per weight).'),
+        ('MAGNITUDE_CSV = f"{RESULTS_DIR}/magnitude_report.csv"',
+         'MAGNITUDE_CSV = f"{RESULTS_DIR}/magnitude_report_1stage.csv"   # main.ipynb writes magnitude_report.csv'),
+        ('MAGNITUDE_PNG = f"{RESULTS_DIR}/magnitude_report.png"',
+         'MAGNITUDE_PNG = f"{RESULTS_DIR}/magnitude_report_1stage.png"'),
+        ('# S = surface varies, B = both vary). Saves {RESULTS_DIR}/magnitude_report.csv / .png',
+         '# S = surface varies, B = both vary). Saves {RESULTS_DIR}/magnitude_report_1stage.csv / .png'),
+        ('MAGNITUDE_LOAD_CSV = f"{RESULTS_DIR}/magnitude_by_load.csv"',
+         'MAGNITUDE_LOAD_CSV = f"{RESULTS_DIR}/magnitude_by_load_1stage.csv"   # main.ipynb writes magnitude_by_load.csv'),
+        ('MAGNITUDE_LOAD_PNG = f"{RESULTS_DIR}/magnitude_by_load.png"',
+         'MAGNITUDE_LOAD_PNG = f"{RESULTS_DIR}/magnitude_by_load_1stage.png"'),
+        ('# Saves {RESULTS_DIR}/magnitude_by_load.csv / .png (height ratio per muscle per weight).',
+         '# Saves {RESULTS_DIR}/magnitude_by_load_1stage.csv / .png (height ratio per muscle per weight).'),
     ])
     if i_mag != i_eval + 1:
         raise AssertionError(f"magnitude cell expected right after evaluation, got {i_mag} vs {i_eval}")
@@ -474,10 +526,10 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
     # 7. EEG-vs-kinematics ablation cell (inherited from main.ipynb): separate output files
     i_abl = edit_cell(nb, "HOW MUCH DOES THE MODEL USE EEG vs KINEMATICS?", [
-        ('ABLATION_PNG    = "results/input_ablation.png"',
-         'ABLATION_PNG    = "results/input_ablation_1stage.png"   # main.ipynb writes input_ablation.png'),
-        ('ABLATION_CSV    = "results/input_ablation.csv"',
-         'ABLATION_CSV    = "results/input_ablation_1stage.csv"'),
+        ('ABLATION_PNG    = f"{RESULTS_DIR}/input_ablation.png"',
+         'ABLATION_PNG    = f"{RESULTS_DIR}/input_ablation_1stage.png"   # main.ipynb writes input_ablation.png'),
+        ('ABLATION_CSV    = f"{RESULTS_DIR}/input_ablation.csv"',
+         'ABLATION_CSV    = f"{RESULTS_DIR}/input_ablation_1stage.csv"'),
         ('"EEG vs kinematics: input ablation (two-stage KG-GT)"',
          '"EEG vs kinematics: input ablation (single-stage KG-GT)"'),
     ])
@@ -487,23 +539,23 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
     # 8. interpretability: separate output folder
     i = edit_cell(nb, "INTERPRETABILITY — Full-Signal Triptych", [
-        ('    _save_dir = os.path.join("outputs", "interpretability", _subj)',
-         '    _save_dir = os.path.join("outputs", "interpretability_1stage", _subj)'),
-        ('print(f"   Plots saved under: outputs/interpretability/")',
-         'print(f"   Plots saved under: outputs/interpretability_1stage/")'),
-        ('#   • Saves to: outputs/interpretability/{subject}/',
-         '#   • Saves to: outputs/interpretability_1stage/{subject}/'),
+        ('    _save_dir = os.path.join(tagged_output("interpretability"), _subj)',
+         '    _save_dir = os.path.join(tagged_output("interpretability_1stage"), _subj)'),
+        ("""print(f"   Plots saved under: {tagged_output('interpretability')}/")""",
+         """print(f"   Plots saved under: {tagged_output('interpretability_1stage')}/")"""),
+        ('#   • Saves to: outputs/interpretability_<run tag>/{subject}/',
+         '#   • Saves to: outputs/interpretability_1stage_<run tag>/{subject}/'),
     ])
     log["interpretability"] = f"cell {i} edited"
 
     # 8b. event-locked interpretability (cell inherited from main.ipynb): separate output folder
     i_ev = edit_cell(nb, "Event-locked interpretability (all test lifts)", [
-        ('    _save_dir = os.path.join("outputs", "interpretability_event", _subj)',
-         '    _save_dir = os.path.join("outputs", "interpretability_1stage_event", _subj)'),
-        ('print(f"   Plots saved under: outputs/interpretability_event/")',
-         'print(f"   Plots saved under: outputs/interpretability_1stage_event/")'),
-        ('#   • Saves to: outputs/interpretability_event/{subject}/',
-         '#   • Saves to: outputs/interpretability_1stage_event/{subject}/'),
+        ('    _save_dir = os.path.join(tagged_output("interpretability_event"), _subj)',
+         '    _save_dir = os.path.join(tagged_output("interpretability_1stage_event"), _subj)'),
+        ("""print(f"   Plots saved under: {tagged_output('interpretability_event')}/")""",
+         """print(f"   Plots saved under: {tagged_output('interpretability_1stage_event')}/")"""),
+        ('#   • Saves to: outputs/interpretability_event_<run tag>/{subject}/',
+         '#   • Saves to: outputs/interpretability_1stage_event_<run tag>/{subject}/'),
     ])
     if i_ev != i + 1:
         raise AssertionError(f"event-locked cell expected right after the interpretability cell, got {i_ev} vs {i}")
@@ -513,12 +565,15 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     i = find_cell(nb, "[OPTIONAL] Automatic LOSOCV")
     text = src(nb["cells"][i])
     text = replace_once(text,
-        "# Checkpoints saved to: outputs/checkpoints_main_stage1|2/LOSO_P{N}/",
+        "# Checkpoints saved to: <training.checkpoint_dir>_stage1|2/LOSO_P{N}/   (tagged, see CONFIG)",
         "# Training: single stage (train_single_stage) — full KG-GT trained jointly per fold.\n"
-        "# Checkpoints saved to: outputs/checkpoints_1stage/LOSO_P{N}/")
+        "# Checkpoints saved to: <training.checkpoint_dir>/LOSO_P{N}/   (tagged, see CONFIG)")
     text = replace_once(text,
-        "# Summary CSV saved to: outputs/losocv_results.csv",
-        "# Summary CSV saved to: outputs/losocv_results_1stage.csv")
+        "# Summary CSV saved to: outputs/losocv_results_<run tag>.csv",
+        "# Summary CSV saved to: outputs/losocv_results_1stage_<run tag>.csv")
+    text = replace_once(text,
+        '    _cv_csv  = tagged_output("losocv_results") + ".csv"    # outputs/losocv_results_<run tag>.csv',
+        '    _cv_csv  = tagged_output("losocv_results_1stage") + ".csv"    # outputs/losocv_results_1stage_<run tag>.csv')
     text = replace_once(text,
         "    build_transformer_only_from_config, build_kg_gt_from_config,\n",
         "    build_kg_gt_from_config,\n")
@@ -531,11 +586,11 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
         "        # 2. Interpretability Triptych",
         LOSO_HIST)
     text = replace_once(text,
-        'plt.savefig(f"outputs/figures/interpretability_{_subj}.png", dpi=300)',
-        'plt.savefig(f"outputs/figures/interpretability_1stage_{_subj}.png", dpi=300)')
+        'plt.savefig(f"{_fig_dir}/interpretability_{_subj}.png", dpi=300)',
+        'plt.savefig(f"{_fig_dir}/interpretability_1stage_{_subj}.png", dpi=300)')
     text = replace_once(text,
-        'plt.savefig(f"outputs/figures/kin_skip_{_subj}.png", dpi=300)',
-        'plt.savefig(f"outputs/figures/kin_skip_1stage_{_subj}.png", dpi=300)')
+        'plt.savefig(f"{_fig_dir}/kin_skip_{_subj}.png", dpi=300)',
+        'plt.savefig(f"{_fig_dir}/kin_skip_1stage_{_subj}.png", dpi=300)')
     text = replace_once(text,
         "            stage1_model = _s1\n            model = _s2\n",
         "            stage1_model = None\n            model = _model\n")
@@ -545,11 +600,6 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     text = replace_once(text,
         "            del _s1, _s2, _bm, _train_ds, _val_ds, _test_ds\n",
         "            del _model, _bm, _train_ds, _val_ds, _test_ds\n")
-    text = replace_once(text,
-        '    cv_df.to_csv("outputs/losocv_results.csv", index=False)\n'
-        '    print("Full results exported to: outputs/losocv_results.csv")',
-        '    cv_df.to_csv("outputs/losocv_results_1stage.csv", index=False)\n'
-        '    print("Full results exported to: outputs/losocv_results_1stage.csv")')
     set_src(nb["cells"][i], text)
     log["losocv"] = f"cell {i} edited"
 

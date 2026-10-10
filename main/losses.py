@@ -389,6 +389,7 @@ class CompositeEMGLoss(nn.Module):
                 + w_rest_over * L_rest_over (one-sided squared over-prediction at rest)
                 + w_height  * L_height (active-level relative error, Step 1)
                 + w_reg     * L_reg  (EdgePrior KL)
+                + w_eeg_only * L_main(pred_eeg_only)   (Phase B, training only)
 
     Package 1 options (all off by default → identical to the previous loss):
         w_rest_over:     weight of mean(rest_mask · w_c · relu(pred − target)²), with
@@ -411,6 +412,18 @@ class CompositeEMGLoss(nn.Module):
                     Keeps windows whose active part is barely above the minimum
                     (noise-only rest windows, ~0.05 z) from turning tiny absolute
                     errors into huge relative ones. Default 0.5.
+
+    Phase B option (off by default):
+        w_eeg_only: weight of the EEG-only auxiliary loss. In TRAINING (``model`` given
+                    and in train mode) the EEG-only prediction of the same batch — the
+                    model output with both kinematic pathways off, cached by
+                    ``KGGTModel(eeg_only_aux=True)`` during its forward pass — gets the
+                    same prediction terms as the main output (everything above except
+                    the KL regulariser) and ``w_eeg_only`` x that sum is added. It is
+                    logged unweighted as ``last_components["eeg_only"]``. Nothing is
+                    added in eval / without a model (validation loss = main terms only)
+                    or for a model without kinematic pathways (its output already is
+                    EEG-only).
     """
 
     def __init__(
@@ -430,6 +443,7 @@ class CompositeEMGLoss(nn.Module):
         channel_weights=None,
         w_height: float = 0.0,
         height_eps: float = 0.5,
+        w_eeg_only: float = 0.0,
         # Backward compatibility arguments:
         lambda_reg: float | None = None,
         lambda_l1: float | None = None,
@@ -453,6 +467,9 @@ class CompositeEMGLoss(nn.Module):
         self.w_reg = float(w_reg)
         self.w_rest_over = float(w_rest_over)
         self.w_height = float(w_height)
+        if w_eeg_only < 0:
+            raise ValueError(f"w_eeg_only must be >= 0, got {w_eeg_only}")
+        self.w_eeg_only = float(w_eeg_only)
         if height_eps <= 0:
             raise ValueError(f"height_eps must be > 0, got {height_eps}")
         self.height_eps = float(height_eps)
@@ -471,13 +488,11 @@ class CompositeEMGLoss(nn.Module):
 
         self.last_components: dict[str, float] = {}
 
-    def forward(
-        self,
-        pred: Tensor,
-        target: Tensor,
-        model: nn.Module | None = None,
-        return_components: bool = False,
-    ) -> Tensor | tuple[Tensor, dict[str, float]]:
+    def _prediction_terms(self, pred: Tensor, target: Tensor) -> tuple[Tensor, dict[str, Tensor]]:
+        """All terms that compare a prediction with the target (no KL regulariser).
+
+        Returns (weighted sum as a (1,) tensor, {name: unweighted term}).
+        """
         loss_components: dict[str, Tensor] = {}
         total_loss = torch.zeros(1, device=pred.device, dtype=pred.dtype)
 
@@ -543,6 +558,44 @@ class CompositeEMGLoss(nn.Module):
         else:
             loss_components["height"] = torch.tensor(0.0, device=pred.device)
 
+        return total_loss, loss_components
+
+    def _eeg_only_prediction(self, model: nn.Module | None, pred: Tensor) -> Tensor | None:
+        """EEG-only prediction of the current training batch, or None when the term is off.
+
+        Off: no model (validation), model in eval mode, or a model without kinematic
+        pathways (no ``pop_eeg_only_output`` / no kinematic guidance: its output already
+        is EEG-only). A guided model in training that has nothing cached is an error.
+        """
+        if model is None or not getattr(model, "training", False):
+            return None
+        pop = getattr(model, "pop_eeg_only_output", None)
+        if pop is None or not getattr(model, "use_kinematic_guidance", False):
+            return None
+        eeg_only = pop()
+        if eeg_only is None:
+            raise RuntimeError(
+                "CompositeEMGLoss(w_eeg_only > 0) needs the model's EEG-only output of this "
+                "batch: build the model with eeg_only_aux=True (build_kg_gt_from_config does it "
+                "when training.loss.w_eeg_only > 0) and call the loss right after the forward pass."
+            )
+        if eeg_only.shape != pred.shape:
+            raise RuntimeError(
+                f"cached EEG-only output {tuple(eeg_only.shape)} does not belong to this batch "
+                f"(prediction {tuple(pred.shape)})"
+            )
+        return eeg_only
+
+    def forward(
+        self,
+        pred: Tensor,
+        target: Tensor,
+        model: nn.Module | None = None,
+        return_components: bool = False,
+    ) -> Tensor | tuple[Tensor, dict[str, float]]:
+        # 1-5c. Prediction terms of the main output
+        total_loss, loss_components = self._prediction_terms(pred, target)
+
         # 6. GAT EdgePrior KL Divergence Regularization
         if model is not None and self.w_reg > 0:
             l_reg = self.reg(model)
@@ -550,6 +603,16 @@ class CompositeEMGLoss(nn.Module):
             total_loss = total_loss + self.w_reg * l_reg
         else:
             loss_components["kl_reg"] = torch.tensor(0.0, device=pred.device)
+
+        # 7. EEG-only auxiliary loss (training only): the same prediction terms for the
+        #    model output with both kinematic pathways off.
+        loss_components["eeg_only"] = torch.tensor(0.0, device=pred.device)
+        if self.w_eeg_only > 0:
+            eeg_only = self._eeg_only_prediction(model, pred)
+            if eeg_only is not None:
+                l_eeg_only, _ = self._prediction_terms(eeg_only, target)
+                loss_components["eeg_only"] = l_eeg_only.squeeze()
+                total_loss = total_loss + self.w_eeg_only * l_eeg_only
 
         total_loss = total_loss.squeeze()
 
@@ -564,6 +627,7 @@ class CompositeEMGLoss(nn.Module):
             "rest_over": loss_components["rest_over"].item(),
             "height": loss_components["height"].item(),
             "kl_reg": loss_components["kl_reg"].item(),
+            "eeg_only": loss_components["eeg_only"].item(),
         }
 
         if return_components:
@@ -623,6 +687,7 @@ def build_loss_from_config(cfg: dict, channel_weights=None) -> CompositeEMGLoss:
         huber_delta:     float | None  Robust PeakMSE error (z units). Default None.
         w_height:        float  Active-level relative error (Step 1). Default 0.0.
         height_eps:      float  Denominator floor of L_height (target units). Default 0.5.
+        w_eeg_only:      float  EEG-only auxiliary loss (Phase B, training only). Default 0.0.
         channel_weights: None | "auto" | list  Per-muscle weights. Default None.
                          "auto" needs the `channel_weights` argument (computed from
                          the training targets, see channel_weights_from_config).
@@ -657,6 +722,7 @@ def build_loss_from_config(cfg: dict, channel_weights=None) -> CompositeEMGLoss:
         channel_weights=channel_weights,
         w_height=loss_cfg.get("w_height", 0.0),
         height_eps=loss_cfg.get("height_eps", 0.5),
+        w_eeg_only=loss_cfg.get("w_eeg_only", 0.0),
     )
 
 

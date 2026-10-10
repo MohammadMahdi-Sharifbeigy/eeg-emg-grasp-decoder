@@ -7,6 +7,10 @@ perturbing the *normalised* model inputs:
 
     full         unchanged inputs
     kin_zero     kinematics set to 0 in z-space (= the per-feature training mean)
+    kin_off      EEG only: the model is called with ``use_kin=False`` (both kinematic
+                 pathways off: no kinematic edge bias, no kin skip).  Not the same as
+                 kin_zero — zero inputs still pass through the skip MLP and the edge-bias
+                 layer.  Only for models whose forward accepts ``use_kin``.
     kin_shuffle  kinematics time-shuffled within each window (fixed seeded permutation)
     eeg_shuffle  EEG time-shuffled within each window (fixed seeded permutation)
 
@@ -17,6 +21,7 @@ level during rest (target below a per-muscle threshold) for each condition.
 
 from __future__ import annotations
 
+import inspect
 from dataclasses import dataclass, field
 from typing import Sequence
 
@@ -27,11 +32,15 @@ from torch.utils.data import DataLoader
 
 from .training import PrepareBatch, _forward_model
 
+# input perturbations every model supports
 ABLATION_CONDITIONS: tuple[str, ...] = ("full", "kin_zero", "kin_shuffle", "eeg_shuffle")
+# ... plus kin_off for models with a ``use_kin`` switch (KGGTModel)
+ALL_ABLATION_CONDITIONS: tuple[str, ...] = ("full", "kin_zero", "kin_off", "kin_shuffle", "eeg_shuffle")
 
 ABLATION_LABELS: dict[str, str] = {
     "full": "Full model",
     "kin_zero": "Kin zeroed",
+    "kin_off": "EEG only (kinematic paths off)",
     "kin_shuffle": "Kin time-shuffled",
     "eeg_shuffle": "EEG time-shuffled",
 }
@@ -39,6 +48,7 @@ ABLATION_LABELS: dict[str, str] = {
 ABLATION_COLORS: dict[str, str] = {
     "full": "#2a78d6",
     "kin_zero": "#eb6834",
+    "kin_off": "#2e9e6b",
     "kin_shuffle": "#9e9e9e",
     "eeg_shuffle": "#4a4a4a",
 }
@@ -57,16 +67,31 @@ def shuffle_time(x: torch.Tensor, seed: int) -> torch.Tensor:
 
 def apply_condition(inputs: dict, condition: str, seed: int = 0) -> dict:
     """Return a copy of the normalised model-input dict perturbed for ``condition``."""
-    if condition not in ABLATION_CONDITIONS:
-        raise ValueError(f"Unknown ablation condition {condition!r}; choose from {ABLATION_CONDITIONS}")
+    if condition not in ALL_ABLATION_CONDITIONS:
+        raise ValueError(f"Unknown ablation condition {condition!r}; choose from {ALL_ABLATION_CONDITIONS}")
     out = dict(inputs)
     if condition == "kin_zero":
         out["kin"] = torch.zeros_like(inputs["kin"])
+    elif condition == "kin_off":
+        out["use_kin"] = False          # forwarded to the model: model(eeg=…, kin=…, use_kin=False)
     elif condition == "kin_shuffle":
         out["kin"] = shuffle_time(inputs["kin"], seed)
     elif condition == "eeg_shuffle":
         out["eeg"] = shuffle_time(inputs["eeg"], seed)
     return out
+
+
+def supports_use_kin(model: nn.Module) -> bool:
+    """True if ``model.forward`` takes a ``use_kin`` argument (EEG-only inference switch)."""
+    try:
+        return "use_kin" in inspect.signature(model.forward).parameters
+    except (TypeError, ValueError):
+        return False
+
+
+def default_conditions(model: nn.Module) -> tuple[str, ...]:
+    """All conditions the model supports: with ``kin_off`` only if it has ``use_kin``."""
+    return ALL_ABLATION_CONDITIONS if supports_use_kin(model) else ABLATION_CONDITIONS
 
 
 def pearson_per_channel(pred: np.ndarray, target: np.ndarray) -> np.ndarray:
@@ -128,7 +153,7 @@ def input_ablation(
     loader: DataLoader,
     prepare_batch: PrepareBatch,
     device: torch.device,
-    conditions: Sequence[str] = ABLATION_CONDITIONS,
+    conditions: Sequence[str] | None = None,
     seed: int = 0,
     use_amp: bool = True,
     rest_threshold: np.ndarray | None = None,
@@ -139,11 +164,20 @@ def input_ablation(
     the perturbation is applied to the normalised inputs afterwards.
     If ``rest_threshold`` (per-muscle, normalised units) is given, the mean
     prediction over samples whose target is below it is reported per condition.
+
+    ``conditions`` = None (default): ``default_conditions(model)`` — the four input
+    perturbations, plus ``kin_off`` (model called with ``use_kin=False``) when the
+    model's forward has that switch.
     """
     model.eval()
     amp_device = "cuda" if device.type == "cuda" else "cpu"
     amp = use_amp and device.type == "cuda"
-    conditions = tuple(conditions)
+    conditions = default_conditions(model) if conditions is None else tuple(conditions)
+    if "kin_off" in conditions and not supports_use_kin(model):
+        raise TypeError(
+            f"condition 'kin_off' needs a model whose forward accepts use_kin "
+            f"({type(model).__name__}.forward does not)"
+        )
 
     preds: dict[str, list[np.ndarray]] = {c: [] for c in conditions}
     targets: list[np.ndarray] = []

@@ -71,6 +71,45 @@ def _log_sdpa_backend_once(device_type: str) -> None:
 
 
 # ============================================================================
+# Electrode dropout (training-time regulariser of the EEG input)
+# ============================================================================
+
+def electrode_dropout(x: Tensor, p: float, groups: int = 1, training: bool = True) -> Tensor:
+    """Drop whole EEG electrodes: all their feature columns, for the whole window.
+
+    The EEG input is laid out band-major (``main.eeg_features``): with ``groups`` bands
+    and E = F // groups electrodes, column ``b * E + e`` is band ``b`` of electrode ``e``
+    (``groups=1``: raw EEG, one column per electrode).  For every sample each electrode
+    is dropped with probability ``p``; a dropped electrode is 0 in all its ``groups``
+    columns at every time step, the kept ones are scaled by 1 / (1 - p) (inverted
+    dropout, so the expected input is unchanged and nothing is rescaled at eval time).
+
+    Args:
+        x: (B, T, F) model input.   p: drop probability in [0, 1).
+        training: False -> ``x`` is returned untouched (as for ``p == 0``).
+    """
+    if not training or p <= 0.0:
+        return x
+    if not 0.0 <= p < 1.0:
+        raise ValueError(f"eeg_channel_dropout must be in [0, 1), got {p}")
+    groups = int(groups)
+    B, _, F_in = x.shape
+    if groups < 1 or F_in % groups != 0:
+        raise ValueError(f"EEG input has {F_in} features, not a multiple of eeg_groups={groups}")
+    keep = (torch.rand(B, 1, F_in // groups, device=x.device) >= p).to(x.dtype) / (1.0 - p)
+    return x * keep.repeat(1, 1, groups)
+
+
+def _check_eeg_dropout(p: float, groups: int, input_dim: int) -> tuple[float, int]:
+    p, groups = float(p), int(groups)
+    if not 0.0 <= p < 1.0:
+        raise ValueError(f"eeg_channel_dropout must be in [0, 1), got {p}")
+    if groups < 1 or (p > 0.0 and input_dim % groups != 0):
+        raise ValueError(f"input_dim={input_dim} is not a multiple of eeg_groups={groups}")
+    return p, groups
+
+
+# ============================================================================
 # Positional encoding
 # ============================================================================
 
@@ -624,13 +663,23 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         # Deviations from this pattern are scientifically interesting findings.
         self.kin_edge_linear = nn.Linear(kin_dim, num_heads * n_nodes * n_nodes, bias=True)
 
-    def forward(self, nodes: torch.Tensor, kin: torch.Tensor) -> torch.Tensor:
+    def forward(
+        self,
+        nodes: torch.Tensor,
+        kin: torch.Tensor | None = None,
+        kin_keep: torch.Tensor | None = None,
+    ) -> torch.Tensor:
         """
         Forward pass of the Kinematic-Guided Muscle GAT.
 
         Args:
             nodes: (B, T, N, node_dim) — muscle node embeddings from MuscleNodeProjection.
             kin:   (B, T, kin_dim)     — kinematic state vectors (13-dim k_t or 26-dim with vel).
+                   None switches the kinematic edge bias OFF (Score Component 3 = 0; the
+                   static edge bias stays): the EEG-only graph path.
+            kin_keep: optional (B,) tensor of 0 / 1 — per-sample switch of the kinematic
+                   edge bias (0 = off for the whole window), used by the kinematic-pathway
+                   dropout of KGGTModel. None = on for every sample.
 
         Returns:
             (B, T, N, out_dim) — graph-attended muscle node features.
@@ -654,7 +703,6 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         # Pre-LN: apply norm before attention
         normed_nodes = self.norm(nodes)
         flat_nodes = normed_nodes.reshape(batch_size * steps, n_nodes, -1)  # (B*T, N, node_dim)
-        flat_kin   = kin.reshape(batch_size * steps, -1)              # (B*T, kin_dim)
 
         # Q, K, and V from nodes
         q = (
@@ -685,9 +733,19 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
         # ── Score Component 3: dynamic kinematic modulation ────────────────
         # Transparent single linear layer: kin_dim → H*N² (no hidden layer).
         # W[h*N*N + i*N + j, k] = contribution of kinematic feature k to edge i→j in head h.
-        kin_bias = self.kin_edge_linear(flat_kin)                              # (B*T, H*N*N)
-        kin_bias = kin_bias.view(batch_size * steps, self.num_heads, n_nodes, n_nodes)
-        scores   = scores + kin_bias                                            # (B*T, H, N, N)
+        # kin=None: the whole kinematic term (weights AND bias of kin_edge_linear) is off.
+        if kin is not None:
+            flat_kin = kin.reshape(batch_size * steps, -1)                     # (B*T, kin_dim)
+            kin_bias = self.kin_edge_linear(flat_kin)                          # (B*T, H*N*N)
+            kin_bias = kin_bias.view(batch_size * steps, self.num_heads, n_nodes, n_nodes)
+            if kin_keep is not None:
+                keep = kin_keep.to(kin_bias.dtype).view(batch_size, 1, 1, 1, 1)
+                kin_bias = (
+                    kin_bias.view(batch_size, steps, self.num_heads, n_nodes, n_nodes) * keep
+                ).view(batch_size * steps, self.num_heads, n_nodes, n_nodes)
+            scores = scores + kin_bias                                          # (B*T, H, N, N)
+        else:
+            kin_bias = None
 
         attn = torch.softmax(scores, dim=-1)
         attn = self.dropout(attn)
@@ -701,9 +759,15 @@ class KinematicGuidedMuscleGATEncoder(nn.Module):
             # Reshape kin_bias to (B, T, H, N, N) for time-resolved visualization.
             # Plot self.last_kin_edge_bias[:, :, :, i, j] to see how the i→j
             # muscle edge evolves over the inference window.
-            self.last_kin_edge_bias = kin_bias.view(
-                batch_size, steps, self.num_heads, n_nodes, n_nodes
-            ).detach()
+            if kin_bias is None:
+                self.last_kin_edge_bias = torch.zeros(
+                    batch_size, steps, self.num_heads, n_nodes, n_nodes,
+                    device=scores.device, dtype=scores.dtype,
+                )
+            else:
+                self.last_kin_edge_bias = kin_bias.view(
+                    batch_size, steps, self.num_heads, n_nodes, n_nodes
+                ).detach()
             # Static bias: same (H, N, N) tensor every call — just a reference.
             self.last_static_edge_bias = self.edge_bias.detach()
 
@@ -779,8 +843,13 @@ class TransformerOnlyModel(nn.Module):
         input_dim: int,
         node_dim: int = 64,
         out_channels: int = 5,
+        eeg_channel_dropout: float = 0.0,
+        eeg_groups: int = 1,
     ) -> None:
         super().__init__()
+        # training-only electrode dropout (see electrode_dropout); 0 = off
+        self.eeg_channel_dropout, self.eeg_groups = _check_eeg_dropout(
+            eeg_channel_dropout, eeg_groups, input_dim)
         self.encoder = build_transformer_from_config(transformer_cfg, input_dim)
         self.node_projection = MuscleNodeProjection(
             input_dim=self.encoder.d_model,
@@ -789,8 +858,10 @@ class TransformerOnlyModel(nn.Module):
         )
         self.decoder = PerMuscleDecoder(node_dim, out_channels)
         
-    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
-        # kin is ignored, just matching the function signature
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None,
+                use_kin: bool = True) -> torch.Tensor:
+        # kin / use_kin are ignored (no kinematic pathway), just matching the function signature
+        eeg = electrode_dropout(eeg, self.eeg_channel_dropout, self.eeg_groups, self.training)
         temporal = self.encoder(eeg)
         nodes    = self.node_projection(temporal)
         return self.decoder(nodes).squeeze(-1)
@@ -808,6 +879,25 @@ class KGGTModel(nn.Module):
                     the learnable edge-bias in MuscleGATLayer /
                     KinematicGuidedMuscleGATEncoder. Compute via
                     compute_muscle_edge_prior() in preprocessing_emg_kin.py.
+        kin_dropout: Kinematic-pathway dropout (training only, default 0 = off). For
+                    every sample, with this probability BOTH kinematic pathways are
+                    switched off for the whole window: the kinematic term of the GAT
+                    edge bias (the static edge bias stays) and the kin skip highway.
+                    The sample's output is then the EEG-only output
+                    (``forward(..., use_kin=False)``). No rescaling: it is a switch,
+                    not an activation dropout; eval always uses both pathways.
+        eeg_channel_dropout / eeg_groups: training-only electrode dropout of the EEG
+                    input (see ``electrode_dropout``); ``eeg_groups`` = feature columns
+                    per electrode (number of bands; 1 for raw EEG). Default 0 = off.
+        eeg_only_aux: when True, every TRAINING forward pass also computes the
+                    EEG-only output of the same batch (shared encoder and node
+                    projection; one extra GAT + decoder pass) and keeps it in
+                    ``last_eeg_only_output`` for ``CompositeEMGLoss(w_eeg_only > 0)``,
+                    which takes it with ``pop_eeg_only_output()``. Off in eval.
+
+    ``forward(eeg, kin, use_kin=False)`` is the EEG-only inference path: no kinematic
+    edge bias and no kin skip (``kin`` may be None). This is NOT the same as feeding
+    zero kinematics, which still pass through the skip MLP and the edge-bias layer.
     """
 
     def __init__(
@@ -825,10 +915,22 @@ class KGGTModel(nn.Module):
         edge_prior: Tensor | None = None,
         gat_kin_dim_override: int | None = None,
         kin_skip_indices: "list[int] | None" = None,
+        kin_dropout: float = 0.0,
+        eeg_channel_dropout: float = 0.0,
+        eeg_groups: int = 1,
+        eeg_only_aux: bool = False,
     ) -> None:
         super().__init__()
         self.use_kinematic_guidance = use_kinematic_guidance
         self.out_channels = out_channels
+        if not 0.0 <= float(kin_dropout) <= 1.0:
+            raise ValueError(f"kin_dropout must be in [0, 1], got {kin_dropout}")
+        self.kin_dropout = float(kin_dropout)
+        self.eeg_channel_dropout, self.eeg_groups = _check_eeg_dropout(
+            eeg_channel_dropout, eeg_groups, input_dim)
+        self.eeg_only_aux = bool(eeg_only_aux)
+        # EEG-only output of the last TRAINING batch (with graph), see eeg_only_aux
+        self.last_eeg_only_output: Tensor | None = None
         # None (default) = the skip highway gets the features after the GAT block.
         self.skip_kin_indices: tuple[int, ...] | None = None
         self._skip_slice: slice | None = None
@@ -948,24 +1050,72 @@ class KGGTModel(nn.Module):
             return names
         return names[self.gat_kin_dim:]
 
-    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+    def _decode(self, refined: torch.Tensor) -> torch.Tensor:
+        """Node embeddings (B, T, N, node_dim) -> output (B, T, N): decoder + lag alignment."""
+        return self.lag_align(self.decoder(refined).squeeze(-1))
+
+    def eeg_only_forward(self, eeg: torch.Tensor) -> torch.Tensor:
+        """EEG-only prediction: both kinematic pathways off (= ``forward(eeg, use_kin=False)``)."""
+        return self.forward(eeg, None, use_kin=False)
+
+    def pop_eeg_only_output(self) -> torch.Tensor | None:
+        """Return the cached EEG-only output of the last training batch and clear it."""
+        out = getattr(self, "last_eeg_only_output", None)
+        self.last_eeg_only_output = None
+        return out
+
+    def __getstate__(self):
+        # the cached EEG-only output is a graph tensor: never copy / pickle it
+        state = self.__dict__.copy()
+        state["last_eeg_only_output"] = None
+        return state
+
+    def forward(
+        self,
+        eeg: torch.Tensor,
+        kin: torch.Tensor | None = None,
+        use_kin: bool = True,
+    ) -> torch.Tensor:
+        """
+        Args:
+            eeg: (B, T, input_dim) EEG input.
+            kin: (B, T, kin_dim) kinematic input (required with kinematic guidance
+                 unless ``use_kin=False``).
+            use_kin: False = EEG-only output: the kinematic term of the GAT edge bias
+                 and the kin skip highway are both off (``kin`` is not used).
+        """
+        self.last_eeg_only_output = None
+        eeg = electrode_dropout(eeg, self.eeg_channel_dropout, self.eeg_groups, self.training)
         temporal = self.encoder(eeg)
         nodes    = self.node_projection(temporal)
-        if self.use_kinematic_guidance:
-            if kin is None:
-                raise ValueError("kin is required when use_kinematic_guidance=True")
-            refined = self.gat(nodes, self.get_gat_kin(kin))
-            
-            # Kinematic Direct Residual Highway
-            B, T, _ = kin.shape
-            kin_skip = self.kin_skip_proj(self.get_skip_kin(kin)).view(B, T, self.out_channels, -1)
-            
-            # Inject sharp physical dynamics directly into node embeddings
-            refined = refined + kin_skip
-        else:
-            refined = self.gat(nodes)
-        out = self.decoder(refined).squeeze(-1)   # (B, T, 5)
-        return self.lag_align(out)
+        if not self.use_kinematic_guidance:
+            return self._decode(self.gat(nodes))
+        if not use_kin:
+            return self._decode(self.gat(nodes, None))
+        if kin is None:
+            raise ValueError("kin is required when use_kinematic_guidance=True")
+
+        # EEG-only output of the same batch for the auxiliary loss (training only):
+        # shared encoder / node projection, one extra GAT + decoder pass.
+        if self.training and self.eeg_only_aux:
+            self.last_eeg_only_output = self._decode(self.gat(nodes, None))
+
+        # Kinematic-pathway dropout (training only): per sample, both pathways off.
+        B, T, _ = kin.shape
+        keep = None
+        if self.training and self.kin_dropout > 0.0:
+            keep = (torch.rand(B, device=nodes.device) >= self.kin_dropout).to(nodes.dtype)
+
+        refined = self.gat(nodes, self.get_gat_kin(kin), kin_keep=keep)
+
+        # Kinematic Direct Residual Highway
+        kin_skip = self.kin_skip_proj(self.get_skip_kin(kin)).view(B, T, self.out_channels, -1)
+        if keep is not None:
+            kin_skip = kin_skip * keep.view(B, 1, 1, 1).to(kin_skip.dtype)
+
+        # Inject sharp physical dynamics directly into node embeddings
+        refined = refined + kin_skip
+        return self._decode(refined)
 
 def _validate_kin_indices(indices, kin_dim: int) -> tuple[int, ...]:
     """Check an explicit list of kin feature indices: non-empty, unique ints in [0, kin_dim)."""
@@ -1004,6 +1154,12 @@ def build_kg_gt_from_config(
                     model.gat.kin_skip_indices = list(range(10, 24))).
         edge_prior: Optional (5, 5) tensor from compute_muscle_edge_prior().
                     If None, edge_bias is initialised to zeros.
+                    (Phase B keys, all optional and off by default:
+                    model.kin_dropout = kinematic-pathway dropout probability,
+                    model.eeg_channel_dropout = electrode dropout probability,
+                    model.eeg_groups = feature columns per electrode (number of bands),
+                    model.eeg_only_aux = cache the EEG-only output in training; it is
+                    switched on automatically when training.loss.w_eeg_only > 0.)
                     Compute via:
                         from main.preprocessing_emg_kin import compute_muscle_edge_prior
                         import torch
@@ -1017,6 +1173,8 @@ def build_kg_gt_from_config(
         model_type == "kg_gt_kinematic"
         or gat_cfg.get("use_kinematic_guidance", False)
     )
+    loss_cfg = (cfg.get("training") or {}).get("loss") or {}
+    eeg_only_aux = bool(model_cfg.get("eeg_only_aux", float(loss_cfg.get("w_eeg_only", 0.0) or 0.0) > 0.0))
 
     return KGGTModel(
         transformer_cfg=model_cfg["transformer"],
@@ -1034,6 +1192,11 @@ def build_kg_gt_from_config(
         gat_kin_dim_override=gat_cfg.get("kin_gat_dim"),
         # optional explicit skip-highway features (None = features after the GAT block)
         kin_skip_indices=gat_cfg.get("kin_skip_indices"),
+        # Phase B (default off): pathway dropout, electrode dropout, EEG-only aux output
+        kin_dropout=model_cfg.get("kin_dropout", 0.0),
+        eeg_channel_dropout=model_cfg.get("eeg_channel_dropout", 0.0),
+        eeg_groups=model_cfg.get("eeg_groups", 1),
+        eeg_only_aux=eeg_only_aux,
     )
 
 
@@ -1046,6 +1209,8 @@ def build_transformer_only_from_config(cfg: dict, input_dim: int) -> Transformer
         input_dim=input_dim,
         node_dim=model_cfg.get("gat", {}).get("node_dim", 64),
         out_channels=model_cfg.get("decoder", {}).get("out_channels", 5),
+        eeg_channel_dropout=model_cfg.get("eeg_channel_dropout", 0.0),
+        eeg_groups=model_cfg.get("eeg_groups", 1),
     )
 
 

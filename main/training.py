@@ -1036,3 +1036,54 @@ def prepare_batch_factory(device: torch.device, drop_kin_indices=None):
         return {"eeg": eeg, "kin": kin}, emg
 
     return prepare_batch
+
+
+def normalized_prepare_batch_factory(
+    emg_mean,
+    emg_std,
+    kin_mean,
+    kin_std,
+    device: torch.device,
+    drop_kin_indices=None,
+    eeg_mean=None,
+    eeg_std=None,
+    eeg_clip: float | None = 5.0,
+):
+    """prepare_batch closure with FROZEN normalisation statistics (the notebooks' one).
+
+    The returned callable maps a DataLoader batch ``(eeg, kin, emg)`` to
+    ``({"eeg": eeg, "kin": kin_z}, emg_z)`` on ``device``:
+
+        kin_z = (kin - kin_mean) / kin_std, then the columns ``drop_kin_indices`` removed
+        emg_z = (emg - emg_mean) / emg_std
+        eeg   = unchanged                                     if eeg_mean / eeg_std are None
+              = clip((eeg - eeg_mean) / eeg_std, ±eeg_clip)   otherwise (EEG feature input,
+                e.g. log band power: per-feature z-score, then clipped; eeg_clip None = no clip)
+
+    All statistics must come from the TRAINING series only (tensors on ``device`` or
+    arrays).  With ``eeg_mean`` / ``eeg_std`` = None the behaviour is exactly the closure
+    the notebooks used before Phase B.  Every consumer (training, evaluation, magnitude,
+    ablation, interpretability) must go through this one closure.
+    """
+    if (eeg_mean is None) != (eeg_std is None):
+        raise ValueError("eeg_mean and eeg_std must be given together (or both None)")
+    if eeg_mean is not None:
+        eeg_mean = torch.as_tensor(eeg_mean, dtype=torch.float32).to(device)
+        eeg_std = torch.as_tensor(eeg_std, dtype=torch.float32).to(device)
+
+    def prepare_batch(eeg, kin, emg):
+        eeg = eeg.to(device, non_blocking=True)
+        kin = kin.to(device, non_blocking=True)
+        emg = emg.to(device, non_blocking=True)
+        if eeg_mean is not None:
+            eeg = (eeg.to(torch.float32) - eeg_mean) / eeg_std
+            if eeg_clip is not None:
+                eeg = eeg.clamp(-float(eeg_clip), float(eeg_clip))
+        kin_norm = (kin - kin_mean) / kin_std
+        if drop_kin_indices is not None:
+            keep_idx = [i for i in range(kin_norm.shape[-1]) if i not in drop_kin_indices]
+            kin_norm = kin_norm[..., keep_idx]
+        emg_norm = (emg - emg_mean) / emg_std
+        return {"eeg": eeg, "kin": kin_norm}, emg_norm
+
+    return prepare_batch

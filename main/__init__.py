@@ -13,6 +13,9 @@ Public API:
                            KT_RAW_NAMES, POSE_DROP_INDICES, POSE_FORCE_DROP_INDICES,
                            POSE_FORCE_RATE_DROP_INDICES,
                            kin_feature_names, hand_near_object_gate, index_object_distance
+    eeg_features:          (Phase B) eeg_bandpower, eeg_feature_names, eeg_electrode_groups,
+                           eeg_band_groups, build_eeg_transform_from_config,
+                           eeg_n_bands_from_config, fit_feature_stats, clip_fraction
     dataset:              WAYEEGDataset,
                            resolve_participants (handles "all", single, or list),
                            ALL_PARTICIPANTS
@@ -30,7 +33,7 @@ Public API:
                            collect_predictions, compute_metrics,
                            EvalMetrics, prepare_batch_factory,
                            save_checkpoint, load_checkpoint
-    ablation:              input_ablation, AblationResult, shuffle_time,
+    ablation:              input_ablation (conditions incl. kin_off = EEG only), AblationResult, shuffle_time,
                            apply_condition, pearson_per_channel,
                            rest_threshold_from_loader, ABLATION_CONDITIONS
     inference:             predict_series_stitched (the one inference path: windows of
@@ -79,8 +82,21 @@ from .preprocessing_emg_kin import (
     hand_near_object_gate,
     index_object_distance,
 )
+from .eeg_features import (
+    DEFAULT_BANDS,
+    eeg_bandpower,
+    eeg_feature_names,
+    band_labels,
+    eeg_electrode_groups,
+    eeg_band_groups,
+    build_eeg_transform_from_config,
+    eeg_n_bands_from_config,
+    fit_feature_stats,
+    clip_fraction,
+)
 from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
 from .model import (
+    electrode_dropout,
     KGGTModel,
     build_kg_gt_from_config,
     CNN1dAligner,
@@ -143,6 +159,7 @@ from .training import (
     collect_predictions,
     compute_metrics,
     prepare_batch_factory,
+    normalized_prepare_batch_factory,
     save_checkpoint,
     load_checkpoint,
     print_gpu_info,
@@ -154,7 +171,10 @@ from .ablation import (
     apply_condition,
     pearson_per_channel,
     rest_threshold_from_loader,
+    default_conditions,
+    supports_use_kin,
     ABLATION_CONDITIONS,
+    ALL_ABLATION_CONDITIONS,
     ABLATION_LABELS,
     ABLATION_COLORS,
 )
@@ -219,6 +239,10 @@ __all__ = [
     "KT_RAW_NAMES", "POSE_DROP_INDICES", "POSE_FORCE_DROP_INDICES",
     "POSE_FORCE_RATE_DROP_INDICES", "kin_feature_names",
     "hand_near_object_gate", "index_object_distance",
+    # EEG features (Phase B): log band power, band-major layout, train statistics
+    "DEFAULT_BANDS", "eeg_bandpower", "eeg_feature_names", "band_labels",
+    "eeg_electrode_groups", "eeg_band_groups", "build_eeg_transform_from_config",
+    "eeg_n_bands_from_config", "fit_feature_stats", "clip_fraction",
     # dataset
     "WAYEEGDataset", "resolve_participants", "ALL_PARTICIPANTS",
     # model
@@ -226,7 +250,7 @@ __all__ = [
     "TransformerEncoder", "build_transformer_from_config",
     "MuscleGATEncoder", "KinematicGuidedMuscleGATEncoder",
     "SinusoidalPositionalEncoding",
-    "TransformerOnlyModel", "build_transformer_only_from_config",
+    "TransformerOnlyModel", "build_transformer_only_from_config", "electrode_dropout",
     # losses
     "CombinedEMGLoss", "CompositeEMGLoss", "CCCLoss", "PearsonCorrelationLoss",
     "TemporalSmoothnessLoss", "PeakWeightedMSELoss", "EdgePriorKLDivLoss",
@@ -244,11 +268,12 @@ __all__ = [
     # training
     "train_model", "TrainConfig", "TrainResult", "EvalMetrics",
     "collect_predictions", "compute_metrics", "prepare_batch_factory",
+    "normalized_prepare_batch_factory",
     "save_checkpoint", "load_checkpoint", "print_gpu_info",
     # ablation
     "input_ablation", "AblationResult", "shuffle_time", "apply_condition",
-    "pearson_per_channel", "rest_threshold_from_loader",
-    "ABLATION_CONDITIONS", "ABLATION_LABELS", "ABLATION_COLORS",
+    "pearson_per_channel", "rest_threshold_from_loader", "default_conditions", "supports_use_kin",
+    "ABLATION_CONDITIONS", "ALL_ABLATION_CONDITIONS", "ABLATION_LABELS", "ABLATION_COLORS",
     # inference (one path: windows of the training window size)
     "predict_series_stitched", "window_batch", "window_starts", "stitch_windows",
     # interpretability (Phase D): events, exact path decomposition, rollout, EEG faithfulness

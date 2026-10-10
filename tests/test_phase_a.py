@@ -518,10 +518,11 @@ def test_ablation_cell_right_after_magnitude(name, suffix):
     abl = _src(cells[i + 2])
     assert cells[i + 2]["cell_type"] == "code"
     assert "HOW MUCH DOES THE MODEL USE EEG vs KINEMATICS?" in abl and "input_ablation(" in abl
-    assert f'"results/input_ablation{suffix}.png"' in abl
-    assert f'"results/input_ablation{suffix}.csv"' in abl
+    # Phase B: results go to RESULTS_DIR = results/<run tag>/ (tests/test_phase_b.py)
+    assert f'f"{{RESULTS_DIR}}/input_ablation{suffix}.png"' in abl
+    assert f'f"{{RESULTS_DIR}}/input_ablation{suffix}.csv"' in abl
     other = "_1stage" if not suffix else ""
-    assert f'"results/input_ablation{other}.csv"' not in abl
+    assert f'/input_ablation{other}.csv"' not in abl
     # Phase D: a markdown note on the interpretability panels sits between the two
     assert cells[i + 3]["cell_type"] == "markdown" and "what each panel is" in _src(cells[i + 3])
     assert "INTERPRETABILITY — Full-Signal Triptych" in _src(cells[i + 4])
@@ -571,4 +572,6 @@ def test_both_configs_identical_outside_training_extras():
         assert a[k] == b[k], k
     assert a["training"]["loss"] == b["training"]["loss"]
     for k, v in a["training"].items():
-        assert b["training"][k] == v, k
+        if k != "checkpoint_dir":                 # Phase B: each notebook has its own tagged folder
+            assert b["training"][k] == v, k
+    assert a["training"]["checkpoint_dir"] != b["training"]["checkpoint_dir"]
