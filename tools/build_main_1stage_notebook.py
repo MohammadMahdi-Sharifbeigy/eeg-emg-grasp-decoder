@@ -105,7 +105,7 @@ every parameter trainable from the first epoch.
 | Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200, early stop after 20 epochs (`single_stage.early_stop_patience`) |
 | GAT / decoder init | re-initialised between stages | trained together with the encoder from epoch 1 |
 | Checkpoints | `outputs/checkpoints_main_stage1/…`, `outputs/checkpoints_main_stage2/…` | `outputs/checkpoints_1stage/{subject}/` (`last.pt` + `best.pt`, resumable) |
-| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `results/input_ablation.*`, `outputs/interpretability/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
+| Results | `results/evaluation_report.md`, `results/magnitude_report.*`, `results/magnitude_by_load.*`, `results/input_ablation.*`, `outputs/interpretability/`, `outputs/interpretability_event/`, `outputs/losocv_results.csv` | `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/magnitude_by_load_1stage.*`, `outputs/interpretability_1stage/`, `outputs/interpretability_1stage_event/`, `outputs/losocv_results_1stage.csv`, `results/input_ablation_1stage.*` |
 
 Everything else is identical to `main.ipynb`: same participants and condition-stratified
 train/val/test split, same preprocessing and **same cache** (`data/cache_main_stride500_square_pose_force_sg51`;
@@ -122,7 +122,10 @@ hold-phase level per weight / surface) and the cell **"How much does the model u
 — Pearson r on the test set with the kinematics zeroed / time-shuffled and with the EEG time-shuffled.
 Both cells are the ones of `main.ipynb` (only the output file names differ), and so are the
 interpretability / diagnostic cells: every prediction of a whole series goes through
-`main.inference.predict_series_stitched` (1 s windows of the training window size).
+`main.inference.predict_series_stitched` (1 s windows of the training window size). The interpretability
+figures (per 10 s stretch: prediction, exact split of the output into EEG/graph path + kinematic path,
+muscle-graph attention; event-locked over all test lifts, with EEG evidence only if the EEG measurably
+changes the output) are described in the markdown cell above them.
 
 Early stopping and the choice of the best epoch use a **smoothed** validation loss (mean of the last
 5 epochs, `main/training.py`): `best.pt` is the epoch at which that moving average was lowest.
@@ -492,6 +495,19 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
          '#   • Saves to: outputs/interpretability_1stage/{subject}/'),
     ])
     log["interpretability"] = f"cell {i} edited"
+
+    # 8b. event-locked interpretability (cell inherited from main.ipynb): separate output folder
+    i_ev = edit_cell(nb, "Event-locked interpretability (all test lifts)", [
+        ('    _save_dir = os.path.join("outputs", "interpretability_event", _subj)',
+         '    _save_dir = os.path.join("outputs", "interpretability_1stage_event", _subj)'),
+        ('print(f"   Plots saved under: outputs/interpretability_event/")',
+         'print(f"   Plots saved under: outputs/interpretability_1stage_event/")'),
+        ('#   • Saves to: outputs/interpretability_event/{subject}/',
+         '#   • Saves to: outputs/interpretability_1stage_event/{subject}/'),
+    ])
+    if i_ev != i + 1:
+        raise AssertionError(f"event-locked cell expected right after the interpretability cell, got {i_ev} vs {i}")
+    log["event_locked"] = f"cell {i_ev} edited (inherited from main.ipynb)"
 
     # 9. LOSOCV: single-stage per fold
     i = find_cell(nb, "[OPTIONAL] Automatic LOSOCV")

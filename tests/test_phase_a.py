@@ -522,7 +522,9 @@ def test_ablation_cell_right_after_magnitude(name, suffix):
     assert f'"results/input_ablation{suffix}.csv"' in abl
     other = "_1stage" if not suffix else ""
     assert f'"results/input_ablation{other}.csv"' not in abl
-    assert "INTERPRETABILITY — Full-Signal Triptych" in _src(cells[i + 3])
+    # Phase D: a markdown note on the interpretability panels sits between the two
+    assert cells[i + 3]["cell_type"] == "markdown" and "what each panel is" in _src(cells[i + 3])
+    assert "INTERPRETABILITY — Full-Signal Triptych" in _src(cells[i + 4])
     assert sum("input_ablation(" in s for s in _code_cells(_nb(name))) == 1
 
 

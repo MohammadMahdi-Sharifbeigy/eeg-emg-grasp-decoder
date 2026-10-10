@@ -36,6 +36,14 @@ Public API:
     inference:             predict_series_stitched (the one inference path: windows of
                            the training window size), window_batch, window_starts,
                            stitch_windows
+    interp:                (Phase D) lift_events, event_samples, extract_event_windows,
+                           phase_levels, decompose_prediction, decompose_series,
+                           attention_rollout, encoder_attention, rollout_rows,
+                           eeg_occlusion_attribution, deletion_curve, eeg_effect_size,
+                           event_locked_windows, concat_event_locked, event_locked_summary,
+                           kin_column_groups, raw_zero_kin_baseline, series_gate,
+                           eeg_channel_names
+    interp_plots:          plot_interp_window, plot_event_locked
 """
 
 from .device import get_device, set_seed
@@ -156,6 +164,15 @@ from .inference import (
     window_starts,
     stitch_windows,
 )
+from .interp import (
+    EVENT_COLUMNS, EVENT_LABELS, DECOMPOSITION_KEYS,
+    lift_events, event_samples, extract_event_windows, phase_levels,
+    kin_column_groups, raw_zero_kin_baseline, series_gate, eeg_channel_names,
+    decompose_prediction, decompose_series,
+    attention_rollout, encoder_attention, rollout_rows,
+    eeg_occlusion_attribution, deletion_curve, eeg_effect_size,
+    event_locked_windows, concat_event_locked, event_locked_summary,
+)
 
 from .plots import(
     get_dynamic_fig_dir,
@@ -184,6 +201,7 @@ from .plots import(
     plot_kin_force_gate,
     kin_force_gate_stats,
 )
+from .interp_plots import plot_interp_window, plot_event_locked
 
 __all__ = [
     # device
@@ -233,6 +251,15 @@ __all__ = [
     "ABLATION_CONDITIONS", "ABLATION_LABELS", "ABLATION_COLORS",
     # inference (one path: windows of the training window size)
     "predict_series_stitched", "window_batch", "window_starts", "stitch_windows",
+    # interpretability (Phase D): events, exact path decomposition, rollout, EEG faithfulness
+    "EVENT_COLUMNS", "EVENT_LABELS", "DECOMPOSITION_KEYS",
+    "lift_events", "event_samples", "extract_event_windows", "phase_levels",
+    "kin_column_groups", "raw_zero_kin_baseline", "series_gate", "eeg_channel_names",
+    "decompose_prediction", "decompose_series",
+    "attention_rollout", "encoder_attention", "rollout_rows",
+    "eeg_occlusion_attribution", "deletion_curve", "eeg_effect_size",
+    "event_locked_windows", "concat_event_locked", "event_locked_summary",
+    "plot_interp_window", "plot_event_locked",
     # plots — core
     "get_dynamic_fig_dir", "save_fig", "plot_multichannel_trace",
     "plot_signal_heatmap", "plot_preprocessing_comparison",
