@@ -1,0 +1,142 @@
+CONFIG = {
+    "outputs":{
+        "figures_dir": "docs/figure/method1",
+    },
+    "data": {
+        "participant": "P1",       
+        "data_root": "data/way-eeg/raw",
+        "cache_dir": "data/cache_main_stride500_square",
+        # window_size=4000 @ 500 Hz = 8 s window; stride=250 = 0.5 s step
+        # chunked transformer: 4000 / chunk_size=500 = 8 chunks of 500 → O(500²) not O(4000²)
+        "window_size": 500,
+        "stride": 500,
+        # latency_shift_ms eliminated: Transformer attention learns asymmetric corticomuscular conduction delay
+        "fs_eeg": 500,                   # Hz
+        "fs_emg": 4000,                  # Hz (raw); downsampled to fs_eeg after preprocess
+        "fs_kin": 500,                   # Hz
+        "n_eeg_channels": 32,
+        "n_emg_channels": 5,
+        "n_kin_raw": 36,                 # raw kin cols in hs.kin.sig
+        "n_kin_features": 36             # k_t dimension after extraction
+    },
+    "preprocessing": {
+        "eeg": {
+            "bp_low": 0.5,                  # Hz, bandpass lower bound
+            "bp_high": 40.0,                # Hz, bandpass upper bound
+            "artifact_method": "ica_auto",  # "asr" | "ica_auto" | "ica_manual"
+            "filter_order": 4,
+            "notch_freq": 50.0,             # Hz, power-line
+            "asr_window_ms": 500,           # ms, ASR sliding window
+            "asr_std_thresh": 5.0,          # sigma, ASR rejection threshold
+            "delta_low": 0.5,               # Hz, delta-band lower bound
+            "delta_high": 40.0,             # Hz, delta-band upper bound
+            "use_car": False,
+            "use_tkeo": True,
+            #"target_channels": ["FC1", "FC2", "C3", "Cz", "C4", "CP1", "CP2", "CP6"]
+        },
+        "emg": {
+            "bp_low": 30.0,              # Hz
+            "bp_high": 300.0,            # Hz
+            "filter_order": 4,
+            "lp_cutoff": 8.0,            # Hz, near-DC → flat-top square-like activation bursts
+            "lp_order": 4,               # 8th-order → brick-wall roll-off, flat plateau between bursts
+            "downsample_factor": 8,      # 4000 -> 500 Hz
+            "envelope_method": "tkeo", # strictly causal full-wave rectification default
+            "causal": True,              # strict forward-only causal filtering (no lookahead)
+        },
+        "kinematics": {
+            "include_velocity": True,      # if true, output includes velocity
+            "include_acceleration": True,  # if true, output includes acceleration
+            "drop_indices": [12, 25, 38],  # prune rho_GL from pos, vel, acc
+            "velocity_method": "sg",     # 'sg' (Savitzky-Golay) | 'bw' (Butterworth diff)
+            "sg_window": 11,             # SG window length (samples, must be odd)
+            "sg_poly": 3,                # SG polynomial order
+            "bw_cutoff": 20.0,           # LP cutoff Hz before diff (used when method='bw')
+            "bw_order": 4,               # Butterworth order (used when method='bw')
+            "normalize": True            # per-feature z-score over training set
+        },
+    },
+    "model": {
+        "type": "transformer_regressor",
+        "transformer": {
+            "n_layers": 4,
+            "n_heads": 8,
+            "d_model": 128,
+            "d_k": 32,
+            "d_v": 32,
+            "ffn_dim": 512,
+            "dropout": 0.2,
+            # chunk_size=500 with window_size=4000 → 8 chunks of 500
+            # → O(500²)=250K scores per head (not O(4000²)=16M)
+            # MUST divide window_size evenly or a RuntimeWarning fires and
+            # full O(T²) attention is used (catastrophically slow).
+            "chunk_size": 500
+        },
+        "gat": {
+            "n_layers": 2,
+            "node_dim": 64,
+            "hidden_dim": 64,
+            "heads": 4,
+            "dropout": 0.2,
+            "use_kinematic_guidance": True,
+        },
+        "decoder": {
+            "out_channels": 5            # predicted EMG channels
+        }
+    },
+    "training": {
+        "loss": {
+            "w_peak":          1.0,     # Peak-weighted MSE weight
+            "w_ccc":           0.5,     # Concordance Correlation Coefficient weight (prevents Mean Collapse)
+            "w_pearson":       0.2,     # Pearson correlation timing weight
+            "w_diff":          0.1,     # First-order temporal smoothness weight
+            "w_rest":          0.05,    # Resting baseline L1 penalty
+            "w_reg":           0.001,   # GAT EdgePrior KL divergence anchor
+            "peak_alpha":      3.0,     # Multiplier for burst tips in PeakMSE
+            "asymmetry":       2.0,     # Under-prediction penalty
+            "rest_threshold":  0.15,    # Rest threshold fraction
+            "eps":             1e-6,    # Denominator clamp for AMP FP16 numerical stability
+            "use_peak_weight": True,    # set False for ablation back to standard MSE
+        },
+        # ── optimizer ─────────────────────────────────────────────────────
+        "optimizer":   "adamw",   # 'adam' | 'adamw'
+        "weight_decay": 1e-2,     # AdamW weight decay (ignored for adam)
+        # ── scheduler ─────────────────────────────────────────────────────
+        "scheduler":   "cosine",  # 'reduce' | 'cosine'
+        # reduce-specific
+        "lr_patience": 5,
+        "lr_factor":   0.5,
+        # cosine-specific
+        "cosine_t_max":   None,   # None → use max_epochs
+        "cosine_eta_min": 1e-6,
+        # ── common ────────────────────────────────────────────────────────
+        "loss_lambda":  1.0,      # 1.0 = plain MSE; <1.0 enables Soft-DTW (O(T²), DO NOT use at T=4000)
+        "stage1_lr": 1e-3,
+        "warmup_epochs": 5,
+        "stage2_lr": 1e-5,
+        "transformer_lr_scale": 0.1,
+        # batch_size=4 with T=4000 keeps VRAM safe on GTX 1660 Ti (6 GB).
+        # effective batch = batch_size * gradient_accumulation_steps = 4 * 8 = 32
+        # Tune batch_size up (e.g. 8) if VRAM is available; reduce grad_accum_steps proportionally.
+        "batch_size":          32,
+        "gradient_accumulation_steps": 2,
+        "early_stop_patience": 50,
+        "grad_clip_norm":      1.0,
+        "stage1_epochs":       75,
+        "max_epochs":          200,
+        # use_amp=True: enables FP16 mixed precision via torch.autocast + GradScaler.
+        # GTX 1660 Ti (sm_75 Turing) has FP16 tensor cores → ~1.5-2x speedup.
+        # Requires PyTorch >= 2.0. Set False only if you see NaN losses.
+        "use_amp":             True,
+        "log_memory_every":    50,
+        "losocv": True,           # leave-one-subject-out cross-validation
+        "checkpoint_every":     1,
+        "seed":                42,
+    },
+    "dataset": {
+        # Keep in sync with data.window_size / data.stride above
+        "window_size": 500,
+        "stride": 500,
+    }
+}
+notebook_cfg = copy.deepcopy(CONFIG)
