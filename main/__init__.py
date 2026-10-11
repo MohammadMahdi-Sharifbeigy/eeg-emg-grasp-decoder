@@ -20,7 +20,8 @@ Public API:
                            resolve_participants (handles "all", single, or list),
                            ALL_PARTICIPANTS
     model:                 KGGTModel, build_kg_gt_from_config, CNN1dAligner,
-                           TransformerOnlyModel, build_transformer_only_from_config
+                           TransformerOnlyModel, build_transformer_only_from_config,
+                           (Phase C) KinOnly, EEGOnly wrappers (use_eeg=False / use_kin=False)
     losses:                CombinedEMGLoss, PeakWeightedMSELoss, EdgePriorKLDivLoss,
                            build_loss_from_config, compute_channel_weights,
                            channel_weights_from_config
@@ -47,6 +48,11 @@ Public API:
                            kin_column_groups, raw_zero_kin_baseline, series_gate,
                            eeg_channel_names
     interp_plots:          plot_interp_window, plot_event_locked
+    residual_eval:         (Phase C) predict_residuals, residual_report, residual_verdict,
+                           format_residual_report, random_derangement,
+                           plot_residual_delta_vaf, plot_residual_per_lift
+                           (+ losses.ResidualLoss, training.residual_prepare_batch_factory,
+                           training.zero_prediction_loss)
 """
 
 from .device import get_device, set_seed
@@ -98,6 +104,8 @@ from .dataset import WAYEEGDataset, resolve_participants, ALL_PARTICIPANTS
 from .model import (
     electrode_dropout,
     KGGTModel,
+    KinOnly,
+    EEGOnly,
     build_kg_gt_from_config,
     CNN1dAligner,
     TransformerEncoder,
@@ -117,6 +125,7 @@ from .losses import (
     PeakWeightedMSELoss,
     EdgePriorKLDivLoss,
     CORALLoss,
+    ResidualLoss,
     build_loss_from_config,
     build_coral_loss_from_config,
     compute_channel_weights,
@@ -160,6 +169,8 @@ from .training import (
     compute_metrics,
     prepare_batch_factory,
     normalized_prepare_batch_factory,
+    residual_prepare_batch_factory,
+    zero_prediction_loss,
     save_checkpoint,
     load_checkpoint,
     print_gpu_info,
@@ -222,6 +233,11 @@ from .plots import(
     kin_force_gate_stats,
 )
 from .interp_plots import plot_interp_window, plot_event_locked
+from .residual_eval import (
+    NULL_KINDS, NULL_LABELS, VERDICT_YES, VERDICT_NO, RESIDUAL_COLUMNS,
+    ResidualPredictions, random_derangement, predict_residuals, residual_report,
+    residual_verdict, format_residual_report, plot_residual_delta_vaf, plot_residual_per_lift,
+)
 
 __all__ = [
     # device
@@ -301,4 +317,9 @@ __all__ = [
     "plot_kinematic_velocity_acceleration_density",
     "plot_kin_smoothing_comparison",
     "plot_kin_force_gate", "kin_force_gate_stats",
+    # Phase C: kinematics-only model, EEG model on the residual, nulls, per-lift analysis
+    "KinOnly", "EEGOnly", "ResidualLoss", "residual_prepare_batch_factory", "zero_prediction_loss",
+    "NULL_KINDS", "NULL_LABELS", "VERDICT_YES", "VERDICT_NO", "RESIDUAL_COLUMNS",
+    "ResidualPredictions", "random_derangement", "predict_residuals", "residual_report",
+    "residual_verdict", "format_residual_report", "plot_residual_delta_vaf", "plot_residual_per_lift",
 ]

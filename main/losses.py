@@ -668,6 +668,73 @@ CombinedEMGLoss = CompositeEMGLoss
 
 
 # ============================================================================
+# 4b. Residual loss (Phase C: EEG model trained on what the kinematics leave over)
+# ============================================================================
+
+class ResidualLoss(nn.Module):
+    """Loss for a SIGNED, zero-mean target: the residual ``emg_z - kin_pred_z``.
+
+        L = Huber_delta(pred, target) + w_pearson * mean over active (b, c) of (1 - r_bc)
+
+    r_bc is the Pearson correlation along time of window b, channel c. A (window, channel)
+    whose target variance is <= ``min_target_var`` (the residual is ~constant there) is
+    skipped in the Pearson part; with no active (window, channel) that part is 0. The
+    envelope-specific terms of CompositeEMGLoss (peak weighting, rest mask, active level,
+    CCC) assume a non-negative envelope with a rest level and are not used here.
+
+    Reference value: predicting zero residual gives r = 0 everywhere, i.e.
+    Huber(0, target) + w_pearson (see ``main.training.zero_prediction_loss``).
+    Computed in float32 (safe under autocast). ``last_components``: total, huber, pearson
+    (unweighted) and active_fraction (share of (window, channel) in the Pearson part).
+    """
+
+    def __init__(self, huber_delta: float = 1.0, w_pearson: float = 0.2,
+                 min_target_var: float = 1e-4, eps: float = 1e-6) -> None:
+        super().__init__()
+        if huber_delta <= 0:
+            raise ValueError(f"huber_delta must be > 0, got {huber_delta}")
+        if w_pearson < 0:
+            raise ValueError(f"w_pearson must be >= 0, got {w_pearson}")
+        self.huber_delta = float(huber_delta)
+        self.w_pearson = float(w_pearson)
+        self.min_target_var = float(min_target_var)
+        self.eps = float(eps)
+        self.last_components: dict[str, float] = {}
+
+    def forward(self, pred: Tensor, target: Tensor, return_components: bool = False):
+        """pred, target: (B, T, C) in normalised (z) units."""
+        pred = pred.float()
+        target = target.float()
+        l_huber = F.huber_loss(pred, target, delta=self.huber_delta)
+
+        d_pred = pred - pred.mean(dim=1, keepdim=True)
+        d_tgt = target - target.mean(dim=1, keepdim=True)
+        num = (d_pred * d_tgt).sum(dim=1)                                   # (B, C)
+        denom = (
+            torch.sqrt((d_pred ** 2).sum(dim=1).clamp(min=self.eps))
+            * torch.sqrt((d_tgt ** 2).sum(dim=1).clamp(min=self.eps))
+        ).clamp(min=self.eps)
+        r = num / denom
+        active = ((d_tgt ** 2).mean(dim=1) > self.min_target_var).to(r.dtype)
+        n_active = active.sum()
+        if float(n_active) > 0:
+            l_pearson = ((1.0 - r) * active).sum() / n_active
+        else:
+            l_pearson = (r * 0.0).sum()                                     # 0, keeps the graph
+
+        total = l_huber + self.w_pearson * l_pearson
+        self.last_components = {
+            "total": total.item(),
+            "huber": l_huber.item(),
+            "pearson": l_pearson.item(),
+            "active_fraction": float(n_active) / max(active.numel(), 1),
+        }
+        if return_components:
+            return total, self.last_components
+        return total
+
+
+# ============================================================================
 # 5. Config builder
 # ============================================================================
 

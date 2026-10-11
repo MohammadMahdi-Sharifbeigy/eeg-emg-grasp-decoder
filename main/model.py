@@ -19,6 +19,7 @@ GAT changes (vs. original dense self-attention):
 
 from __future__ import annotations
 
+import inspect
 import logging
 import math
 import numbers
@@ -898,6 +899,15 @@ class KGGTModel(nn.Module):
     ``forward(eeg, kin, use_kin=False)`` is the EEG-only inference path: no kinematic
     edge bias and no kin skip (``kin`` may be None). This is NOT the same as feeding
     zero kinematics, which still pass through the skip MLP and the edge-bias layer.
+
+    ``forward(eeg, kin, use_eeg=False)`` is the kinematics-only path (Phase C): the
+    encoder is not run and its output is replaced by zeros. The node projection is a
+    Linear layer, so the node embeddings are then its BIAS only: one learned vector per
+    muscle, the same for every sample and time step. Everything after it (GAT with the
+    kinematic edge bias, kin skip, decoder, lag alignment) works as usual. No gradient
+    reaches the encoder (its parameters keep ``grad is None``) and the weight of the node
+    projection gets a zero gradient; its bias is trained. This is NOT the same as feeding
+    zero EEG, which still passes through the encoder (embedding bias, positional encoding).
     """
 
     def __init__(
@@ -1075,6 +1085,7 @@ class KGGTModel(nn.Module):
         eeg: torch.Tensor,
         kin: torch.Tensor | None = None,
         use_kin: bool = True,
+        use_eeg: bool = True,
     ) -> torch.Tensor:
         """
         Args:
@@ -1083,10 +1094,19 @@ class KGGTModel(nn.Module):
                  unless ``use_kin=False``).
             use_kin: False = EEG-only output: the kinematic term of the GAT edge bias
                  and the kin skip highway are both off (``kin`` is not used).
+            use_eeg: False = kinematics-only output: the encoder is skipped and its output
+                 replaced by zeros, so the node embeddings are the bias of the node
+                 projection (``eeg`` only gives the batch size, length and device; no
+                 electrode dropout is drawn and no gradient reaches the encoder).
         """
         self.last_eeg_only_output = None
-        eeg = electrode_dropout(eeg, self.eeg_channel_dropout, self.eeg_groups, self.training)
-        temporal = self.encoder(eeg)
+        if use_eeg:
+            eeg = electrode_dropout(eeg, self.eeg_channel_dropout, self.eeg_groups, self.training)
+            temporal = self.encoder(eeg)
+        else:
+            proj = self.node_projection.proj
+            temporal = torch.zeros(eeg.shape[0], eeg.shape[1], proj.in_features,
+                                   device=proj.weight.device, dtype=proj.weight.dtype)
         nodes    = self.node_projection(temporal)
         if not self.use_kinematic_guidance:
             return self._decode(self.gat(nodes))
@@ -1116,6 +1136,78 @@ class KGGTModel(nn.Module):
         # Inject sharp physical dynamics directly into node embeddings
         refined = refined + kin_skip
         return self._decode(refined)
+
+class _SwitchedKGGT(nn.Module):
+    """A KGGTModel called with one of its input switches fixed (see KinOnly / EEGOnly).
+
+    The wrapped model is the only submodule (``self.model``; state_dict keys are
+    ``model.<name>``). ``encoder``, ``node_projection``, ``gat``, ``kin_skip_proj`` and
+    ``use_kinematic_guidance`` are passed through, so ``main.training.train_model`` builds
+    the same optimiser groups as for the bare model (encoder + node projection at
+    lr x transformer_lr_scale, kin skip at lr / 3) and the inference helpers find the
+    attention modules.
+    """
+
+    _switch = ""
+
+    def __init__(self, model: nn.Module) -> None:
+        super().__init__()
+        try:
+            params = inspect.signature(model.forward).parameters
+        except (TypeError, ValueError):
+            params = {}
+        if self._switch not in params:
+            raise TypeError(
+                f"{type(self).__name__} needs a model whose forward accepts {self._switch} "
+                f"({type(model).__name__}.forward does not)"
+            )
+        self.model = model
+
+    @property
+    def encoder(self):
+        return self.model.encoder
+
+    @property
+    def node_projection(self):
+        return self.model.node_projection
+
+    @property
+    def gat(self):
+        return self.model.gat
+
+    @property
+    def kin_skip_proj(self):
+        return getattr(self.model, "kin_skip_proj", None)
+
+    @property
+    def use_kinematic_guidance(self) -> bool:
+        return bool(getattr(self.model, "use_kinematic_guidance", False))
+
+
+class KinOnly(_SwitchedKGGT):
+    """Kinematics-only view of a KGGTModel: ``forward(eeg, kin) = model(eeg, kin, use_eeg=False)``.
+
+    The EEG does not reach the output and the encoder gets no gradient (Phase C, Stage K).
+    """
+
+    _switch = "use_eeg"
+
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        return self.model(eeg, kin, use_eeg=False)
+
+
+class EEGOnly(_SwitchedKGGT):
+    """EEG-only view of a KGGTModel: ``forward(eeg, kin) = model(eeg, None, use_kin=False)``.
+
+    Both kinematic pathways are off (``kin`` is accepted and ignored), so the kin skip and
+    the kinematic edge-bias layer get no gradient (Phase C, Stage E).
+    """
+
+    _switch = "use_kin"
+
+    def forward(self, eeg: torch.Tensor, kin: torch.Tensor | None = None) -> torch.Tensor:
+        return self.model(eeg, None, use_kin=False)
+
 
 def _validate_kin_indices(indices, kin_dim: int) -> tuple[int, ...]:
     """Check an explicit list of kin feature indices: non-empty, unique ints in [0, kin_dim)."""

@@ -1087,3 +1087,42 @@ def normalized_prepare_batch_factory(
         return {"eeg": eeg, "kin": kin_norm}, emg_norm
 
     return prepare_batch
+
+
+def residual_prepare_batch_factory(prepare_batch, frozen_model: nn.Module):
+    """prepare_batch whose target is what a FROZEN model leaves over (Phase C, Stage E).
+
+    ``prepare_batch`` is the notebook closure ``(eeg, kin, emg) -> (inputs, emg_z)``.
+    The returned closure gives ``(inputs, emg_z - frozen_model(**inputs))``: the inputs are
+    passed through unchanged, the frozen prediction is computed under ``torch.no_grad()``
+    in float32 (prepare_batch runs outside autocast) with the model in eval mode. The
+    frozen model is put in eval mode and its parameters get ``requires_grad = False``
+    here; eval mode is set again on every call, so nothing a training loop does can
+    switch its dropout back on. It is not a submodule of the model being trained.
+    """
+    frozen_model.eval()
+    for p in frozen_model.parameters():
+        p.requires_grad_(False)
+
+    def prepare_batch_residual(eeg, kin, emg):
+        inputs, emg_z = prepare_batch(eeg, kin, emg)
+        if frozen_model.training:
+            frozen_model.eval()
+        with torch.no_grad():
+            base = _forward_model(frozen_model, inputs)
+        return inputs, (emg_z.float() - base.float()).detach()
+
+    return prepare_batch_residual
+
+
+@torch.no_grad()
+def zero_prediction_loss(loader: DataLoader, loss_fn: nn.Module, prepare_batch: PrepareBatch) -> float:
+    """Loss of predicting 0 for every sample (mean over windows): the value an untrained
+    residual model has to beat. Targets go through ``prepare_batch``."""
+    total, n = 0.0, 0
+    for batch in loader:
+        _, target = prepare_batch(*batch)
+        bs = target.shape[0]
+        total += float(loss_fn(torch.zeros_like(target), target)) * bs
+        n += bs
+    return total / max(n, 1)
