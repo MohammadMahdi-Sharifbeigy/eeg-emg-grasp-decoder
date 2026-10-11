@@ -1,4 +1,7 @@
-"""Static checks of main_1stage.ipynb (single-stage KG-GT notebook).
+"""Static checks of main_p2p.ipynb (single-stage KG-GT notebook, Package 2 / Phase B).
+
+The notebook was called main_1stage.ipynb until the original (pre Phase B) notebook was
+restored under that name (tests/test_main_1stage_original.py).
 
 Cells are never executed except the CONFIG cell, which is a plain dict literal.
 """
@@ -6,6 +9,7 @@ Cells are never executed except the CONFIG cell, which is a plain dict literal.
 from __future__ import annotations
 
 import copy
+import importlib.util
 import json
 import re
 import subprocess
@@ -14,7 +18,7 @@ from pathlib import Path
 import pytest
 
 ROOT = Path(__file__).resolve().parents[1]
-NB_PATH = ROOT / "main_1stage.ipynb"
+NB_PATH = ROOT / "main_p2p.ipynb"
 
 
 def _src(cell) -> str:
@@ -56,17 +60,66 @@ def head_nb():
     return json.loads(raw.decode("utf-8"))
 
 
-def test_no_outputs(nb):
+# The two lines the user edits in the notebook itself (which participants to run, when to
+# stop): their VALUES are not compared with the generator, everything else is.
+_USER_KNOBS = (
+    (re.compile(r"^subject_list = .*$", re.M), "subject_list = <user>"),
+    (re.compile(r'^            "early_stop_patience": \d+,', re.M),
+     '            "early_stop_patience": <user>,'),
+)
+
+
+def _comparable(nb) -> list:
+    """(cell type, source) of every cell: outputs, execution counts and metadata ignored."""
+    out = []
     for c in nb["cells"]:
+        s = _src(c)
+        for pat, repl in _USER_KNOBS:
+            s = pat.sub(repl, s)
+        out.append((c["cell_type"], s))
+    return out
+
+
+def test_notebook_is_the_generator_output_up_to_outputs(nb):
+    """main_p2p.ipynb = tools/build_main_p2p_notebook.py applied to HEAD:main.ipynb.
+
+    The notebook is committed WITH the outputs of the user's runs (the generator clears
+    them), so cell outputs / execution counts are ignored here, and so are the values of
+    the two user knobs above."""
+    spec = importlib.util.spec_from_file_location(
+        "build_main_p2p_notebook", ROOT / "tools" / "build_main_p2p_notebook.py")
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    try:
+        built, log = mod.build("HEAD")
+    except (OSError, subprocess.CalledProcessError) as e:  # pragma: no cover
+        pytest.skip(f"git HEAD:main.ipynb unavailable: {e}")
+    assert log
+    assert len(built["cells"]) == len(nb["cells"])
+    for i, (a, b) in enumerate(zip(_comparable(built), _comparable(nb))):
+        assert a == b, f"cell {i} differs from the generator output"
+    for c in built["cells"]:                       # what the generator writes has no outputs
         if c["cell_type"] == "code":
-            assert c["outputs"] == []
-            assert c["execution_count"] is None
+            assert c["outputs"] == [] and c["execution_count"] is None
+    # the knobs are applied to exactly one line each
+    for pat, _ in _USER_KNOBS:
+        assert sum(len(pat.findall(_src(c))) for c in nb["cells"]) == 1, pat.pattern
+
+
+def test_generator_writes_main_p2p_and_never_main_1stage():
+    gen = (ROOT / "tools" / "build_main_p2p_notebook.py").read_text(encoding="utf-8")
+    assert 'default=str(ROOT / "main_p2p.ipynb")' in gen
+    assert 'ROOT / "main_1stage.ipynb"' not in gen
+    assert not (ROOT / "tools" / "build_main_1stage_notebook.py").exists()
+    res = (ROOT / "tools" / "build_main_residual_notebook.py").read_text(encoding="utf-8")
+    assert 'SOURCE = "main_p2p.ipynb"' in res and ":main_p2p.ipynb" in res
+    assert "main_1stage.ipynb" not in res          # the restored original is not its source
 
 
 def test_all_code_cells_compile(nb):
     for i, c in enumerate(nb["cells"]):
         if c["cell_type"] == "code":
-            compile(_strip_magics(_src(c)), f"main_1stage.ipynb[cell {i}]", "exec")
+            compile(_strip_magics(_src(c)), f"main_p2p.ipynb[cell {i}]", "exec")
 
 
 def test_config_single_stage_and_unchanged_preprocessing(nb, head_nb):

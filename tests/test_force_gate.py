@@ -269,7 +269,7 @@ def _notebook_config(name: str) -> dict:
     return ns["CONFIG"]
 
 
-@pytest.mark.parametrize("name", ["main.ipynb", "main_1stage.ipynb"])
+@pytest.mark.parametrize("name", ["main.ipynb", "main_p2p.ipynb"])
 def test_notebook_config_turns_package1_on(name):
     # Step 1 (tests/test_step1_magnitude.py) keeps the Package-1 gate, cache and GAT
     # split, and also keeps the gated-force velocities: 22 -> 24 features.

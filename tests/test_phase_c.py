@@ -709,10 +709,10 @@ def nb():
 @pytest.fixture(scope="module")
 def head_1stage():
     try:
-        raw = subprocess.run(["git", "show", "HEAD:main_1stage.ipynb"], cwd=ROOT,
+        raw = subprocess.run(["git", "show", "HEAD:main_p2p.ipynb"], cwd=ROOT,
                              check=True, capture_output=True).stdout
     except (OSError, subprocess.CalledProcessError) as e:  # pragma: no cover
-        pytest.skip(f"git HEAD:main_1stage.ipynb unavailable: {e}")
+        pytest.skip(f"git HEAD:main_p2p.ipynb unavailable: {e}")
     return json.loads(raw.decode("utf-8"))
 
 
@@ -743,14 +743,34 @@ def _config_ns(nb) -> dict:
     return ns
 
 
+# `subject_list` (which participants to run) is edited by the user in the notebooks themselves:
+# its value is not compared, everything else is.
+_SUBJECT_LIST = re.compile(r"^subject_list = .*$", re.M)
+
+
+def _no_subject_list(text: str) -> str:
+    return _SUBJECT_LIST.sub("subject_list = <user>", text)
+
+
 def test_notebook_is_the_generator_output(nb, builder):
     built, log = builder.build("HEAD")
-    assert built == nb
-    text = builder.dumps(built)
-    # byte-identical up to the line ends (git may check the file out with CRLF)
-    on_disk = (ROOT / NB_NAME).read_bytes().replace(bytes([13, 10]), bytes([10]))
-    assert on_disk == text.encode("utf-8")
     assert log
+    # cell by cell (type + source); a notebook saved from the editor may order its JSON keys
+    # differently, so the file is not compared byte for byte
+    assert len(built["cells"]) == len(nb["cells"])
+    for i, (a, b) in enumerate(zip(built["cells"], nb["cells"])):
+        assert a["cell_type"] == b["cell_type"], i
+        assert _no_subject_list(_src(a)) == _no_subject_list(_src(b)), f"cell {i} differs from the generator output"
+    assert built["metadata"] == nb["metadata"]
+    # the committed notebook (no user edits) is the generator output exactly
+    try:
+        raw = subprocess.run(["git", "show", f"HEAD:{NB_NAME}"], cwd=ROOT, check=True, capture_output=True).stdout
+    except (OSError, subprocess.CalledProcessError):  # pragma: no cover
+        return
+    committed = json.loads(raw.decode("utf-8"))
+    assert [(c["cell_type"], _no_subject_list(_src(c))) for c in committed["cells"]] == \
+        [(c["cell_type"], _no_subject_list(_src(c))) for c in built["cells"]]
+    assert sum(len(_SUBJECT_LIST.findall(_src(c))) for c in nb["cells"]) == 1
 
 
 def test_generator_fails_loudly_when_an_anchor_is_missing(builder, head_1stage):
@@ -808,7 +828,7 @@ def test_notebook_config_is_main_1stage_except_the_documented_keys(nb, head_1sta
 def test_notebook_reuses_the_helper_and_preprocessing_cells_unchanged(nb, head_1stage):
     for needle in ("def local_prepare_batch_factory(", "PER-SUBJECT PRE-PROCESSING LOOP",
                    "device = get_device()", "ROOT = Path(\".\")"):
-        assert _code(nb, needle) == _code(head_1stage, needle), needle
+        assert _no_subject_list(_code(nb, needle)) == _no_subject_list(_code(head_1stage, needle)), needle
     assert nb["cells"][0]["cell_type"] == "markdown"
     assert nb["metadata"] == head_1stage["metadata"]
 
@@ -902,8 +922,8 @@ def test_notebook_has_no_untagged_output_path(nb):
 def test_other_notebooks_are_not_touched_by_the_generator(builder):
     src = Path(builder.__file__).read_text(encoding="utf-8")
     assert '"main_1stage_residual.ipynb"' in src
-    assert "HEAD" in src and ":main_1stage.ipynb" in src
-    assert not re.search(r'open\([^)]*main(_1stage)?\.ipynb', src)
+    assert "HEAD" in src and ":main_p2p.ipynb" in src
+    assert not re.search(r'open\([^)]*main(_1stage|_p2p)?\.ipynb', src)
 
 
 def test_library_exports():

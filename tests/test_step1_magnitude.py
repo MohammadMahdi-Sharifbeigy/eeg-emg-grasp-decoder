@@ -374,7 +374,7 @@ def _notebook_config(name: str) -> dict:
     return ns["CONFIG"]
 
 
-@pytest.mark.parametrize("name", ["main.ipynb", "main_1stage.ipynb"])
+@pytest.mark.parametrize("name", ["main.ipynb", "main_p2p.ipynb"])
 def test_notebook_config_turns_step1_on(name):
     cfg = _notebook_config(name)
     kin = cfg["preprocessing"]["kinematics"]
@@ -404,7 +404,7 @@ def test_notebook_config_turns_step1_on(name):
 
 
 def test_both_notebooks_share_data_preprocessing_model_and_loss():
-    a, b = _notebook_config("main.ipynb"), _notebook_config("main_1stage.ipynb")
+    a, b = _notebook_config("main.ipynb"), _notebook_config("main_p2p.ipynb")
     for k in ("data", "preprocessing", "dataset", "model", "outputs"):
         assert a[k] == b[k], k
     assert a["training"]["loss"] == b["training"]["loss"]
@@ -420,7 +420,7 @@ def test_stage2_uses_its_own_early_stop_patience():
     assert "stage2_early_stop_patience" in loso
 
 
-@pytest.mark.parametrize("name", ["main.ipynb", "main_1stage.ipynb"])
+@pytest.mark.parametrize("name", ["main.ipynb", "main_p2p.ipynb"])
 def test_no_stale_22_feature_texts(name):
     nb = _notebook(name)
     for c in nb["cells"]:
@@ -431,7 +431,7 @@ def test_no_stale_22_feature_texts(name):
 
 def test_figure_folders_do_not_collide_with_the_previous_runs():
     from main.plots import get_dynamic_fig_dir
-    a, b = _notebook_config("main.ipynb"), _notebook_config("main_1stage.ipynb")
+    a, b = _notebook_config("main.ipynb"), _notebook_config("main_p2p.ipynb")
     b["training"]["lr"] = b["training"]["single_stage"]["lr"]       # as the 1-stage CONFIG cell does
     a["data"]["participant"] = b["data"]["participant"] = 1
     da, db = get_dynamic_fig_dir(a).as_posix(), get_dynamic_fig_dir(b).as_posix()

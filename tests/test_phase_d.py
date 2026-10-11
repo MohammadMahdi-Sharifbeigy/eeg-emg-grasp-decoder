@@ -49,7 +49,7 @@ from main.interp import (
 from main.magnitude_eval import lift_hold_segments
 from main.model import KGGTModel
 
-NOTEBOOKS = ["main.ipynb", "main_1stage.ipynb"]
+NOTEBOOKS = ["main.ipynb", "main_p2p.ipynb"]
 NAMES = ["AD", "BR", "FD", "ED", "FDI"]
 
 # ── tiny models ───────────────────────────────────────────────────────────────
@@ -688,7 +688,7 @@ def test_notebook_code_cells_compile(name):
             compile(code, f"{name}[cell {i}]", "exec")
 
 
-@pytest.mark.parametrize("name,suffix", [("main.ipynb", ""), ("main_1stage.ipynb", "_1stage")])
+@pytest.mark.parametrize("name,suffix", [("main.ipynb", ""), ("main_p2p.ipynb", "_1stage")])
 def test_notebook_interpretability_cells_in_order(name, suffix):
     cells = _nb(name)["cells"]
     i = next(k for k, c in enumerate(cells)
@@ -734,14 +734,14 @@ def test_notebook_interpretability_cells_in_order(name, suffix):
 
 
 def test_both_notebook_configs_identical_for_data_model_loss():
-    a, b = _config(_nb("main.ipynb")), _config(_nb("main_1stage.ipynb"))
+    a, b = _config(_nb("main.ipynb")), _config(_nb("main_p2p.ipynb"))
     for k in ("data", "preprocessing", "dataset", "model"):
         assert a[k] == b[k], k
     assert a["training"]["loss"] == b["training"]["loss"]
 
 
 def test_1stage_interpretability_cells_are_inherited_from_main():
-    a, b = _nb("main.ipynb"), _nb("main_1stage.ipynb")
+    a, b = _nb("main.ipynb"), _nb("main_p2p.ipynb")
     for needle in ("plot_interp_window(", "plot_event_locked("):
         x = next(_src(c) for c in a["cells"] if c["cell_type"] == "code" and needle in _src(c)).splitlines()
         y = next(_src(c) for c in b["cells"] if c["cell_type"] == "code" and needle in _src(c)).splitlines()

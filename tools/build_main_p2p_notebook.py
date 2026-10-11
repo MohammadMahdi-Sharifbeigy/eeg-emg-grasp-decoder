@@ -1,6 +1,12 @@
-"""Build ``main_1stage.ipynb`` from the git-HEAD version of ``main.ipynb``.
+"""Build ``main_p2p.ipynb`` from the git-HEAD version of ``main.ipynb``.
 
-main_1stage.ipynb = main.ipynb with the two-stage scheme (Transformer-only
+main_p2p.ipynb is the single-stage Package 2 / Phase B notebook.  It was called
+main_1stage.ipynb until the original (pre Phase B) single-stage notebook was restored
+under that name; main_1stage.ipynb is now hand-maintained and NOT written by this script.
+The output names of main_p2p.ipynb keep their ``_1stage`` / ``p2b`` parts, so the Phase-B
+checkpoints and results written before the rename still match.
+
+main_p2p.ipynb = main.ipynb with the two-stage scheme (Transformer-only
 pre-training -> frozen-encoder KG-GT fine-tuning) replaced by ONE stage that
 trains the full KG-GT model jointly from scratch.  Preprocessing, cache, data
 split and loss are untouched; checkpoints/results go to separate *_1stage
@@ -14,7 +20,7 @@ staged index version).  Every edit is a substring
 lookup that must match exactly once, otherwise the script fails loudly.
 
 Usage:
-    env/Scripts/python.exe tools/build_main_1stage_notebook.py [--rev HEAD] [--out main_1stage.ipynb]
+    env/Scripts/python.exe tools/build_main_p2p_notebook.py [--rev HEAD] [--out main_p2p.ipynb]
 """
 
 from __future__ import annotations
@@ -131,7 +137,7 @@ The Step-1 model reached Pearson r 0.89 on the P1 test series, but time-shufflin
 
 **What is different from `main.ipynb`**
 
-| | `main.ipynb` (two-stage) | `main_1stage.ipynb` (this notebook) |
+| | `main.ipynb` (two-stage) | `main_p2p.ipynb` (this notebook) |
 |---|---|---|
 | Stage 1 | Transformer-only EEG model, `stage1_lr`=1e-3, 75 epochs, early stop after 10 epochs (`stage1_early_stop_patience`) | — (none) |
 | Stage 2 / training | KG-GT, encoder/node-proj loaded from stage 1, everything except GAT, decoder, kin-skip, node-proj and the last 1–2 encoder layers **frozen**, `stage2_lr`=1e-4, `reduce` scheduler, no warmup, early stop after 25 epochs | KG-GT, **nothing frozen**, `single_stage.lr`=1e-3, `cosine` + 5 warmup epochs (AdamW), `single_stage.epochs`=200, early stop after 20 epochs (`single_stage.early_stop_patience`) |
@@ -168,7 +174,7 @@ Early stopping and the choice of the best epoch use a **smoothed** validation lo
 `results/p2b/evaluation_report.md` (two-stage) with `results/p2b/evaluation_report_1stage.md` (this one) —
 same test series, same metrics — and the best epoch / final val loss printed by the training loops;
 `results/p2b/input_ablation.csv` vs `results/p2b/input_ablation_1stage.csv` shows whether the two training
-schemes rely on EEG and kinematics differently. The Step-1 results of this notebook are the untagged files
+schemes rely on EEG and kinematics differently. The Step-1 results (original notebook, `main_1stage.ipynb`) are the untagged files
 `results/evaluation_report_1stage.md`, `results/magnitude_report_1stage.*`, `results/input_ablation_1stage.*`
 and the checkpoints in `outputs/checkpoints_1stage/` (not touched by a `p2b` run).
 """
@@ -468,7 +474,7 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
             '            "epochs": 200,      # = max_epochs\n'
             '            # epochs without a new best of the SMOOTHED val loss (5-epoch moving average,\n'
             '            # main/training.py; best.pt is selected on that smoothed value too)\n'
-            '            "early_stop_patience": 20,\n'
+            '            "early_stop_patience": 25,\n'   # the user's value (commit 60a054e)
             '        },\n',
         ),
         (
@@ -486,6 +492,15 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
     i = find_cell(nb, "def local_prepare_batch_factory(")
     set_src(nb["cells"][i], src(nb["cells"][i]).rstrip("\n") + "\n" + SINGLE_STAGE_HELPER)
     log["helpers"] = f"cell {i} edited (train_single_stage added)"
+
+    # 3b. participants: the user's choice for the Phase-B runs (commit 60a054e), kept here
+    #     so that regenerating the notebook does not reset it to main.ipynb's [1].
+    #     subject_list and single_stage.early_stop_patience are edited by the user in the
+    #     notebook itself; tests/test_main_p2p_notebook.py does not compare their values.
+    i = edit_cell(nb, "subject_list = [1]   #", [
+        ("subject_list = [1]   #", "subject_list = [1,2,3,4,5,6]   #"),
+    ])
+    log["subject_list"] = f"cell {i} edited ([1,2,3,4,5,6])"
 
     # 4. training loop
     i = find_cell(nb, "PER-SUBJECT TRAINING LOOP  (Stage 1 + Stage 2)")
@@ -617,7 +632,7 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--rev", default="HEAD", help="git revision of main.ipynb to copy (default HEAD)")
-    ap.add_argument("--out", default=str(ROOT / "main_1stage.ipynb"))
+    ap.add_argument("--out", default=str(ROOT / "main_p2p.ipynb"))
     args = ap.parse_args()
     nb, log = build(args.rev)
     with open(args.out, "w", encoding="utf-8", newline="\n") as f:   # LF on Windows too

@@ -61,7 +61,7 @@ from main.model import (  # noqa: E402
 from main.training import normalized_prepare_batch_factory  # noqa: E402
 
 FS = 500.0
-NOTEBOOKS = ["main.ipynb", "main_1stage.ipynb"]
+NOTEBOOKS = ["main.ipynb", "main_p2p.ipynb"]
 RUN_TAG = "p2b"
 
 
@@ -932,7 +932,7 @@ def test_notebook_model_builds_with_the_phase_b_config(name):
 
 
 @pytest.mark.parametrize("name,ckpt", [("main.ipynb", "outputs/checkpoints_main_p2b"),
-                                       ("main_1stage.ipynb", "outputs/checkpoints_1stage_p2b")])
+                                       ("main_p2p.ipynb", "outputs/checkpoints_1stage_p2b")])
 def test_notebook_paths_come_from_the_run_tag(name, ckpt):
     ns = _config_ns(name)
     cfg = ns["CONFIG"]
@@ -1021,7 +1021,7 @@ def test_notebook_ablation_cell_reports_kin_off_and_the_acceptance_criteria(name
 
 
 def test_both_notebooks_share_data_model_and_loss():
-    a, b = _config_ns("main.ipynb")["CONFIG"], _config_ns("main_1stage.ipynb")["CONFIG"]
+    a, b = _config_ns("main.ipynb")["CONFIG"], _config_ns("main_p2p.ipynb")["CONFIG"]
     for k in ("data", "preprocessing", "dataset", "model", "outputs"):
         assert a[k] == b[k], k
     assert a["training"]["loss"] == b["training"]["loss"]

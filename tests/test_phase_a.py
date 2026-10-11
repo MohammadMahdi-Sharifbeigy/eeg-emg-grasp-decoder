@@ -39,7 +39,7 @@ TRUE_LONG = ["Anterior Deltoid", "Brachoradial", "Flexor Digitorum",
              "Common Extensor Digitorum", "First Dorsal Interosseus"]
 TRUE_SHORT = ["AD", "BR", "FD", "ED", "FDI"]
 WRONG = ["FDI", "APB", "ADM", "ECR", "FCR"]
-NOTEBOOKS = ["main.ipynb", "main_1stage.ipynb"]
+NOTEBOOKS = ["main.ipynb", "main_p2p.ipynb"]
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -510,7 +510,7 @@ def test_magnitude_cell_prints_the_gain_table_as_an_oracle_diagnostic(name):
 # 3. Ablation cell placement / 4. early-stop patience
 # ════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("name,suffix", [("main.ipynb", ""), ("main_1stage.ipynb", "_1stage")])
+@pytest.mark.parametrize("name,suffix", [("main.ipynb", ""), ("main_p2p.ipynb", "_1stage")])
 def test_ablation_cell_right_after_magnitude(name, suffix):
     cells = _nb(name)["cells"]
     i = next(k for k, c in enumerate(cells) if "# EVALUATION — Full metric suite" in _src(c))
@@ -531,14 +531,14 @@ def test_ablation_cell_right_after_magnitude(name, suffix):
 
 def test_1stage_ablation_cell_is_inherited_from_main():
     a = _cell_src(_nb("main.ipynb"), "input_ablation(")
-    b = _cell_src(_nb("main_1stage.ipynb"), "input_ablation(")
+    b = _cell_src(_nb("main_p2p.ipynb"), "input_ablation(")
     a_lines, b_lines = a.splitlines(), b.splitlines()
     assert len(a_lines) == len(b_lines)
     diff = [(x, y) for x, y in zip(a_lines, b_lines) if x != y]
     assert 0 < len(diff) <= 6
     for x, y in diff:                             # only output names / the title differ
         assert "1stage" in y or "single-stage" in y, (x, y)
-    gen = (ROOT / "tools" / "build_main_1stage_notebook.py").read_text(encoding="utf-8")
+    gen = (ROOT / "tools" / "build_main_p2p_notebook.py").read_text(encoding="utf-8")
     assert "ABLATION_CELL" not in gen             # no own copy in the generator any more
 
 
@@ -556,18 +556,22 @@ def test_main_stage1_has_its_own_patience():
     assert '_s1_cfg.early_stop_patience = notebook_cfg["training"].get("stage1_early_stop_patience"' in loso
 
 
-def test_1stage_patience_is_20_and_used_by_train_single_stage():
-    cfg = _config("main_1stage.ipynb")["training"]
-    assert cfg["single_stage"] == {"lr": 1e-3, "epochs": 200, "early_stop_patience": 20}
+def test_1stage_patience_comes_from_the_config_and_is_used_by_train_single_stage():
+    cfg = _config("main_p2p.ipynb")["training"]
+    ss = cfg["single_stage"]
+    assert set(ss) == {"lr", "epochs", "early_stop_patience"}
+    assert (ss["lr"], ss["epochs"]) == (1e-3, 200)
+    # the value is the user's to tune (20 at first, 25 since commit 60a054e): not pinned
+    assert type(ss["early_stop_patience"]) is int and 0 < ss["early_stop_patience"] <= 50
     assert cfg["early_stop_patience"] == 50       # shared key stays for other uses
     assert cfg["stage1_early_stop_patience"] == 10 and cfg["stage2_early_stop_patience"] == 25
-    helper = _cell_src(_nb("main_1stage.ipynb"), "def train_single_stage(")
+    helper = _cell_src(_nb("main_p2p.ipynb"), "def train_single_stage(")
     assert 'tc.early_stop_patience = ss.get("early_stop_patience", tc.early_stop_patience)' in helper
     assert "smoothed" in helper.lower() or "moving average" in helper.lower()
 
 
 def test_both_configs_identical_outside_training_extras():
-    a, b = _config("main.ipynb"), _config("main_1stage.ipynb")
+    a, b = _config("main.ipynb"), _config("main_p2p.ipynb")
     for k in ("data", "preprocessing", "dataset", "model", "outputs"):
         assert a[k] == b[k], k
     assert a["training"]["loss"] == b["training"]["loss"]

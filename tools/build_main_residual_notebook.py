@@ -1,9 +1,9 @@
-"""Build ``main_1stage_residual.ipynb`` from the git-HEAD version of ``main_1stage.ipynb``.
+"""Build ``main_1stage_residual.ipynb`` from the git-HEAD version of ``main_p2p.ipynb``.
 
 Package 2 — Phase C: does EEG explain what kinematics cannot?
 
 main_1stage_residual.ipynb keeps the imports, device, CONFIG, helper and pre-processing
-cells of main_1stage.ipynb (same cache, same condition-stratified split, same band-power EEG
+cells of main_p2p.ipynb (same cache, same condition-stratified split, same band-power EEG
 features and normalisation, same model and loss settings) and replaces everything after the
 pre-processing loop by:
 
@@ -17,8 +17,8 @@ pre-processing loop by:
 CONFIG differs only in outputs.run_tag ("p2c"), training.checkpoint_dir
 ("outputs/checkpoints_residual_p2c") and the new "residual" block.
 
-The source is ``git show <rev>:main_1stage.ipynb`` (default HEAD), so the user's working
-copy of main_1stage.ipynb (which may carry cell outputs) is neither read nor written.
+The source is ``git show <rev>:main_p2p.ipynb`` (default HEAD), so the user's working
+copy of main_p2p.ipynb (which may carry cell outputs) is neither read nor written.
 Every cell and every edit is looked up by a substring that must match exactly once,
 otherwise the script fails loudly.
 
@@ -35,7 +35,7 @@ import subprocess
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-SOURCE = "main_1stage.ipynb"
+SOURCE = "main_p2p.ipynb"
 OUT_NAME = "main_1stage_residual.ipynb"
 
 
@@ -43,7 +43,7 @@ OUT_NAME = "main_1stage_residual.ipynb"
 
 def load_head_notebook(rev: str = "HEAD") -> dict:
     raw = subprocess.run(
-        ["git", "show", f"{rev}:main_1stage.ipynb"], cwd=ROOT, check=True, capture_output=True
+        ["git", "show", f"{rev}:main_p2p.ipynb"], cwd=ROOT, check=True, capture_output=True
     ).stdout
     return json.loads(raw.decode("utf-8"))
 
@@ -107,7 +107,7 @@ TITLE_MD = """\
 
 **Stage E — EEG residual model.** For every batch the target is the residual in normalised units, `res = emg_z − kin_pred_z`, with `kin_pred_z` from the frozen Stage-K model (eval mode, no gradient). The model is the same architecture with both kinematic pathways off (`use_kin=False`, wrapper `EEGOnly`): band-power EEG → encoder → node projection → GAT with the static edge bias only → decoder. The regularised encoder and the electrode dropout of `CONFIG` stay on. The residual is signed and has mean ≈ 0, so the envelope-specific loss terms do not apply; the loss is `ResidualLoss` = Huber(δ = 1) + 0.2 · (1 − Pearson r along time, per window and muscle; windows whose residual is constant are skipped). The cell prints the loss of predicting zero residual: a trained model has to be below it on the validation series.
 
-Both stages use `residual.lr`, `residual.early_stop_patience` and their own number of epochs; optimiser, cosine schedule, warm-up, parameter groups (encoder + node projection at lr × 0.1, kin skip at lr / 3), gradient clipping, AMP, batch size and gradient accumulation are the shared `training` keys of `main_1stage.ipynb`.
+Both stages use `residual.lr`, `residual.early_stop_patience` and their own number of epochs; optimiser, cosine schedule, warm-up, parameter groups (encoder + node projection at lr × 0.1, kin skip at lr / 3), gradient clipping, AMP, batch size and gradient accumulation are the shared `training` keys of `main_p2p.ipynb`.
 
 ## What the numbers mean
 
@@ -149,9 +149,9 @@ Otherwise the verdict is **"no evidence"**. "No evidence" is not evidence of abs
 
 Stage E resumes from its `last.pt`. Its targets depend on the Stage-K model, so if Stage K is trained again, delete the `eeg_residual` folder (or change the run tag) before running Stage E.
 
-## What is the same as `main_1stage.ipynb`
+## What is the same as `main_p2p.ipynb`
 
-`CONFIG` is that of `main_1stage.ipynb` except `outputs.run_tag` (`p2c`), `training.checkpoint_dir` and the new `residual` block. Same participants and condition-stratified split, same preprocessing and cache (`data/cache_main_stride500_square_pose_force_sg51`, read only), same 128 log band-power EEG inputs (z-scored with the training series, clipped to ±5), same 24 kinematic inputs, same model sizes and loss weights. The helper and pre-processing cells are copied unchanged. This notebook has no interpretability cells.
+`CONFIG` is that of `main_p2p.ipynb` except `outputs.run_tag` (`p2c`), `training.checkpoint_dir` and the new `residual` block. Same participants and condition-stratified split, same preprocessing and cache (`data/cache_main_stride500_square_pose_force_sg51`, read only), same 128 log band-power EEG inputs (z-scored with the training series, clipped to ±5), same 24 kinematic inputs, same model sizes and loss weights. The helper and pre-processing cells are copied unchanged. This notebook has no interpretability cells.
 """
 
 STAGE_K_MD = """\
@@ -537,7 +537,7 @@ CONFIG_EDITS = [
         '    # ── Package 2, Phase B: make the EEG path contribute (run tag "p2b") ────────\n',
         'CONFIG = {\n'
         '    # ── Package 2, Phase C: does EEG explain what kinematics cannot? (run tag "p2c") ──\n'
-        '    # Identical to main_1stage.ipynb\'s CONFIG except: outputs.run_tag, training.checkpoint_dir\n'
+        '    # Identical to main_p2p.ipynb\'s CONFIG except: outputs.run_tag, training.checkpoint_dir\n'
         '    # and the "residual" block (Stage K = kinematics-only model, Stage E = EEG model on the\n'
         '    # residual). kin_dropout, w_eeg_only and the EEG-only auxiliary output are switched off\n'
         '    # per stage in the stage cells, not here.\n'
@@ -561,7 +561,7 @@ CONFIG_EDITS = [
         '        # ── checkpoints of THIS run (must end in the run tag, checked below the dict) ──\n'
         '        # Stage K -> <checkpoint_dir>/kin_only/{subject}/, Stage E -> <checkpoint_dir>/eeg_residual/{subject}/\n'
         '        "checkpoint_dir": "outputs/checkpoints_residual_p2c",\n'
-        '        # ── single_stage: main_1stage.ipynb only (kept so the two CONFIGs stay comparable;\n'
+        '        # ── single_stage: main_p2p.ipynb only (kept so the two CONFIGs stay comparable;\n'
         '        #    this notebook takes lr / epochs / patience from the "residual" block below) ──\n'
         '        # The full KG-GT model is trained ONCE, jointly, nothing frozen.\n',
     ),
@@ -602,7 +602,7 @@ CONFIG_EDITS = [
         'CONFIG["training"]["lr"] = CONFIG["training"]["single_stage"]["lr"]\n',
         '# Plot folders (main.plots.get_dynamic_fig_dir) are keyed on training["lr"] and the run tag:\n'
         '# use the LR of the two stages (the folder also ends in the run tag, so nothing is shared\n'
-        '# with main.ipynb / main_1stage.ipynb).\n'
+        '# with main.ipynb / main_p2p.ipynb).\n'
         'CONFIG["training"]["lr"] = CONFIG["residual"]["lr"]\n',
     ),
 ]
@@ -659,7 +659,7 @@ def build(rev: str = "HEAD") -> tuple[dict, dict]:
 
 def main() -> None:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("--rev", default="HEAD", help="git revision of main_1stage.ipynb to copy (default HEAD)")
+    ap.add_argument("--rev", default="HEAD", help="git revision of main_p2p.ipynb to copy (default HEAD)")
     ap.add_argument("--out", default=str(ROOT / "main_1stage_residual.ipynb"))
     args = ap.parse_args()
     nb, log = build(args.rev)
