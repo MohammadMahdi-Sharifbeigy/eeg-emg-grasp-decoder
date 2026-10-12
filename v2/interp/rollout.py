@@ -17,6 +17,7 @@ def with_residual(m: torch.Tensor, residual: float = 0.5) -> torch.Tensor:
     """(1 - residual) * M + residual * I: a layer whose output is 'what it attended to' plus 'itself'."""
     if m.shape[-1] != m.shape[-2]:
         raise ValueError(f"a residual layer needs a square map, got {tuple(m.shape)}")
+    m = m.detach().float()
     return (1.0 - residual) * m + residual * torch.eye(m.shape[-1], dtype=m.dtype, device=m.device)
 
 
@@ -36,6 +37,9 @@ def relevance_layer(attn: torch.Tensor, grad: torch.Tensor, residual: float = 0.
 
 def rollout(mats) -> torch.Tensor:
     """Product M_L ... M_1 of forward-ordered layer matrices: (..., n_L, n_0)."""
+    mats = list(mats)
+    if not mats:
+        raise ValueError("rollout needs at least one layer, got an empty list")
     out = mats[0]
     for m in mats[1:]:
         out = m @ out

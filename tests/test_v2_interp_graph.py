@@ -76,3 +76,47 @@ def test_bin_matrix_keeps_rows_stochastic():
     np.testing.assert_allclose(b[0, 0], m[:4, :4].sum() / 4, atol=1e-6)
     np.testing.assert_allclose(b[2, 2], m[8:, 8:].sum() / 2, atol=1e-6)        # the last bin holds 2 positions
     np.testing.assert_allclose(bin_matrix(m, 1), m, atol=1e-7)
+
+
+def test_flow_rejects_a_sink_outside_the_last_layer():
+    m1 = np.array([[0.5, 0.5], [0.5, 0.5]])
+    m2 = np.array([[1.0, 0.0], [0.2, 0.8]])
+    for bad in (-1, 2, 5):                                  # no negative indexing, no node of another layer
+        with pytest.raises(ValueError, match="sink"):
+            attention_flow([m1, m2], sinks=[bad])
+    with pytest.raises(ValueError, match="sink"):
+        attention_flow([m1], sinks=[2])
+
+
+def test_flow_rejects_an_empty_list_of_layers():
+    with pytest.raises(ValueError, match="at least one layer"):
+        attention_flow([])
+
+
+def test_flow_rejects_capacities_that_are_not_attention_weights():
+    ok = np.array([[0.5, 0.5], [0.5, 0.5]])
+    for bad in (np.nan, np.inf, -np.inf):
+        with pytest.raises(ValueError, match="finite"):
+            attention_flow([ok, np.array([[bad, 0.5], [0.5, 0.5]])])
+    for bad in (3000.0, 1.001):                             # 3000 used to overflow int32 and answer 0
+        with pytest.raises(ValueError, match="above 1"):
+            attention_flow([np.array([[bad, 0.5], [0.5, 0.5]]), ok])
+    np.testing.assert_allclose(attention_flow([np.array([[1.0 + 5e-7, 0.0], [0.5, 0.5]])])[0, 0], 1.0, atol=2e-6)
+
+
+def test_bin_matrix_rejects_a_size_below_one():
+    for bad in (0, -3):
+        with pytest.raises(ValueError, match="size"):
+            bin_matrix(np.ones((4, 4)) / 4, bad)
+
+
+def test_rollout_rejects_an_empty_list():
+    with pytest.raises(ValueError, match="at least one layer"):
+        rollout([])
+
+
+def test_with_residual_returns_a_detached_float32_tensor():
+    x = torch.rand(3, 3, dtype=torch.float64, requires_grad=True)
+    out = with_residual(x, 0.5)
+    assert out.dtype == torch.float32 and not out.requires_grad
+    torch.testing.assert_close(out, (0.5 * x + 0.5 * torch.eye(3, dtype=torch.float64)).detach().float())
