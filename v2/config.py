@@ -13,7 +13,7 @@ CONFIG_V2 = {
         "d_model": 64, "n_heads": 4, "ffn_dim": 256, "dropout": 0.2,
         "kin_layers": 3, "eeg_layers": 2,
         "electrode_dim": 32, "electrode_gat_layers": 2, "electrode_dropout": 0.2,
-        "node_dim": 32, "muscle_gat_layers": 2,
+        "node_dim": 32, "muscle_gat_layers": 2, "muscle_dropout": 0.1,
     },
     "loss": {"w_main": 1.0, "w_ccc": 0.3, "w_lift": 0.5, "w_diff": 0.1, "huber_delta": 0.5},
     "training": {
