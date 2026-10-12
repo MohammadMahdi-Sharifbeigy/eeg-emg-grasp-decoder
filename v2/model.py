@@ -65,7 +65,7 @@ class EEGStream(nn.Module):
     def forward(self, eeg):
         if self.training and self.p_drop > 0:
             keep = (torch.rand(eeg.shape[0], 1, eeg.shape[2], 1, device=eeg.device) >= self.p_drop).to(eeg.dtype)
-            eeg = eeg * keep / (1.0 - self.p_drop)
+            eeg = eeg * keep        # no 1 / (1 - p): electrodes are embedded one by one and only averaged, never summed
         nodes = self.graph(self.embed(eeg) + self.identity.to(eeg.dtype))
         tokens = self.enc(self.up(self.pool(nodes)))
         return self.head(tokens), tokens
@@ -98,7 +98,7 @@ class KGGTv2(nn.Module):
         e_out, eeg_tokens = self.eeg(eeg)
         f_out, f_eeg = self.fusion(kin_tokens, eeg_tokens, k_out)
         return {"K": k_out, "E": e_out, "F": f_out, "K_base": k_base, "gain": gain, "F_eeg": f_eeg,
-                "gate": self.fusion.gate.detach()}
+                "gate": self.fusion.gate.detach().clone()}
 
     def attention_layers(self) -> dict:
         """Names of every recorded attention module, by stream and stage, in forward order."""

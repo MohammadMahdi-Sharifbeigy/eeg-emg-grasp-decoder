@@ -40,6 +40,7 @@ def test_every_attention_module_is_recorded_and_listed():
     layers = m.attention_layers()
     in_model = [n for n, mod in m.named_modules() if isinstance(mod, RECORDED)]
     assert sorted(_listed(layers)) == sorted(tape.attn) == sorted(in_model) and len(in_model) == 13
+    assert _listed(layers) == list(tape.attn)                             # forward order: as the tape received them
     shape = lambda names: {tuple(tape.attn[n].shape) for n in names}
     assert shape(layers["kin"]["temporal"]) == shape(layers["eeg"]["temporal"]) == {(B, 4, T, T)}
     assert len(layers["kin"]["temporal"]) == 3 and len(layers["eeg"]["temporal"]) == 2
@@ -194,5 +195,90 @@ def test_every_stacked_attention_layer_is_a_pre_norm_residual_block():
         d = block.n1.normalized_shape[0]
         x = torch.randn(2, 9, d) if block.edge is None else torch.randn(2, 9, block.edge.shape[-1], d)
         assert torch.equal(block.eval()(x), x) and torch.equal(block.train()(x), x), name
+        read = []                                                          # what each sub-layer gets: the normalised input
+        hooks = [block.attn.register_forward_pre_hook(lambda mod, args: read.append(args[0]))]
+        if block.ffn is not None:
+            hooks.append(block.ffn.register_forward_pre_hook(lambda mod, args: read.append(args[0])))
+        block.eval()(x)
+        for h in hooks:
+            h.remove()
+        assert torch.equal(read[0], block.n1(x)) and not torch.equal(read[0], x), name
+        assert block.ffn is None or torch.equal(read[1], block.n2(x)), name
     for name in (layers["eeg"]["pool"], layers["fusion"]["cross"]):       # the two layers without a skip
         assert not any(name.startswith(n + ".") for n in blocks), name
+
+
+def _self_only(att):                                  # force an attention module to look at its own position only
+    att.forward = lambda q, context=None, bias=None, _f=att.forward: _f(q, context, 1e4 * torch.eye(q.shape[-2]))
+
+
+def test_fusion_has_no_skip():
+    m = build_model(CONFIG_V2).eval()
+    const = torch.randn(1, 1, CONFIG_V2["model"]["d_model"]).expand(B, T, -1)
+    eeg_forward = m.eeg.forward
+    m.eeg.forward = lambda x: (eeg_forward(x)[0], const)                   # the same EEG token at every time step
+    with torch.no_grad():
+        m.fusion.gate.fill_(0.5)
+    kin, hist, eeg = _inputs()
+    a = m(kin, hist, eeg)["F_eeg"]
+    b = m(torch.randn_like(kin), torch.rand_like(hist), eeg)["F_eeg"]
+    assert float(a.detach().abs().sum()) > 0                               # the queries only choose where to look,
+    torch.testing.assert_close(a, b, atol=1e-6, rtol=0)                    # so other kinematics change nothing here
+
+
+def test_history_gain_acts_on_one_time_step():
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2).eval()
+    with torch.no_grad():
+        m.kin.gain[-1].weight.normal_(0, 0.5)
+    kin, hist, eeg = _inputs()
+    hist2 = hist.clone(); hist2[:, 30] += 0.5
+    change = (m(kin, hist2, eeg)["gain"] - m(kin, hist, eeg)["gain"]).abs().amax(dim=(0, 2))
+    assert change.gt(1e-6).nonzero().flatten().tolist() == [30]
+
+
+def test_history_gain_stays_between_a_half_and_two():
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2).eval()
+    with torch.no_grad():
+        m.kin.gain[-1].weight.normal_(0, 50.0)                             # far outside any trained range
+    g = m(*_inputs())["gain"].detach()
+    assert float(g.min()) >= 0.5 and float(g.max()) <= 2.0 and float(g.min()) < 0.51 and float(g.max()) > 1.99
+
+
+def test_electrodes_are_mixed_only_by_recorded_attention():
+    m = build_model(CONFIG_V2).eval()
+    for name in m.attention_layers()["eeg"]["electrode"]:
+        _self_only(m.get_submodule(name))
+    nodes = []                                                             # what reaches the pooling: (B, T, 32, d)
+    hook = m.eeg.pool.register_forward_pre_hook(lambda mod, args: nodes.append(args[0].detach()))
+    kin, hist, eeg = _inputs()
+    eeg2 = eeg.clone(); eeg2[:, :, 7] += 1.0
+    m(kin, hist, eeg); m(kin, hist, eeg2)
+    hook.remove()
+    assert (nodes[1] - nodes[0]).abs().amax(dim=(0, 1, 3)).gt(1e-6).nonzero().flatten().tolist() == [7]
+
+
+def test_electrode_dropout_zeroes_whole_electrodes_and_does_not_rescale():
+    cfg = copy.deepcopy(CONFIG_V2)
+    cfg["model"].update(dropout=0.0, muscle_dropout=0.0)                   # electrode dropout is the only random part
+    m = build_model(cfg)
+    fed = []                                                               # what the electrode embedding receives
+    hook = m.eeg.embed.register_forward_pre_hook(lambda mod, args: fed.append(args[0].detach()))
+    kin, hist, eeg = _inputs()
+    m.train(); torch.manual_seed(0); c = m(kin, hist, eeg)["E"]; torch.manual_seed(1); d = m(kin, hist, eeg)["E"]
+    m.eval(); m(kin, hist, eeg)
+    hook.remove()
+    assert not torch.equal(c, d) and not torch.equal(fed[0], fed[1]) and torch.equal(fed[2], eeg)
+    for x in fed[:2]:
+        kept = x.abs().amax(dim=(1, 3)) > 0                                # (B, electrodes): one draw per window
+        assert kept.any() and not kept.all()
+        assert torch.equal(x, eeg * kept[:, None, :, None])                # kept: unchanged; dropped: zero everywhere
+
+
+def test_gate_output_is_a_copy():
+    m = build_model(CONFIG_V2).eval()
+    out = m(*_inputs())
+    with torch.no_grad():
+        m.fusion.gate.fill_(0.7)
+    assert torch.equal(out["gate"], torch.zeros(5)) and not out["gate"].requires_grad
