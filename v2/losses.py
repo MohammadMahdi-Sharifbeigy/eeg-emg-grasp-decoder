@@ -21,18 +21,21 @@ def ccc_loss(pred, target, eps: float = 1e-8):
 
 
 def lift_level_loss(pred, target, hold_id, min_tokens: int = 5):
+    """Mean over holds of |mean(pred) - mean(target)| per muscle; a hold is one positive id inside one window.
+
+    Holds with fewer than min_tokens tokens are left out; without any hold the result is 0.
+    All holds of the batch are handled at once (no Python loop and no GPU sync per hold).
+    """
     p, t = pred.float(), target.float()
-    total, n = p.sum() * 0.0, 0
-    for b in range(p.shape[0]):
-        for k in torch.unique(hold_id[b]):
-            if int(k) <= 0:
-                continue
-            m = hold_id[b] == k
-            if int(m.sum()) < min_tokens:
-                continue
-            total = total + (p[b][m].mean(0) - t[b][m].mean(0)).abs().mean()
-            n += 1
-    return total / max(n, 1)
+    b, n_tok, c = p.shape
+    inside = hold_id > 0                                                           # (B, T)
+    key = hold_id.clamp(min=0) + torch.arange(b, device=hold_id.device)[:, None] * (hold_id.max().clamp(min=0) + 1)
+    holds, group = torch.unique(key[inside], return_inverse=True)                  # one group per (window, id)
+    n = torch.zeros(holds.numel(), device=p.device, dtype=p.dtype).index_add_(0, group, torch.ones_like(group, dtype=p.dtype))
+    diff = torch.zeros(holds.numel(), c, device=p.device, dtype=p.dtype).index_add_(0, group, (p - t)[inside])
+    keep = (n >= min_tokens).to(p.dtype)
+    per_hold = (diff / n.clamp(min=1)[:, None]).abs().mean(-1)                     # mean(p) - mean(t) = mean(p - t)
+    return p.sum() * 0.0 + (per_hold * keep).sum() / keep.sum().clamp(min=1)
 
 
 def diff_loss(pred, target):

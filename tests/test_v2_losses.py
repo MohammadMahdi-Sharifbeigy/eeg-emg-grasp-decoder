@@ -58,3 +58,49 @@ def test_loss_is_finite_under_autocast_and_differentiable():
         total, _, _ = v2_loss({"K": p, "E": p, "F": p}, t, hold, crit)
     total.float().backward()
     assert torch.isfinite(total.float()) and torch.isfinite(p.grad).all()
+
+
+def _lift_reference(pred, target, hold_id, min_tokens=5):
+    """The per-hold loop that lift_level_loss must reproduce: mean over holds of |mean(pred) - mean(target)|."""
+    p, t = pred.float(), target.float()
+    total, n = p.sum() * 0.0, 0
+    for b in range(p.shape[0]):
+        for k in torch.unique(hold_id[b]):
+            if int(k) <= 0:
+                continue
+            m = hold_id[b] == k
+            if int(m.sum()) < min_tokens:
+                continue
+            total = total + (p[b][m].mean(0) - t[b][m].mean(0)).abs().mean()
+            n += 1
+    return total / max(n, 1)
+
+
+def _random_holds(g, batch, t):
+    """Windows with 0 to 4 holds of 1 to 60 tokens (some shorter than min_tokens), ids not consecutive, one id split in two."""
+    hold = torch.zeros(batch, t, dtype=torch.int64)
+    for b in range(batch):
+        for k in range(int(torch.randint(0, 5, (1,), generator=g))):
+            start = int(torch.randint(0, t - 60, (1,), generator=g))
+            hold[b, start:start + int(torch.randint(1, 61, (1,), generator=g))] = 3 * k + 2      # later holds overwrite
+    hold[0] = 0                                               # a window without holds
+    hold[1, :3], hold[1, 3:] = 7, 0                           # only a hold that is too short
+    hold[2] = 0; hold[2, 10:14] = 5; hold[2, 50:53] = 5       # one id in two pieces: 7 tokens together
+    hold[3, 100:110] = -1                                     # ids <= 0 are not holds
+    return hold
+
+
+@pytest.mark.parametrize("seed", [0, 1, 2, 3])
+def test_lift_loss_equals_the_per_hold_loop(seed):
+    g = torch.Generator().manual_seed(seed)
+    p = torch.rand(8, 200, 5, generator=g).requires_grad_()
+    t = torch.rand(8, 200, 5, generator=g)
+    hold = _random_holds(g, 8, 200)
+    for min_tokens in (5, 1, 20):
+        new, ref = lift_level_loss(p, t, hold, min_tokens), _lift_reference(p, t, hold, min_tokens)
+        assert ref > 0 and abs(new.item() - ref.item()) < 1e-6
+        g_new, g_ref = torch.autograd.grad(new, p)[0], torch.autograd.grad(ref, p)[0]
+        assert (g_new - g_ref).abs().max() < 1e-6
+    for empty in (torch.zeros(8, 200, dtype=torch.int64), hold[1:2].repeat(8, 1)):      # no hold / only too-short holds
+        out = lift_level_loss(p, t, empty)
+        assert out == 0 and torch.autograd.grad(out, p)[0].abs().max() == 0

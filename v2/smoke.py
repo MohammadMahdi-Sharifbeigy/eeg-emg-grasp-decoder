@@ -2,7 +2,6 @@
 
 The measured step is the real training step: one optimizer per stream, stepped by `step_streams`.
 """
-import math
 import time
 
 import torch
