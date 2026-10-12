@@ -82,3 +82,75 @@ def test_gradients_are_clipped_per_stream():
                 assert torch.equal(p.grad, before[n]), n
         assert _stream_norm(m, big) <= 1.0 + 1e-4
         assert _stream_norm(m, small) <= 1.0 + 1e-4
+
+
+def test_one_optimizer_per_stream_and_gate_without_weight_decay():
+    from v2.train import build_optimizers
+    m = build_model(CONFIG_V2)
+    tc = CONFIG_V2["training"]
+    opts = build_optimizers(m, tc)
+    name_of = {id(p): n for n, p in m.named_parameters()}
+    seen = []
+    for stream, opt in opts.items():
+        for g in opt.param_groups:
+            names = [name_of[id(p)] for p in g["params"]]
+            assert all(stream_of(n) == stream for n in names)          # no optimizer holds the other stream
+            assert g["weight_decay"] == (0.0 if "fusion.gate" in names else tc["weight_decay"])
+            assert names == ["fusion.gate"] or "fusion.gate" not in names
+            seen += names
+    assert sorted(seen) == sorted(name_of.values())                    # every parameter, exactly once
+    assert set(opts) == {"kin", "eeg"} and "fusion.gate" in seen
+
+
+def test_non_finite_eeg_gradients_do_not_stop_the_kinematic_step():
+    from v2.train import build_optimizers, step_streams
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2)
+    opts = build_optimizers(m, CONFIG_V2["training"])
+    scaler = torch.amp.GradScaler("cuda", enabled=False)
+    for bad in (float("nan"), float("inf")):
+        before = {n: p.detach().clone() for n, p in m.named_parameters()}
+        for n, p in m.named_parameters():
+            p.grad = torch.randn_like(p)
+        m.eeg.up.weight.grad[0, 0] = bad                              # one bad entry spoils the EEG stream's step
+        stepped = step_streams(m, opts, scaler, 1.0)
+        assert stepped == {"kin": True, "eeg": False}
+        for n, p in m.named_parameters():
+            assert bool(torch.isfinite(p).all()), n
+            if stream_of(n) == "eeg":
+                assert torch.equal(p, before[n]), n                   # skipped: not even weight decay
+        assert not torch.equal(m.kin.stem.weight, before["kin.stem.weight"])
+        assert all(p.grad is None for p in m.parameters())
+
+
+def test_combined_best_model_is_validated(tmp_path):
+    tr, va, _ = _datasets()
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2)
+    logged = []
+    h = fit(m, tr, va, _cfg(epochs=2), torch.device("cpu"), tmp_path, log=logged.append)
+    vc = h["val_combined"]
+    assert set(vc) == {"kin", "eeg", "components"} and set(vc["components"]) == set(h["components"][0])
+    # K never reads the EEG stream, so the combined model repeats K's best epoch exactly
+    assert abs(vc["kin"] - h["val_kin"][h["best_epoch_kin"] - 1]) < 1e-6
+    assert np.isfinite(vc["eeg"])
+    assert json.loads((tmp_path / "history.json").read_text())["val_combined"]["kin"] == vc["kin"]
+    assert sum("combined best model" in line for line in logged) == 1
+
+
+def test_resume_refuses_a_checkpoint_of_another_config(tmp_path):
+    import pytest
+    tr, va, _ = _datasets()
+    m = build_model(CONFIG_V2)
+    fit(m, tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)
+    stored = torch.load(tmp_path / "best.pt", map_location="cpu", weights_only=False)["config"]
+    assert stored == {k: CONFIG_V2[k] for k in ("model", "tokens", "eeg", "history", "loss")}
+    other = _cfg(epochs=1)
+    other["loss"]["w_ccc"] = 0.0
+    with pytest.raises(RuntimeError) as err:
+        fit(build_model(CONFIG_V2), tr, va, other, torch.device("cpu"), tmp_path, log=lambda *_: None)
+    assert "'loss'" in str(err.value) and str(tmp_path / "best.pt") in str(err.value)
+    training_only = _cfg(epochs=9)                                    # the training block is not part of the identity
+    assert fit(build_model(CONFIG_V2), tr, va, training_only, torch.device("cpu"), tmp_path,
+               log=lambda *_: None)["epochs_run"] == 1
+    assert load_best(build_model(CONFIG_V2), tmp_path, torch.device("cpu"))["epochs_run"] == 1
