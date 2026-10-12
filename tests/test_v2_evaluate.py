@@ -59,3 +59,35 @@ def test_baseline_comparison(tmp_path):
     assert list(out.columns) == ["muscle", "baseline_r", "v2_K_r", "baseline_vaf", "v2_K_vaf", "d_vaf"]
     assert np.allclose(out.d_vaf, 4.0)
     assert E.baseline_comparison(v2, "P99", p) is None and E.baseline_comparison(v2, "P1", tmp_path / "none.csv") is None
+
+
+def test_float64_metrics_agree_with_standard():
+    y = _sig(T=300000)                                                        # float32, long enough for float32 sums to drift
+    p = (0.3 * np.roll(y, 50, axis=0)).astype(np.float32)
+    std = E.standard_metrics(p, y, NAMES)
+    assert np.array_equal(E._vaf(p, y), std.vaf.values) and np.array_equal(E._r(p, y), std.r.values)
+    assert E._vaf(p, y).dtype == np.float64
+
+
+def test_swap_verdict_planted():
+    rng = np.random.default_rng(0)
+    null_r = 0.01 * rng.standard_normal((20, 5))
+    null_d = 0.1 * rng.standard_normal((20, 5))
+    real = E.swap_verdict(np.full(5, 0.3), null_r, np.full(5, 2.0), null_d, n_blocks=81)   # planted effect in every muscle
+    assert real["E_p_swap"] == 1 / 21 and real["dF_p_swap"] == 1 / 21
+    assert np.isclose(real["E_r_mean"], 0.3) and np.isclose(real["dF_vaf_mean"], 2.0)
+    assert real["n_null"] == 20 and real["n_blocks"] == 81
+    one = np.array([0.05, 0.0, 0.0, 0.0, 0.0])                                # one muscle above its own null, the mean is not
+    weak = E.swap_verdict(one - 0.02, null_r, np.zeros(5), null_d, n_blocks=81)
+    assert E.swap_p((one - 0.02)[0], null_r[:, 0], 81) == 1 / 21 and weak["E_p_swap"] > 0.2
+    closed = E.swap_verdict(np.zeros(5), null_r, np.zeros(5), np.zeros((20, 5)), n_blocks=81)   # closed gate: F == K
+    assert closed["dF_vaf_mean"] == 0.0 and closed["dF_p_swap"] == 1.0
+
+
+def test_swap_verdict_degenerate_is_nan_and_logged():
+    said = []
+    v = E.swap_verdict(np.full(5, 0.3), np.full((20, 5), 0.3), np.zeros(5), np.zeros((20, 5)), n_blocks=1, log=said.append)
+    assert np.isnan(v["E_p_swap"]) and np.isnan(v["dF_p_swap"]) and v["n_blocks"] == 1
+    assert len(said) == 1 and "NaN" in said[0]
+    assert np.isnan(E.swap_p(0.3, np.zeros(20), 0)) and E.swap_p(0.3, np.zeros(20), 2) == 1 / 21
+    E.swap_verdict(np.zeros(5), np.zeros((2, 5)), np.zeros(5), np.zeros((2, 5)), n_blocks=1)   # no log given: no error

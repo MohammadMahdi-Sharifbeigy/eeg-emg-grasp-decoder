@@ -15,10 +15,12 @@ OUTPUTS = ("K", "E", "F")
 
 
 def _vaf(pred, target):
+    pred, target = np.asarray(pred, np.float64), np.asarray(target, np.float64)     # float64: agrees with standard_metrics
     return 100.0 * (1.0 - np.var(target - pred, axis=0) / np.maximum(np.var(target, axis=0), 1e-20))
 
 
 def _r(pred, target):
+    pred, target = np.asarray(pred, np.float64), np.asarray(target, np.float64)
     return np.array([np.corrcoef(pred[:, c], target[:, c])[0, 1] if pred[:, c].std() > 0 else 0.0
                      for c in range(target.shape[1])])
 
@@ -66,6 +68,27 @@ def empirical_p(observed: float, null) -> float:
     return float((1 + np.sum(null >= observed)) / (1 + len(null)))
 
 
+def swap_p(observed: float, null, n_blocks: int) -> float:
+    """Empirical p against the block-swap null; NaN when the swap could not change anything (< 2 full blocks)."""
+    return float("nan") if n_blocks < 2 else empirical_p(observed, null)
+
+
+def swap_verdict(e_r, e_r_null, d_f, d_f_null, n_blocks: int, log=None) -> dict:
+    """One test over all muscles: the mean over muscles against the per-draw means of the swap null.
+
+    `e_r`, `d_f`: observed per-muscle values (n_muscles,); `e_r_null`, `d_f_null`: (n_null, n_muscles).
+    The per-muscle p-values of the `nulls` table are descriptive; this is the verdict.
+    """
+    e_r_null, d_f_null = np.asarray(e_r_null, np.float64), np.asarray(d_f_null, np.float64)
+    if n_blocks < 2 and log is not None:
+        log(f"swap null not available: the test set has {n_blocks} full window-sized block(s), "
+            f"at least 2 are needed; swap p-values are NaN")
+    e_mean, d_mean = float(np.mean(e_r)), float(np.mean(d_f))
+    return {"E_r_mean": e_mean, "E_p_swap": swap_p(e_mean, e_r_null.mean(1), n_blocks),
+            "dF_vaf_mean": d_mean, "dF_p_swap": swap_p(d_mean, d_f_null.mean(1), n_blocks),
+            "n_null": int(len(e_r_null)), "n_blocks": int(n_blocks)}
+
+
 def baseline_comparison(standard_v2: pd.DataFrame, subject: str, path="results/magnitude_report_1stage.csv"):
     path = Path(path)
     if not path.exists():
@@ -81,7 +104,7 @@ def baseline_comparison(standard_v2: pd.DataFrame, subject: str, path="results/m
                          "d_vaf": k.vaf.values - b.vaf.values}).reset_index(drop=True)
 
 
-def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, data_dir=None) -> dict:
+def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, data_dir=None, log=None) -> dict:
     fs = float(cfg["data"]["fs"])
     win, hop = cfg["tokens"]["window"], cfg["tokens"]["hop"]
     use_amp = bool(cfg["training"]["use_amp"])
@@ -113,6 +136,7 @@ def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, 
     eeg_z = [normalise(t, norm, cfg["eeg"]["clip"])[1] for t in test_tokens]
     lens = np.cumsum([0] + [len(e) for e in eeg_z])
     all_eeg = np.concatenate(eeg_z)
+    n_blocks = len(all_eeg) // win                                            # full window-sized blocks in the test set
     r_e, vaf_k, vaf_f = _r(cat("E"), target), _vaf(cat("K"), target), _vaf(cat("F"), target)
     null = {"E_shuffle": [], "E_swap": [], "dF_swap": []}
     for _ in range(n_null):
@@ -133,11 +157,12 @@ def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, 
         "muscle": list(names), "E_r": r_e,
         "E_r_shuffle_mean": null["E_shuffle"].mean(0), "E_r_shuffle_sd": null["E_shuffle"].std(0),
         "E_r_swap_mean": null["E_swap"].mean(0), "E_r_swap_sd": null["E_swap"].std(0),
-        "E_p_swap": [empirical_p(r_e[c], null["E_swap"][:, c]) for c in range(len(names))],
+        "E_p_swap": [swap_p(r_e[c], null["E_swap"][:, c], n_blocks) for c in range(len(names))],
         "dF_vaf": d_f, "dF_vaf_swap_mean": null["dF_swap"].mean(0), "dF_vaf_swap_sd": null["dF_swap"].std(0),
-        "dF_p_swap": [empirical_p(d_f[c], null["dF_swap"][:, c]) for c in range(len(names))],
+        "dF_p_swap": [swap_p(d_f[c], null["dF_swap"][:, c], n_blocks) for c in range(len(names))],
         "gate": gate,
     })
+    verdict = swap_verdict(r_e, null["E_swap"], d_f, null["dF_swap"], n_blocks, log)
 
     # history check: K with the history of another test series (tiled or cut to length)
     hist_rows = pd.DataFrame({"muscle": list(names), "K_vaf": vaf_k})
@@ -149,4 +174,4 @@ def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, 
             parts.append(predict_series(model, tok, norm, device, hist=np.tile(other, (reps, 1))[:len(tok["hist"])], **kw)["K"])
         hist_rows["K_vaf_other_history"] = _vaf(np.concatenate(parts), target)
     return {"standard": standard, "magnitude": magnitude, "by_load": pd.concat(by_load, ignore_index=True),
-            "ceiling": ceiling, "nulls": nulls, "history": hist_rows, "predictions": preds}
+            "ceiling": ceiling, "nulls": nulls, "verdict": verdict, "history": hist_rows, "predictions": preds}
