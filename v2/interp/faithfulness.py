@@ -8,14 +8,24 @@ from scipy.stats import spearmanr
 
 @torch.no_grad()
 def deletion_curve(model, kin, hist, eeg, score, output="E", muscle=0, t=None, which="eeg",
-                   fractions=(0.05, 0.1, 0.2, 0.4), n_random=10, seed=0) -> dict:
+                   fractions=(0.05, 0.1, 0.2, 0.4), n_random=10, seed=0, chunk=8) -> dict:
     """Set the highest-scored cells of one input to 0 (the training mean) and measure how far the target
     out[output][0, t, muscle] moves, against deleting the same number of random cells.
 
     which="eeg": score (T, E) or (T,); a cell is one electrode at one token, all bands.
     which="kin": score (T,); a cell is all kinematic features of one token.
     Inputs are (1, T, ...) tensors on the model's device.
+
+    The score is used as given: the highest values are deleted first. A signed map (gradient x input)
+    must be passed as its absolute value, or its strongly negative cells are deleted last. Equal scores
+    are taken in order of position (earliest token first). A (T,) score on the EEG input is repeated
+    over the electrodes, so it deletes whole tokens, while the random baseline deletes single cells.
+    The deleted copies go through the model `chunk` at a time (memory); the result does not depend on it.
     """
+    if which not in ("eeg", "kin"):
+        raise ValueError(f"which must be 'eeg' or 'kin', got {which!r}")
+    if int(chunk) < 1:
+        raise ValueError(f"chunk must be at least 1, got {chunk!r}")
     model.eval()
     score = np.asarray(score, dtype=np.float64)
     if which == "eeg":
@@ -38,13 +48,17 @@ def deletion_curve(model, kin, hist, eeg, score, output="E", muscle=0, t=None, w
             mask[picked] = False
             keep.append(mask.reshape(shape))
     keep = torch.from_numpy(np.stack(keep)).to(kin.device)[..., None]  # (deletions, T[, E], 1)
-    rep = lambda a: a.expand(keep.shape[0], *a.shape[1:])
-    if which == "eeg":
-        out = model(rep(kin), rep(hist), eeg * keep)
-    else:
-        out = model(kin * keep, rep(hist), rep(eeg))
+    values = []
+    for i in range(0, keep.shape[0], int(chunk)):
+        part = keep[i:i + int(chunk)]
+        rep = lambda a: a.expand(part.shape[0], *a.shape[1:])
+        if which == "eeg":
+            out = model(rep(kin), rep(hist), eeg * part)
+        else:
+            out = model(kin * part, rep(hist), rep(eeg))
+        values.append(out[output][:, t, muscle].float())
     full = float(model(kin, hist, eeg)[output][0, t, muscle])
-    change = (out[output][:, t, muscle].float() - full).abs().cpu().numpy().reshape(len(fractions), 1 + n_random)
+    change = (torch.cat(values) - full).abs().cpu().numpy().reshape(len(fractions), 1 + n_random)
     rand = change[:, 1:]
     rand_mean = rand.mean(1) if n_random else np.zeros(len(fractions))
     rand_sd = rand.std(1) if n_random else np.zeros(len(fractions))

@@ -16,6 +16,8 @@ def event_tokens(participant, series, n_samples, event="lift_off", data_dir=None
 
     event: a key of main.interp.EVENT_COLUMNS ("first_touch", "lift_off", ...) or "rest": the middle of
     the gap between one lift's hand_stop and the next lift's hand_start, when it lasts min_rest_s.
+    A rest row carries the lift number, CurW and CurS of the lift BEFORE the gap: the rest row with
+    lift = k follows lift k, which is what pairs a rest with a lift for paired_contrast.
     """
     from main.interp import EVENT_COLUMNS, lift_events
 
@@ -82,25 +84,99 @@ def mean_sem(x):
     return x.mean(0), sem
 
 
-def contrast(a, b, n_perm: int = 1000, seed: int = 0) -> dict:
-    """Difference between two sets of maps (events x features...) with a label-permutation test.
+_FLAT = 1e-12            # a standard error below this share of the feature's own scale counts as exactly 0
 
-    Every permutation keeps the largest |t| over all features, so each feature's p-value is corrected
-    for testing all of them at once. Returns {"diff", "t", "p"}, each with the feature shape.
+
+def _finite(name, *arrays):
+    for x in arrays:
+        if not np.isfinite(x).all():
+            raise ValueError(f"{name} needs finite values, got {int((~np.isfinite(x)).sum())} NaN or inf entries")
+
+
+def _t(diff, se, tol):
+    """diff / se per feature. Where se is 0: t = 0 when the difference is 0 too, else +-inf (cannot be tested)."""
+    flat = se <= tol
+    t = diff / np.where(flat, 1.0, se)
+    t[flat] = np.where(np.abs(diff[flat]) <= tol[flat], 0.0, np.copysign(np.inf, diff[flat]))
+    return t
+
+
+def _max_corrected(obs, null_t, n_perm):
+    """(t, p) from the observed t and a function giving one t vector under the null per call.
+
+    Features whose observed t is infinite (a difference with exactly no variance) cannot be tested: they
+    are left out of the maximum statistic and get t = p = NaN."""
+    ok = np.isfinite(obs)
+    p = np.full(obs.shape, np.nan)
+    if ok.any():
+        null_max = np.array([np.abs(null_t()[ok]).max() for _ in range(n_perm)])
+        p[ok] = (1 + (null_max[:, None] >= np.abs(obs[ok])[None]).sum(0)) / (1 + n_perm)
+    return np.where(ok, obs, np.nan), p
+
+
+def contrast(a, b, n_perm: int = 1000, seed: int = 0) -> dict:
+    """Difference between two UNPAIRED sets of maps (events x features...) with a label-permutation test.
+
+    Valid when the events of the two sets are independent of each other and of the events of their own
+    set (for example lifts of two weights). Not valid for rest against the lift it follows: use
+    paired_contrast there. Windows that overlap in time share input, so events are never fully
+    independent and every p-value here is approximate.
+
+    The statistic is Welch's t per feature. Every permutation keeps the largest |t| over all features,
+    so each feature's p-value is corrected for testing all of them at once; the smallest possible p is
+    1 / (1 + n_perm). Returns {"diff", "t", "p"}, each with the feature shape. A feature that is constant
+    over all events has t = 0 and p = 1; one that is constant on each side with different values cannot
+    be tested and has t = p = NaN (its diff is still given). NaN or inf in the input -> ValueError.
     """
     a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
     if len(a) < 2 or len(b) < 2:
         raise ValueError(f"contrast needs at least 2 events on each side, got {len(a)} and {len(b)}")
+    _finite("contrast", a, b)
     shape, n_a = a.shape[1:], len(a)
     x = np.concatenate([a.reshape(n_a, -1), b.reshape(len(b), -1)])
+    x = x - x[0]                                     # t does not change; a constant feature becomes exactly 0
+    tol = _FLAT * np.abs(x).max(0)
 
     def t_stat(idx):
         u, v = x[idx[:n_a]], x[idx[n_a:]]
         se = np.sqrt(u.var(0, ddof=1) / len(u) + v.var(0, ddof=1) / len(v))
-        return (u.mean(0) - v.mean(0)) / np.maximum(se, 1e-12)
+        return _t(u.mean(0) - v.mean(0), se, tol)
 
-    obs = t_stat(np.arange(len(x)))
     rng = np.random.default_rng(seed)
-    null_max = np.array([np.abs(t_stat(rng.permutation(len(x)))).max() for _ in range(n_perm)])
-    p = (1 + (null_max[:, None] >= np.abs(obs)[None]).sum(0)) / (1 + n_perm)
-    return {"diff": a.mean(0) - b.mean(0), "t": obs.reshape(shape), "p": p.reshape(shape)}
+    t, p = _max_corrected(t_stat(np.arange(len(x))), lambda: t_stat(rng.permutation(len(x))), n_perm)
+    return {"diff": a.mean(0) - b.mean(0), "t": t.reshape(shape), "p": p.reshape(shape)}
+
+
+def paired_contrast(a, b, n_perm: int = 1000, seed: int = 0) -> dict:
+    """Difference between two PAIRED sets of maps: row i of `a` belongs with row i of `b`.
+
+    Use it when each event of one set has a partner in the other, such as a lift and the rest that
+    follows it (pair them on meta's `series` and `lift`). The statistic is the one-sample t of the
+    differences a - b per feature; the null flips the sign of each pair's difference at random, so
+    whatever both members of a pair share (the lift, the stretch of signal their windows have in common)
+    cancels. It assumes the pairs are independent of each other; windows of neighbouring lifts overlap,
+    so the p-values are still approximate.
+
+    Each permutation keeps the largest |t| over all features (correction for testing all of them); the
+    smallest possible p is 1 / (1 + n_perm), and with n pairs there are only 2**n sign patterns.
+    Returns {"diff", "t", "p"}, each with the feature shape. A feature whose differences are all 0 has
+    t = 0 and p = 1; one whose differences are all the same non-zero value cannot be tested and has
+    t = p = NaN. Needs at least 3 pairs; NaN or inf in the input -> ValueError.
+    """
+    a, b = np.asarray(a, dtype=np.float64), np.asarray(b, dtype=np.float64)
+    if a.shape != b.shape:
+        raise ValueError(f"paired_contrast needs two arrays of the same shape, got {a.shape} and {b.shape}")
+    if len(a) < 3:
+        raise ValueError(f"paired_contrast needs at least 3 pairs, got {len(a)}")
+    _finite("paired_contrast", a, b)
+    shape, n = a.shape[1:], len(a)
+    d = (a - b).reshape(n, -1)
+    tol = _FLAT * np.abs(d).max(0)
+
+    def t_stat(sign):
+        x = d * sign[:, None]
+        return _t(x.mean(0), x.std(0, ddof=1) / np.sqrt(n), tol)
+
+    rng = np.random.default_rng(seed)
+    t, p = _max_corrected(t_stat(np.ones(n)), lambda: t_stat(rng.choice([-1.0, 1.0], size=n)), n_perm)
+    return {"diff": d.mean(0).reshape(shape), "t": t.reshape(shape), "p": p.reshape(shape)}
