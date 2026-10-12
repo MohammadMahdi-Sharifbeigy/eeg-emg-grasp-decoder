@@ -68,7 +68,7 @@ from v2.evaluate import baseline_comparison, evaluate_subject
 from v2.interp.report import interpret_subject
 from v2.model import build_model, count_parameters
 from v2.smoke import project_runtime
-from v2.train import fit
+from v2.train import fit, weighted_stream_loss
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 print("device:", device)
@@ -126,12 +126,22 @@ for subj, sd in subject_data.items():
     model = build_model(CONFIG, sd["muscle_prior"]).to(device)
     print(f"\\n=== {subj}: {count_parameters(model):,} parameters ===")
     history = fit(model, sd["train_ds"], sd["val_ds"], CONFIG, device, CKPT / subj)
-    results[subj] = dict(model=model, history=history)
-    print(f"{subj}: {history['epochs_run']} epochs, best K epoch {history['best_epoch_kin']}, "
-          f"best E epoch {history['best_epoch_eeg']}, {(time.time() - t0) / 60:.1f} min")
-    vc = history.get("val_combined")                 # the saved model joins each stream's own best epoch
-    if vc is not None:
-        print(f"{subj}: combined best model, validation loss K {vc['kin']:.4f}, E + F {vc['eeg']:.4f}")
+    ep_k, ep_e = history["best_epoch_kin"], history["best_epoch_eeg"]
+    print(f"{subj}: {history['epochs_run']} epochs, best K epoch {ep_k}, best E epoch {ep_e}, {(time.time() - t0) / 60:.1f} min")
+    # E and the fusion are saved at the epoch with the lowest smoothed E + F loss, which need not be E's own best epoch
+    lc = CONFIG["loss"]
+    e_alone = [weighted_stream_loss(c, "E", lc) for c in history["components"]]
+    ep_alone = int(np.argmin(e_alone)) + 1
+    print(f"{subj}: validation loss of E alone is lowest at epoch {ep_alone} ({e_alone[ep_alone - 1]:.4f}); "
+          f"E is saved from epoch {ep_e} ({e_alone[ep_e - 1] if ep_e else float('nan'):.4f}), K from epoch {ep_k}")
+    vc = history["val_combined"]                     # the saved model joins each stream's own best epoch
+    l_k, l_f = weighted_stream_loss(vc["components"], "K", lc), weighted_stream_loss(vc["components"], "F", lc)
+    differ = ep_k != ep_e
+    fusion_checked = not (differ and l_f > l_k)      # False: this K and this fusion never met in training, and F lost
+    print(f"{subj}: combined best model, validation loss E + F {vc['eeg']:.4f}, K alone {l_k:.4f}, F alone {l_f:.4f} "
+          f"-> F can be interpreted: "
+          + ("yes" if fusion_checked else "NO (fusion and K come from different epochs and F is worse than K on validation)"))
+    results[subj] = dict(model=model, history=history, fusion_checked=fusion_checked)
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.5))
     ax[0].plot(history["val_kin"], color="#eb6834"); ax[0].set_title(f"{subj}: validation loss, K"); ax[0].set_xlabel("epoch")
     ax[1].plot(history["val_eeg"], color="#2a78d6"); ax[1].set_title(f"{subj}: validation loss, E + F"); ax[1].set_xlabel("epoch")
@@ -140,7 +150,7 @@ for subj, sd in subject_data.items():
 
 EVAL = """# V2-EVAL
 tables = {k: [] for k in ("standard", "magnitude", "by_load", "ceiling", "nulls", "history")}
-verdicts = []
+verdicts, n_pass = [], {"E": 0, "F": 0}
 for subj, sd in subject_data.items():
     res = evaluate_subject(results[subj]["model"], sd["tokens"]["test"], sd["norm"], CONFIG, device, sd["p_id"], sd["names"])
     results[subj]["eval"] = res
@@ -151,21 +161,35 @@ for subj, sd in subject_data.items():
     print(std.pivot(index="muscle", columns="output", values="vaf").loc[sd["names"], ["K", "E", "F"]].round(1).to_string())
     print("mean r:", std.groupby("output").r.mean().round(3).to_dict(), "| mean VAF:", std.groupby("output").vaf.mean().round(1).to_dict())
     print(res["ceiling"].round(1).to_string(index=False))
+    bl = res["by_load"]                              # acceptance criterion 2 for K: one row per test series and weight
+    bl = bl[(bl["output"] == "K") & (bl["grouping"] == "CurW")].assign(value=lambda d: d["value"].astype(str))
+    print("criterion 2, K: height ratio in the hold phase per test series and weight (value 1 = light, 2 = middle, 4 = heavy; "
+          "0.95-1.05 wanted for light and middle):")
+    print(bl.pivot(index=["series", "value", "n_lifts"], columns="muscle", values="height_ratio")[sd["names"]].round(3).to_string())
+    print("criterion 2, K: correlation over lifts of the predicted and the real hold level at one weight (NaN below 4 lifts):")
+    print(bl.pivot(index=["series", "value", "n_lifts"], columns="muscle", values="r_lift")[sd["names"]].round(3).to_string())
     n = res["nulls"]
     print("per muscle against the nulls (descriptive; the verdict below is one test over all muscles):")
     print(n[["muscle", "E_r", "E_r_shuffle_mean", "E_r_swap_mean", "E_p_swap", "dF_vaf", "dF_vaf_swap_mean", "dF_p_swap", "gate"]].round(3).to_string(index=False))
     v = res["verdict"]                               # mean over muscles against the per-draw means of the swap null
     f_beats_k = bool(v["dF_vaf_mean"] > 0 and np.isfinite(v["dF_p_swap"]) and v["dF_p_swap"] <= 0.05)
     f_verdict = "EEG adds information beyond kinematics" if f_beats_k else "EEG adds nothing beyond kinematics"
+    fusion_checked = results[subj]["fusion_checked"]         # set by V2-TRAIN
+    if not fusion_checked:
+        f_verdict = "not interpretable (fusion and K come from different epochs and F is worse than K on validation)"
+    n_pass["E"] += bool(np.isfinite(v["E_p_swap"]) and v["E_p_swap"] <= 0.05)
+    n_pass["F"] += bool(f_beats_k and fusion_checked)
     print(f"E verdict: mean r {v['E_r_mean']:.3f}, p against the swap null {v['E_p_swap']:.3f}")
     print(f"F verdict: mean VAF gain over K {v['dF_vaf_mean']:.2f}, p against the swap null {v['dF_p_swap']:.3f} -> {f_verdict}")
     print(f"  ({v['n_null']} null draws, {v['n_distinct']} distinct, {v['n_blocks']} blocks; no p below 1 / blocks is possible)")
-    verdicts.append({"subject": subj, **v, "F_verdict": f_verdict})
+    verdicts.append({"subject": subj, **v, "F_verdict": f_verdict, "fusion_checked": fusion_checked})
     print("history check (K with the history of another test series, when there is one):")
     print(res["history"].round(1).to_string(index=False))
 for k, parts in tables.items():
     pd.concat(parts, ignore_index=True).to_csv(RESULTS / f"{k}.csv", index=False)
 pd.DataFrame(verdicts).to_csv(RESULTS / "verdict.csv", index=False)
+print(f"\\n{n_pass['F']} of {len(verdicts)} participants pass the F verdict, {n_pass['E']} of {len(verdicts)} pass E "
+      f"(p against the swap null <= 0.05). Without any effect about 5 % pass by chance.")
 print("saved tables to", RESULTS)
 """
 
@@ -182,11 +206,13 @@ if rows:
     allc.to_csv(RESULTS / "baseline_comparison.csv", index=False)
     print("\\nmean over participants and muscles: baseline VAF %.1f, v2 K VAF %.1f, baseline r %.3f, v2 K r %.3f"
           % (allc.baseline_vaf.mean(), allc.v2_K_vaf.mean(), allc.baseline_r.mean(), allc.v2_K_r.mean()))
-    print("criterion 1 (K: mean VAF > 75.5 and mean r > 0.869):", bool(allc.v2_K_vaf.mean() > 75.5 and allc.v2_K_r.mean() > 0.869))
+    print(f"criterion 1 (K: mean VAF > 75.5 and mean r > 0.869), computed for {allc.subject.nunique()} of {len(subject_data)} "
+          f"participants run here; the references 75.5 / 0.869 are means over all 12 participants:",
+          bool(allc.v2_K_vaf.mean() > 75.5 and allc.v2_K_r.mean() > 0.869))
 """
 
 INTERP = """# V2-INTERP
-# Where each output comes from, through every layer (see the last section of the first cell).
+# Where each output comes from, through every layer (see the Interpretability section of the first cell).
 # One 8 s window is centred on every lift event of the test series; events are CONFIG["interp"]["events"].
 # Reads the trained models of V2-TRAIN; writes tables and figures under CONFIG["outputs"]["interpretability_dir"].
 INTERP_DIR = Path(CONFIG["outputs"]["interpretability_dir"])

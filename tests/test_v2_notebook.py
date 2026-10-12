@@ -74,3 +74,31 @@ def test_interp_cell_uses_the_columns_of_the_current_report():
     for column in ('"spearman"', '"n_nan"', "'n_pairs'", "np.isfinite("):
         assert column in cell, column
     assert "rep['files']" in cell or 'rep["files"]' in cell or "rep.get('files'" in cell
+
+
+def test_train_cell_says_whether_e_and_f_can_be_interpreted():
+    cell = _cell("# V2-TRAIN")
+    assert cell.count("weighted_stream_loss(") == 3 and "w_main" not in cell          # the arithmetic lives in v2.train
+    assert 'history["components"]' in cell and 'vc["components"]' in cell and "np.argmin(" in cell
+    assert "fusion_checked = not (differ and l_f > l_k)" in cell and "fusion_checked=fusion_checked" in cell
+    assert "weighted_stream_loss" in _cell("# V2-SETUP")
+
+
+def test_eval_cell_uses_the_fusion_flag_counts_passes_and_prints_criterion_2():
+    cell = _cell("# V2-EVAL")
+    assert "not interpretable (fusion and K come from different epochs and F is worse than K on validation)" in cell
+    assert 'results[subj]["fusion_checked"]' in cell and '"fusion_checked": ' in cell
+    assert 'v["E_p_swap"] <= 0.05' in cell and "about 5 % pass by chance" in cell and "n_pass" in cell
+    for name in ('res["by_load"]', '"grouping"', '"CurW"', '"height_ratio"', '"r_lift"', '"n_lifts"'):
+        assert name in cell, name
+
+
+def test_compare_and_interp_wording():
+    cell = _cell("# V2-COMPARE")
+    assert "allc.subject.nunique()" in cell and "means over all 12 participants" in cell
+    assert "see the Interpretability section of the first cell" in _cell("# V2-INTERP")
+
+
+def test_null_draws():
+    from v2.config import CONFIG_V2
+    assert CONFIG_V2["evaluation"] == {"n_null": 99, "seed": 42}

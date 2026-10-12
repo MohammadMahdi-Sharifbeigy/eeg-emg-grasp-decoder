@@ -21,7 +21,7 @@ CONFIG_V2 = {
         "batch_size": 32, "gradient_accumulation_steps": 1, "grad_clip_norm": 1.0, "use_amp": True,
         "smooth_window": 3, "seed": 42,
     },
-    "evaluation": {"n_null": 20, "seed": 42},
+    "evaluation": {"n_null": 99, "seed": 42},
     "interp": {
         "residual": 0.5, "flow_bin": 4, "events": ["first_touch", "lift_off"], "max_events": 6,
         "deletion_fractions": [0.05, 0.1, 0.2, 0.4], "n_random": 10, "n_perm": 1000, "seed": 42,
