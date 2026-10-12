@@ -1,4 +1,7 @@
 import copy
+import warnings
+
+from pathlib import Path
 
 import matplotlib
 matplotlib.use("Agg")
@@ -47,6 +50,36 @@ def test_every_plot_returns_a_figure():
     plt.close("all")
 
 
+def _look(fig):
+    fig.canvas.draw()                                                  # ticks are made when the figure is drawn
+    ax = fig.axes[0]
+    labels = ax.get_xticklabels() + ax.get_yticklabels() + [fig._suptitle, ax.xaxis.label, ax.title]
+    grid = ax.xaxis.get_gridlines()[0]
+    return {"sizes": [l.get_fontsize() for l in labels], "fonts": {l.get_fontname() for l in labels},
+            "ticks": [l.get_text() for l in labels],
+            "face": ax.get_facecolor(), "figsize": tuple(fig.get_size_inches()), "dpi": fig.dpi,
+            "grid": (grid.get_color(), grid.get_linewidth(), grid.get_linestyle(), grid.get_alpha()),
+            "line": ax.lines[0].get_linewidth(), "tick_colour": ax.get_xticklabels()[0].get_color()}
+
+
+def test_figures_do_not_depend_on_the_callers_style():
+    import main.plots                                                  # sets a seaborn theme for the whole process
+    rng = np.random.default_rng(0)
+    t = np.linspace(-4, 4, 50)
+    curves = {"rollout": (t, rng.random((5, 50)), 0.1 * rng.random((5, 50)))}
+    with plt.rc_context():
+        matplotlib.rcdefaults()
+        plain = _look(P.plot_time_views(curves, NAMES, "title", "lift_off"))
+    with plt.rc_context({**main.plots.PAPER_STYLE, "xtick.labelsize": 20, "ytick.labelsize": 20, "axes.facecolor": "grey",
+                         "figure.figsize": (3, 3), "figure.dpi": 50, "font.family": "serif", "lines.linewidth": 5,
+                         "grid.color": "red", "grid.linewidth": 3, "xtick.color": "green"}):
+        themed = _look(P.plot_time_views(curves, NAMES, "title", "lift_off"))
+    plt.close("all")
+    assert themed == plain
+    sizes = plain["sizes"]
+    assert max(sizes[:-3]) < sizes[-2] <= sizes[-1] <= sizes[-3]       # tick labels < axis label <= panel title <= title
+
+
 def _tok(T=12000, seed=0):
     rng = np.random.default_rng(seed)
     kin = rng.standard_normal((T, 26)).astype(np.float32); kin[:, 10:12] = 0
@@ -60,14 +93,19 @@ def test_interpret_subject_writes_tables_and_figures(tmp_path, monkeypatch):
     monkeypatch.setattr("main.interp.lift_events", lambda *a, **k: lifts)
     cfg = copy.deepcopy(CONFIG_V2)
     cfg["tokens"]["window"] = 100                                                                      # keep the CPU test quick
-    cfg["interp"].update(events=["lift_off"], max_events=1, n_perm=20, n_random=2, deletion_fractions=[0.1, 0.3], flow_bin=10)
+    cfg["interp"].update(events=["first_touch", "lift_off"], max_events=1, n_perm=20, n_random=2,
+                         deletion_fractions=[0.1, 0.3], flow_bin=10)
     tok = _tok(T=13000); norm = D.fit_norm([tok])
     torch.manual_seed(0)
     m = build_model(cfg).eval()
     with torch.no_grad():
         m.fusion.gate.fill_(0.3)
-    res = interpret_subject(m, [tok], norm, cfg, torch.device("cpu"), 1, NAMES, out_dir=tmp_path, log=lambda *_: None)
-    t = res["tables"]
+    with warnings.catch_warnings():
+        warnings.filterwarnings("error", message="More than 20 figures")               # two event types: 25 figures
+        res = interpret_subject(m, [tok], norm, cfg, torch.device("cpu"), 1, NAMES, out_dir=tmp_path, log=lambda *_: None)
+    assert res["figures"] == {} and plt.get_fignums() == []                            # each one saved and closed at once
+    t = {k: df[df["event"] == "lift_off"] if "event" in df else df for k, df in res["tables"].items()}
+    assert set(res["tables"]["time"]["event"]) == {"first_touch", "lift_off"}
     assert set(t) == set(TABLES) and all(len(df) for df in t.values())
     assert set(t["time"]["view"]) == {"rollout", "flow", "relevance"} and set(t["time"]["output"]) == {"K", "E", "F_eeg"}
     assert set(t["electrodes"]["output"]) == {"E", "F_eeg"} and len(t["rest_contrast"]) == 5 * 32
@@ -80,14 +118,16 @@ def test_interpret_subject_writes_tables_and_figures(tmp_path, monkeypatch):
     k = t["time"][(t["time"]["output"] == "K") & (t["time"]["view"] == "rollout") & (t["time"]["muscle"] == "AD")]
     assert len(k) == 100 and k["mean"].sum() == pytest.approx(1.0, abs=1e-4) and k["time_s"].iloc[50] == 0.0
     assert set(t["faithfulness"]["view"]) == set(t["sanity"]["view"]) == {"rollout", "flow", "relevance", "saliency"}
+    san = t["sanity"]
+    assert (san["n"] == 1).all() and (san["spearman"].isna() == (san["n_nan"] == san["n"])).all()   # max_events = 1
     assert {"K", "E", "F", "K_base", "gain", "F_eeg"} <= set(t["parts"].columns) and len(t["parts"]) == 5
     assert len(t["muscle_graph"]) == 2 * 2 * 5 * 5                                                     # K and E, two views
     assert all((tmp_path / f"{name}.csv").exists() for name in TABLES) and (tmp_path / "layers.npz").exists()
     pngs = {p.stem for p in tmp_path.glob("*.png")}
     assert {"time_K_lift_off", "time_E_lift_off", "time_F_eeg_lift_off", "layers_K_lift_off", "scalp_E_lift_off",
             "scalp_F_eeg_lift_off", "electrode_layers_lift_off", "muscle_graph_lift_off", "rest_contrast_lift_off",
-            "inputs_lift_off", "deletion"} <= pngs
-    assert len(res["files"]) == len(pngs) and plt.get_fignums() == []
+            "inputs_lift_off", "deletion", "time_K_first_touch", "rest_contrast_first_touch"} <= pngs
+    assert len(pngs) == 25 and sorted(Path(f).stem for f in res["files"]) == sorted(pngs)
     with np.load(tmp_path / "layers.npz") as z:
         assert z["E__lift_off__time_layers"].shape == (2, 4, 100) and z["E__lift_off__electrode_layers"].shape == (2, 4, 32, 32)
 

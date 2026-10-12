@@ -78,7 +78,9 @@ def _faithfulness(model, test_tokens, norm, ev_tokens, cfg, device, names):
 def interpret_subject(model, test_tokens, norm, cfg, device, participant, names, out_dir=None, data_dir=None,
                       kin_names=None, eeg_names=EEG_NAMES, log=print) -> dict:
     """Event-locked interpretability of one participant's test series (see the module docstring of explain.py
-    for the views). Returns {"tables", "figures", "arrays"}; with out_dir it also writes them and closes the figures."""
+    for the views). Returns {"tables", "figures", "arrays"}. With out_dir the tables, layers.npz and the figures are
+    written there; every figure is saved and closed as soon as it is built, so "figures" is then empty and
+    "files" lists the PNG files written."""
     ic, names, eeg_names = cfg["interp"], list(names), list(eeg_names)
     window, clip, bin_size = int(cfg["tokens"]["window"]), cfg["eeg"]["clip"], int(ic["flow_bin"])
     kw = dict(window=window, clip=clip, residual=ic["residual"], bin_size=bin_size)
@@ -96,7 +98,20 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
     t_tok = (np.arange(window) - window // 2) / FS_TOK
     t_bin = (np.arange(0, window, bin_size) + (bin_size - 1) / 2 - window // 2) / FS_TOK
     tables, figures, arrays, rest_stacks = {k: [] for k in TABLES}, {}, {}, {}
-    done = False
+    done, files = False, []
+    if out_dir is not None:
+        out_dir = Path(out_dir)
+        out_dir.mkdir(parents=True, exist_ok=True)
+
+    def emit(name, fig):
+        """Keep the figure for the caller, or (with out_dir) save and close it now: never many figures open."""
+        if out_dir is None:
+            figures[name] = fig
+            return
+        with P.style():                                                  # the caller's theme must not reach the file
+            fig.savefig(out_dir / f"{name}.png", dpi=130)
+        plt.close(fig)
+        files.append(str(out_dir / f"{name}.png"))
 
     for event in ic["events"]:
         graphs, contrast_maps, contrast_masks, input_groups = {}, {}, {}, {}
@@ -169,50 +184,47 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
                     profiles = {"rollout": profiles["rollout"], "attention flow": mean,
                                 **{k: v for k, v in profiles.items() if k != "rollout"}}
             views["relevance"] = (t_tok, np.stack(curves["relevance"][0]), np.stack(curves["relevance"][1]))
-            figures[f"time_{output}_{event}"] = P.plot_time_views(
-                views, names, f"{label}: where in time, around {event} (mean and SEM over lifts)", event)
-            figures[f"layers_{output}_{event}"] = P.plot_layer_heads(
+            emit(f"time_{output}_{event}", P.plot_time_views(
+                views, names, f"{label}: where in time, around {event} (mean and SEM over lifts)", event))
+            emit(f"layers_{output}_{event}", P.plot_layer_heads(
                 arrays[f"{output}__{event}__time_layers"], t_tok,
-                f"{label}: attention of the {event} token, per temporal layer and head", event)
+                f"{label}: attention of the {event} token, per temporal layer and head", event))
             if output != "K":
-                figures[f"scalp_{output}_{event}"] = P.plot_scalp(
-                    profiles, eeg_names, f"{label}: which electrodes, around {event} (share per electrode)")
+                emit(f"scalp_{output}_{event}", P.plot_scalp(
+                    profiles, eeg_names, f"{label}: which electrodes, around {event} (share per electrode)"))
             if output == "E":
                 layers = arrays[f"E__{event}__electrode_layers"].mean(1)                 # (layers, E, E), heads averaged
-                figures[f"electrode_layers_{event}"] = P.plot_matrices(
+                emit(f"electrode_layers_{event}", P.plot_matrices(
                     {f"electrode layer {i + 1}": m for i, m in enumerate(layers)},
-                    f"Electrode graph attention at {event} (row = receiving electrode)", eeg_names, eeg_names)
+                    f"Electrode graph attention at {event} (row = receiving electrode)", eeg_names, eeg_names))
         if graphs:
-            figures[f"muscle_graph_{event}"] = P.plot_matrices(
-                graphs, f"Muscle graph at {event} (row = receiving muscle, column = source muscle)", names, names)
+            emit(f"muscle_graph_{event}", P.plot_matrices(
+                graphs, f"Muscle graph at {event} (row = receiving muscle, column = source muscle)", names, names))
         if contrast_maps:
-            figures[f"rest_contrast_{event}"] = P.plot_scalp(
+            emit(f"rest_contrast_{event}", P.plot_scalp(
                 contrast_maps, eeg_names, f"E: {event} minus the rest after it, paired t per electrode (marked: corrected p < 0.05)",
-                signed=True, masks=contrast_masks)
+                signed=True, masks=contrast_masks))
         if input_groups:
-            figures[f"inputs_{event}"] = P.plot_shares(input_groups, f"Input shares at {event} (mean over muscles)")
+            emit(f"inputs_{event}", P.plot_shares(input_groups, f"Input shares at {event} (mean over muscles)"))
 
     if done:
         curves, sanity = _faithfulness(model, test_tokens, norm, ev_tokens, cfg, device, names)
         if curves:
             faith = pd.concat(curves, ignore_index=True)
             tables["faithfulness"].append(faith.groupby(["output", "muscle", "view", "fraction"], as_index=False).mean())
-            tables["sanity"].append(pd.DataFrame(sanity).groupby(["output", "muscle", "view"], as_index=False).mean())
+            tables["sanity"].append(                                     # spearman: mean over the events that have one
+                pd.DataFrame(sanity).groupby(["output", "muscle", "view"], as_index=False)["spearman"].agg(
+                    spearman="mean", n="size", n_nan=lambda x: int(x.isna().sum())))
             g = faith.groupby(["output", "view", "fraction"], as_index=False)[["top", "random"]].mean()
             panels = {OUTPUT_LABELS[o]: {v: (d["fraction"].to_numpy(), d["top"].to_numpy(), d["random"].to_numpy())
                                          for v, d in g[g["output"] == o].groupby("view")} for o in ("E", "K")}
-            figures["deletion"] = P.plot_deletion(panels, "Deletion check: removing what each view ranks highest")
+            emit("deletion", P.plot_deletion(panels, "Deletion check: removing what each view ranks highest"))
 
     result = {"tables": {k: pd.concat(v, ignore_index=True) if v else pd.DataFrame() for k, v in tables.items()},
               "figures": figures, "arrays": arrays}
     if out_dir is not None:
-        out_dir = Path(out_dir)
-        out_dir.mkdir(parents=True, exist_ok=True)
         for k, df in result["tables"].items():
             df.to_csv(out_dir / f"{k}.csv", index=False)
         np.savez_compressed(out_dir / "layers.npz", **arrays)
-        for k, fig in figures.items():
-            fig.savefig(out_dir / f"{k}.png", dpi=130)
-            plt.close(fig)
-        result["files"] = sorted(str(p) for p in out_dir.glob("*.png"))
+        result["files"] = sorted(files)
     return result
