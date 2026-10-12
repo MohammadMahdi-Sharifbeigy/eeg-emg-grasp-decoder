@@ -21,11 +21,25 @@ def window_plan(n_tok: int, window: int = 400, hop: int = 200) -> list[tuple[int
     return plan
 
 
+def _override(name, value, original):
+    if value is None:
+        return original
+    value = np.asarray(value, dtype=np.float32)
+    if value.shape != original.shape:
+        raise ValueError(f"{name} override has shape {value.shape}, expected {original.shape}")
+    return value
+
+
 @torch.no_grad()
 def predict_tokens(model, tok, norm, device, window=400, hop=200, use_amp=False, eeg=None, hist=None, clip=5.0):
+    """Model-domain predictions for one series, stitched from overlapping windows.
+
+    `eeg` replaces the normalised EEG and must already be normalised and clipped (it is used as given);
+    `hist` replaces the history. Each override must have the shape of the array it replaces.
+    """
     kin_z, eeg_z = normalise(tok, norm, clip)
-    eeg_z = eeg_z if eeg is None else np.asarray(eeg, dtype=np.float32)
-    hist_a = tok["hist"] if hist is None else np.asarray(hist, dtype=np.float32)
+    eeg_z = _override("eeg", eeg, eeg_z)
+    hist_a = _override("hist", hist, tok["hist"])
     n = kin_z.shape[0]
     out = {k: np.zeros((n, 5), dtype=np.float32) for k in ("K", "E", "F")}
     model.eval()

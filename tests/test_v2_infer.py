@@ -52,3 +52,43 @@ def test_overrides_change_only_the_expected_outputs():
     alt = predict_tokens(m, tok, norm, torch.device("cpu"), eeg=eeg_z[::-1].copy())
     np.testing.assert_array_equal(base["K"], alt["K"])
     assert not np.allclose(base["E"], alt["E"])
+
+
+def test_stitched_tokens_equal_a_direct_forward_of_every_window():
+    tok = _tok(9003); norm = D.fit_norm([tok]); m = build_model(CONFIG_V2).eval()      # 901 tokens: > 2 windows, not on the hop
+    with torch.no_grad():
+        m.fusion.gate.fill_(0.5)                                                       # so that F is not just relu(K)
+    pt = predict_tokens(m, tok, norm, torch.device("cpu"))
+    kin_z, eeg_z = D.normalise(tok, norm)
+    plan = window_plan(901, 400, 200)
+    assert len(plan) > 2
+    covered = np.zeros(901, int)
+    for start, lo, hi in plan:
+        sl = slice(start, start + 400)
+        with torch.no_grad():
+            direct = m(torch.from_numpy(kin_z[sl])[None], torch.from_numpy(tok["hist"][sl])[None],
+                       torch.from_numpy(eeg_z[sl])[None])
+        for k in ("K", "E", "F"):
+            np.testing.assert_allclose(pt[k][lo:hi], direct[k][0, lo - start:hi - start].numpy(), atol=1e-6)
+        covered[lo:hi] += 1
+    assert (covered == 1).all()
+    assert not np.allclose(pt["F"], pt["K"])
+
+
+def test_hist_override_changes_k_and_leaves_e_unchanged():
+    tok = _tok(6000); norm = D.fit_norm([tok]); m = build_model(CONFIG_V2).eval()
+    base = predict_tokens(m, tok, norm, torch.device("cpu"))
+    alt_hist = np.random.default_rng(1).standard_normal(tok["hist"].shape).astype(np.float32)
+    alt = predict_tokens(m, tok, norm, torch.device("cpu"), hist=alt_hist)
+    np.testing.assert_array_equal(base["E"], alt["E"])
+    assert not np.allclose(base["K"], alt["K"])
+
+
+@pytest.mark.parametrize("name", ["eeg", "hist"])
+def test_override_with_the_wrong_shape_is_refused(name):
+    tok = _tok(6000); norm = D.fit_norm([tok]); m = build_model(CONFIG_V2).eval()
+    _, eeg_z = D.normalise(tok, norm)
+    good = {"eeg": eeg_z, "hist": tok["hist"]}[name]
+    for bad in (good[:-1], np.concatenate([good, good[:1]]), good[..., :-1]):
+        with pytest.raises(ValueError, match=f"{name} override"):
+            predict_tokens(m, tok, norm, torch.device("cpu"), **{name: bad})
