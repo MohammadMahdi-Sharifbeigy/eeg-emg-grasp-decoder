@@ -48,6 +48,7 @@ def test_block_shuffle_and_swap():
 def test_empirical_p():
     assert E.empirical_p(1.0, np.zeros(20)) == 1 / 21
     assert E.empirical_p(0.0, np.ones(20)) == 1.0
+    assert np.isnan(E.empirical_p(float("nan"), np.zeros(20))) and np.isnan(E.empirical_p(float("inf"), np.zeros(20)))
 
 
 def test_baseline_comparison(tmp_path):
@@ -89,5 +90,23 @@ def test_swap_verdict_degenerate_is_nan_and_logged():
     v = E.swap_verdict(np.full(5, 0.3), np.full((20, 5), 0.3), np.zeros(5), np.zeros((20, 5)), n_blocks=1, log=said.append)
     assert np.isnan(v["E_p_swap"]) and np.isnan(v["dF_p_swap"]) and v["n_blocks"] == 1
     assert len(said) == 1 and "NaN" in said[0]
-    assert np.isnan(E.swap_p(0.3, np.zeros(20), 0)) and E.swap_p(0.3, np.zeros(20), 2) == 1 / 21
+    assert np.isnan(E.swap_p(0.3, np.zeros(20), 0)) and E.swap_p(0.3, np.zeros(20), 2) == 1 / 2
     E.swap_verdict(np.zeros(5), np.zeros((2, 5)), np.zeros(5), np.zeros((2, 5)), n_blocks=1)   # no log given: no error
+
+
+def test_swap_p_respects_the_number_of_distinct_surrogates():
+    null = np.zeros(20)                                                       # observed above every draw: raw p = 1/21
+    assert E.swap_p(1.0, null, 2) == 1 / 2                                    # 2 blocks: one surrogate, 20 identical draws
+    assert E.swap_p(1.0, null, 3) == 1 / 3
+    assert E.swap_p(1.0, null, 21) == 1 / 21 and E.swap_p(1.0, null, 81) == 1 / 21      # many blocks: the draws set the limit
+    assert E.swap_p(1.0, np.zeros(200), 81) == 1 / 81                         # more draws than surrogates: floor at 1 / n_blocks
+    assert E.swap_p(0.0, np.ones(20), 2) == 1.0                               # the floor never lowers a p
+    assert np.isnan(E.swap_p(float("nan"), null, 81))
+    z = np.zeros((20, 5))
+    v = lambda nb: E.swap_verdict(np.ones(5), z, np.ones(5), z, n_blocks=nb)
+    assert v(2)["E_p_swap"] == v(2)["dF_p_swap"] == 1 / 2 and v(2)["n_distinct"] == 1
+    assert v(3)["E_p_swap"] == 1 / 3 and v(3)["n_distinct"] == 2
+    assert v(81)["E_p_swap"] == 1 / 21 and v(81)["n_distinct"] == 20
+    assert v(1)["n_distinct"] == 0 and v(1)["n_null"] == 20
+    nan = E.swap_verdict(np.full(5, np.nan), z, np.ones(5), z, n_blocks=81)   # diverged E: NaN, not the smallest p
+    assert np.isnan(nan["E_p_swap"]) and nan["dF_p_swap"] == 1 / 21

@@ -64,13 +64,24 @@ def block_swap(x, block: int, rng) -> np.ndarray:
 
 
 def empirical_p(observed: float, null) -> float:
+    """One-sided (larger is better) empirical p; NaN when the observed value is not finite."""
+    if not np.isfinite(observed):
+        return float("nan")
     null = np.asarray(null, dtype=np.float64)
     return float((1 + np.sum(null >= observed)) / (1 + len(null)))
 
 
 def swap_p(observed: float, null, n_blocks: int) -> float:
-    """Empirical p against the block-swap null; NaN when the swap could not change anything (< 2 full blocks)."""
-    return float("nan") if n_blocks < 2 else empirical_p(observed, null)
+    """Empirical p against the block-swap null, never below its exact resolution 1 / n_blocks.
+
+    The null is a rotation of the block order: with the identity there are only n_blocks arrangements
+    (n_blocks - 1 distinct surrogates, drawn with replacement), so no p below 1 / n_blocks is justified.
+    NaN when the swap could not change anything (< 2 full blocks) or the observed value is not finite.
+    """
+    if n_blocks < 2:
+        return float("nan")
+    p = empirical_p(observed, null)
+    return p if np.isnan(p) else max(p, 1.0 / n_blocks)
 
 
 def swap_verdict(e_r, e_r_null, d_f, d_f_null, n_blocks: int, log=None) -> dict:
@@ -86,7 +97,8 @@ def swap_verdict(e_r, e_r_null, d_f, d_f_null, n_blocks: int, log=None) -> dict:
     e_mean, d_mean = float(np.mean(e_r)), float(np.mean(d_f))
     return {"E_r_mean": e_mean, "E_p_swap": swap_p(e_mean, e_r_null.mean(1), n_blocks),
             "dF_vaf_mean": d_mean, "dF_p_swap": swap_p(d_mean, d_f_null.mean(1), n_blocks),
-            "n_null": int(len(e_r_null)), "n_blocks": int(n_blocks)}
+            "n_null": int(len(e_r_null)), "n_blocks": int(n_blocks),
+            "n_distinct": int(min(len(e_r_null), max(n_blocks - 1, 0)))}
 
 
 def baseline_comparison(standard_v2: pd.DataFrame, subject: str, path="results/magnitude_report_1stage.csv"):
@@ -105,6 +117,9 @@ def baseline_comparison(standard_v2: pd.DataFrame, subject: str, path="results/m
 
 
 def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, data_dir=None, log=None) -> dict:
+    n_null = int(cfg["evaluation"]["n_null"])
+    if n_null < 1:
+        raise ValueError(f"evaluation.n_null must be at least 1, got {n_null}")
     fs = float(cfg["data"]["fs"])
     win, hop = cfg["tokens"]["window"], cfg["tokens"]["hop"]
     use_amp = bool(cfg["training"]["use_amp"])
@@ -132,15 +147,18 @@ def evaluate_subject(model, test_tokens, norm, cfg, device, participant, names, 
 
     # nulls: EEG shuffled inside each window-sized block, and EEG blocks swapped across the test tokens
     rng = np.random.default_rng(cfg["evaluation"]["seed"])
-    n_null = int(cfg["evaluation"]["n_null"])
     eeg_z = [normalise(t, norm, cfg["eeg"]["clip"])[1] for t in test_tokens]
     lens = np.cumsum([0] + [len(e) for e in eeg_z])
     all_eeg = np.concatenate(eeg_z)
     n_blocks = len(all_eeg) // win                                            # full window-sized blocks in the test set
     r_e, vaf_k, vaf_f = _r(cat("E"), target), _vaf(cat("K"), target), _vaf(cat("F"), target)
     null = {"E_shuffle": [], "E_swap": [], "dF_swap": []}
+    kinds = (("shuffle", block_shuffle), ("swap", block_swap))
+    if n_blocks < 2:                                                          # the swap cannot change anything: no passes, NaN columns
+        kinds = kinds[:1]
+        null["E_swap"] = null["dF_swap"] = np.full((n_null, len(names)), np.nan)
     for _ in range(n_null):
-        for kind, fn in (("shuffle", block_shuffle), ("swap", block_swap)):
+        for kind, fn in kinds:
             alt = fn(all_eeg, win, rng)
             e_parts, f_parts = [], []
             for i, tok in enumerate(test_tokens):
