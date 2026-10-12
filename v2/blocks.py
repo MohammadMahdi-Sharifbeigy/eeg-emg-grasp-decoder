@@ -12,7 +12,8 @@ class AttentionBlock(nn.Module):
     """x + attention(norm(x)), then with ffn_dim also x + feed_forward(norm(x)).
 
     With n_nodes it is a graph layer: the attention logits get a learned edge bias per head and a
-    scaled fixed prior (for example scalp distance or muscle co-activation).
+    scaled fixed prior (for example scalp distance or muscle co-activation). The prior must be
+    (n_nodes, n_nodes); every layer keeps its own copy of it.
     """
 
     def __init__(self, d, n_heads, dropout, ffn_dim=None, n_nodes=None, prior=None):
@@ -26,7 +27,12 @@ class AttentionBlock(nn.Module):
         if n_nodes:
             self.edge = nn.Parameter(torch.zeros(n_heads, n_nodes, n_nodes))
             self.prior_scale = nn.Parameter(torch.ones(()))
-            p = torch.zeros(n_nodes, n_nodes) if prior is None else torch.as_tensor(prior, dtype=torch.float32)
+            if prior is None:
+                p = torch.zeros(n_nodes, n_nodes)
+            else:                                                      # an own copy: nothing shared with the caller
+                p = torch.as_tensor(prior, dtype=torch.float32).detach().clone()
+                if tuple(p.shape) != (n_nodes, n_nodes):
+                    raise ValueError(f"prior has shape {tuple(p.shape)}, expected ({n_nodes}, {n_nodes})")
             self.register_buffer("prior", p)
 
     def forward(self, x):
