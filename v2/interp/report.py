@@ -84,7 +84,9 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
     ic, names, eeg_names = cfg["interp"], list(names), list(eeg_names)
     window, clip, bin_size = int(cfg["tokens"]["window"]), cfg["eeg"]["clip"], int(ic["flow_bin"])
     kw = dict(window=window, clip=clip, residual=ic["residual"], bin_size=bin_size)
-    ev_tokens = {(tok["series"], e): event_tokens(participant, tok["series"], tok["n_samples"], e, data_dir)
+    # only the events whose window fits (the test of event_windows), so that max_events counts usable events
+    ev_tokens = {(tok["series"], e): [ev for ev in event_tokens(participant, tok["series"], tok["n_samples"], e, data_dir)
+                                      if 0 <= ev["token"] - window // 2 <= len(tok["kin"]) - window]
                  for tok in test_tokens for e in list(ic["events"]) + [REST]}
 
     def stack(output, muscle, event, flow=False, limit=None):

@@ -151,3 +151,22 @@ def test_interpret_subject_reports_when_no_window_fits(monkeypatch):
     res = interpret_subject(build_model(cfg).eval(), [tok], norm, cfg, torch.device("cpu"), 1, NAMES, log=said.append)
     assert all(len(df) == 0 for df in res["tables"].values()) and res["figures"] == {}
     assert any("no event window" in s for s in said)
+
+
+def test_max_events_counts_the_events_whose_window_fits(tmp_path, monkeypatch):
+    early = {"lift": 1, "CurW": 1, "CurS": 1, "hand_start": 50, "first_touch": 150, "lift_off": 300, "hand_stop": 700}
+    lifts = [early] + [{"lift": i + 2, "CurW": 1, "CurS": 1, "hand_start": 1500 + 3000 * i, "first_touch": 2000 + 3000 * i,
+                        "lift_off": 2300 + 3000 * i, "hand_stop": 3200 + 3000 * i} for i in range(2)]
+    monkeypatch.setattr("main.interp.lift_events", lambda *a, **k: lifts)
+    cfg = copy.deepcopy(CONFIG_V2)
+    cfg["tokens"]["window"] = 100                                      # token 30 of the first lift: its window starts before 0
+    cfg["interp"].update(events=["lift_off"], max_events=1, n_perm=20, n_random=2, deletion_fractions=[0.1], flow_bin=10)
+    tok = _tok(T=9000); norm = D.fit_norm([tok])
+    torch.manual_seed(0)
+    m = build_model(cfg).eval()
+    res = interpret_subject(m, [tok], norm, cfg, torch.device("cpu"), 1, NAMES, log=lambda *_: None)
+    plt.close("all")
+    t = res["tables"]
+    assert "flow" in set(t["time"]["view"])                            # the one event of the limit is the first that fits
+    assert len(t["faithfulness"]) and (t["sanity"]["n"] == 1).all()
+    assert (t["parts"]["n"] == 2).all()                                # the views without a limit still use both lifts that fit

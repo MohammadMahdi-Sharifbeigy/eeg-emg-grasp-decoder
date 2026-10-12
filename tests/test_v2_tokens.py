@@ -45,3 +45,15 @@ def test_config_values_from_the_spec():
     assert c["outputs"]["interpretability_dir"] == "outputs/interpretability_v2"
     assert c["interp"] == {"residual": 0.5, "flow_bin": 4, "events": ["first_touch", "lift_off"], "max_events": 6,
                            "deletion_fractions": [0.05, 0.1, 0.2, 0.4], "n_random": 10, "n_perm": 1000, "seed": 42}
+
+
+def test_series_edges_are_not_pulled_towards_zero():
+    const = np.full((4003, 2), 3.0)
+    tok = tokens.to_tokens(const)
+    assert tok.shape == (401, 2) and np.abs(tok - 3.0).max() < 1e-4            # token 0 and the last token included
+    ramp = np.arange(4003, dtype=np.float64)[:, None] / 500.0                  # token k sits at sample k * Q
+    assert np.abs(tokens.to_tokens(ramp)[:, 0] - np.arange(401) * tokens.Q / 500.0).max() < 1e-4
+    x = np.random.default_rng(0).standard_normal((4003, 3))                    # away from the edges nothing changes
+    from scipy.signal import decimate
+    old = decimate(x, tokens.Q, ftype="fir", zero_phase=True, axis=0)
+    assert np.abs(tokens.to_tokens(x)[10:-10] - old[10:-10]).max() < 1e-6

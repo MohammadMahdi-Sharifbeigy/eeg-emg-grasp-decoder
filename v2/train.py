@@ -40,6 +40,14 @@ def evaluate_loss(model, loader, crit, device, use_amp):
     return sums["K"] / n, (sums["E"] + sums["F"]) / n, {k: v / n for k, v in comps_sum.items()}
 
 
+def weighted_stream_loss(components, stream, loss_cfg) -> float:
+    """Loss of one output ("K", "E" or "F") from the logged components, e.g. history["components"][epoch].
+
+    The same weighted sum as StreamLoss: w_main * main + w_ccc * ccc + w_lift * lift + w_diff * diff.
+    """
+    return float(sum(loss_cfg[f"w_{part}"] * components[f"{stream}/{part}"] for part in ("main", "ccc", "lift", "diff")))
+
+
 IDENTITY_BLOCKS = ("model", "tokens", "eeg", "history", "loss")    # config blocks that define the model and its data
 
 
@@ -133,8 +141,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
     train_loader = DataLoader(train_ds, batch_size=tc["batch_size"], shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=tc["batch_size"], shuffle=False)
 
-    hist = {"train": [], "val_kin": [], "val_eeg": [], "components": [], "best_epoch_kin": 0, "best_epoch_eeg": 0,
-            "epochs_run": 0}
+    hist = {"train": [], "val_kin": [], "val_eeg": [], "components": [], "skipped_kin": [], "skipped_eeg": [],
+            "best_epoch_kin": 0, "best_epoch_eeg": 0, "epochs_run": 0}
     best = {"kin": math.inf, "eeg": math.inf}
     bad = {"kin": 0, "eeg": 0}
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
@@ -144,6 +152,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
         train_ds.set_epoch(ep)
         model.train()
         running, steps = 0.0, 0
+        skipped = {"kin": 0, "eeg": 0}                               # optimizer steps left out: no finite gradient norm
         for opt in opts.values():
             opt.zero_grad(set_to_none=True)
         for i, batch in enumerate(train_loader):
@@ -153,7 +162,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                 loss, _, _ = v2_loss(out, b["target"], b["hold_id"], crit)
             scaler.scale(loss / accum).backward()
             if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
-                step_streams(model, opts, scaler, tc["grad_clip_norm"])
+                for stream, stepped in step_streams(model, opts, scaler, tc["grad_clip_norm"]).items():
+                    skipped[stream] += not stepped
             running += float(loss.detach())
             steps += 1
         for sched in scheds:
@@ -163,6 +173,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
         hist["val_kin"].append(v_kin)
         hist["val_eeg"].append(v_eeg)
         hist["components"].append(comps)
+        hist["skipped_kin"].append(skipped["kin"])
+        hist["skipped_eeg"].append(skipped["eeg"])
         hist["epochs_run"] = ep + 1
         state = model.state_dict()
         for stream, value in (("kin", v_kin), ("eeg", v_eeg)):
@@ -177,7 +189,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             else:
                 bad[stream] += 1
         log(f"  epoch {ep + 1:3d}  train {hist['train'][-1]:.4f}  val K {v_kin:.4f}  val E+F {v_eeg:.4f}"
-            f"  bad K {bad['kin']}/{tc['patience']}  bad E {bad['eeg']}/{tc['patience']}")
+            f"  bad K {bad['kin']}/{tc['patience']}  bad E {bad['eeg']}/{tc['patience']}"
+            + (f"  skipped steps K {skipped['kin']}, E {skipped['eeg']}" if skipped["kin"] or skipped["eeg"] else ""))
         if bad["kin"] >= tc["patience"] and bad["eeg"] >= tc["patience"]:
             log("  both streams stopped improving: early stop")
             break

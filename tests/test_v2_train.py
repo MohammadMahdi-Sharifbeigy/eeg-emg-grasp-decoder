@@ -154,3 +154,34 @@ def test_resume_refuses_a_checkpoint_of_another_config(tmp_path):
     assert fit(build_model(CONFIG_V2), tr, va, training_only, torch.device("cpu"), tmp_path,
                log=lambda *_: None)["epochs_run"] == 1
     assert load_best(build_model(CONFIG_V2), tmp_path, torch.device("cpu"))["epochs_run"] == 1
+
+
+def test_weighted_stream_loss_is_the_validation_loss_of_one_stream(tmp_path):
+    from v2.train import weighted_stream_loss
+    comps = {"E/main": 1.0, "E/ccc": 2.0, "E/lift": 4.0, "E/diff": 8.0, "K/main": 100.0, "F/main": 100.0}
+    cfg = {"w_main": 1.0, "w_ccc": 0.3, "w_lift": 0.5, "w_diff": 0.1, "huber_delta": 0.5}
+    assert abs(weighted_stream_loss(comps, "E", cfg) - (1.0 + 0.6 + 2.0 + 0.8)) < 1e-12
+    assert isinstance(weighted_stream_loss(comps, "E", cfg), float)
+    tr, va, _ = _datasets()
+    h = fit(build_model(CONFIG_V2), tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)
+    k, e, f = (weighted_stream_loss(h["components"][0], s, CONFIG_V2["loss"]) for s in ("K", "E", "F"))
+    assert abs(k - h["val_kin"][0]) < 1e-5 and abs(e + f - h["val_eeg"][0]) < 1e-5   # the parts of the logged losses
+
+
+def test_skipped_steps_are_counted_per_epoch_and_stream(tmp_path, monkeypatch):
+    import v2.train as T
+    real, calls = T.clip_per_stream, []
+
+    def clip(model, max_norm):                                        # the EEG stream's first two steps: no finite norm
+        norms = real(model, max_norm)
+        calls.append(1)
+        return {**norms, "eeg": float("nan")} if len(calls) <= 2 else norms
+
+    monkeypatch.setattr(T, "clip_per_stream", clip)
+    tr, va, _ = _datasets()
+    logged = []
+    h = fit(build_model(CONFIG_V2), tr, va, _cfg(epochs=2), torch.device("cpu"), tmp_path, log=logged.append)
+    assert h["skipped_eeg"] == [2, 0] and h["skipped_kin"] == [0, 0]
+    epochs = [line for line in logged if line.lstrip().startswith("epoch")]
+    assert len(epochs) == 2 and "skipped steps K 0, E 2" in epochs[0] and "skipped" not in epochs[1]
+    assert json.loads((tmp_path / "history.json").read_text())["skipped_eeg"] == [2, 0]
