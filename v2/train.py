@@ -126,7 +126,11 @@ def _is_training_complete(ck, hist, bad, epoch, total_epochs, patience):
     if epoch >= total_epochs:
         return True
     if isinstance(bad, dict):
-        if bad.get("kin", 0) >= patience and bad.get("eeg", 0) >= patience:
+        if (
+            bad.get("kin", 0) >= patience
+            or bad.get("eeg", 0) >= patience
+            or bad.get("total", 0) >= patience
+        ):
             return True
     return False
 
@@ -199,11 +203,17 @@ def _save_metrics(ckpt_dir, hist, total_time_s, cfg):
     # 2. CSV — one row per epoch
     rows = []
     for i in range(n):
+        vk = hist["val_kin"][i] if i < len(hist["val_kin"]) else ""
+        ve = hist["val_eeg"][i] if i < len(hist["val_eeg"]) else ""
+        vtot = hist["val_total"][i] if "val_total" in hist and i < len(hist["val_total"]) else (
+            (float(vk) + float(ve)) if vk != "" and ve != "" else ""
+        )
         row = {
             "epoch": i + 1,
             "train_loss": hist["train"][i] if i < len(hist["train"]) else "",
-            "val_kin": hist["val_kin"][i] if i < len(hist["val_kin"]) else "",
-            "val_eeg": hist["val_eeg"][i] if i < len(hist["val_eeg"]) else "",
+            "val_kin": vk,
+            "val_eeg": ve,
+            "val_total": vtot,
             "skipped_kin": hist["skipped_kin"][i] if i < len(hist["skipped_kin"]) else "",
             "skipped_eeg": hist["skipped_eeg"][i] if i < len(hist["skipped_eeg"]) else "",
             "best_K": "*" if (i + 1) == best_k else "",
@@ -228,7 +238,7 @@ def _save_metrics(ckpt_dir, hist, total_time_s, cfg):
         "-" * 78,
     ]
     if rows:
-        header = f"{'Epoch':^6} | {'Train':^10} | {'Val K':^10} | {'Val E+F':^10} | {'sk_K':^5} | {'sk_E':^5} | {'Best':^8}"
+        header = f"{'Epoch':^6} | {'Train':^10} | {'Val K':^10} | {'Val E+F':^10} | {'V+K Tot':^10} | {'sk_K':^5} | {'sk_E':^5} | {'Best':^8}"
         lines.append(header)
         lines.append("-" * len(header))
         for row in rows:
@@ -242,6 +252,7 @@ def _save_metrics(ckpt_dir, hist, total_time_s, cfg):
             lines.append(
                 f"{row['epoch']:^6d} | {float(row['train_loss'] or 0):^10.4f} | "
                 f"{float(row['val_kin'] or 0):^10.4f} | {float(row['val_eeg'] or 0):^10.4f} | "
+                f"{float(row['val_total'] or 0):^10.4f} | "
                 f"{str(row['skipped_kin']):^5} | {str(row['skipped_eeg']):^5} | {flag:^8}"
             )
     lines.append("=" * 78)
@@ -322,12 +333,12 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
     train_loader = DataLoader(train_ds, batch_size=tc["batch_size"], shuffle=True, drop_last=False)
     val_loader = DataLoader(val_ds, batch_size=tc["batch_size"], shuffle=False)
 
-    hist = {"train": [], "val_kin": [], "val_eeg": [], "components": [], "skipped_kin": [], "skipped_eeg": [],
+    hist = {"train": [], "val_kin": [], "val_eeg": [], "val_total": [], "components": [], "skipped_kin": [], "skipped_eeg": [],
             "best_epoch_kin": 0, "best_epoch_eeg": 0, "epochs_run": 0}
-    best = {"kin": math.inf, "eeg": math.inf}
-    bad = {"kin": 0, "eeg": 0}
+    best = {"kin": math.inf, "eeg": math.inf, "total": math.inf}
+    bad = {"kin": 0, "eeg": 0, "total": 0}
     best_state = {k: v.detach().cpu().clone() for k, v in model.state_dict().items()}
-    recent = {"kin": [], "eeg": []}
+    recent = {"kin": [], "eeg": [], "total": []}
     start_ep = 0
     accum_time_s = 0.0
     t_start = time.time()
@@ -360,6 +371,9 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             best = ck.get("best", best)
             bad = ck.get("bad", bad)
             recent = ck.get("recent", recent)
+            best.setdefault("total", math.inf)
+            bad.setdefault("total", 0)
+            recent.setdefault("total", [])
             best_state = ck.get("best_state", best_state)
             start_ep = ck.get("epoch", hist.get("epochs_run", 0))
             accum_time_s = hist.get("total_time_s", 0.0)
@@ -378,10 +392,11 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                 elif "val_combined" in b_ck and b_ck["val_combined"] is not None:
                     hist["val_combined"] = b_ck["val_combined"]
 
-            # If training already completed (either early stop or max epochs reached), skip
+            # If training already completed (either early stop on any stream or max epochs reached), skip
             if _is_training_complete(ck, hist, bad, start_ep, total, patience):
                 log(f"  training already completed ({start_ep}/{total} epochs, "
-                    f"bad K {bad.get('kin', 0)}/{patience}, bad E {bad.get('eeg', 0)}/{patience}): training skipped")
+                    f"bad K {bad.get('kin', 0)}/{patience}, bad E {bad.get('eeg', 0)}/{patience}, "
+                    f"bad V+K {bad.get('total', 0)}/{patience}): training skipped")
                 model.load_state_dict(best_state)
                 if "val_combined" not in hist:
                     v_kin, v_eeg, comps = evaluate_loss(model, val_loader, crit, device, use_amp)
@@ -389,7 +404,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                 return hist
 
             log(f"  resumed last.pt at epoch {start_ep}/{total}  "
-                f"(bad K {bad['kin']}/{patience}, bad E {bad['eeg']}/{patience})")
+                f"(bad K {bad['kin']}/{patience}, bad E {bad['eeg']}/{patience}, bad V+K {bad['total']}/{patience})")
 
     elif resume and best_pt.exists():
         b_ck = torch.load(best_pt, map_location=device, weights_only=False)
@@ -464,25 +479,28 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             for sched in scheds:
                 sched.step()
             v_kin, v_eeg, comps = evaluate_loss(model, val_loader, crit, device, use_amp)
+            v_total = v_kin + v_eeg
             hist["train"].append(running / max(steps, 1))
             hist["val_kin"].append(v_kin)
             hist["val_eeg"].append(v_eeg)
+            hist.setdefault("val_total", []).append(v_total)
             hist["components"].append(comps)
             hist["skipped_kin"].append(skipped["kin"])
             hist["skipped_eeg"].append(skipped["eeg"])
             hist["epochs_run"] = ep + 1
             state = model.state_dict()
             improved_any = False
-            for stream, value in (("kin", v_kin), ("eeg", v_eeg)):
+            for stream, value in (("kin", v_kin), ("eeg", v_eeg), ("total", v_total)):
                 recent[stream] = (recent[stream] + [value])[-tc["smooth_window"]:]
                 smooth = sum(recent[stream]) / len(recent[stream])
                 if smooth < best[stream] - 1e-6:
                     best[stream], bad[stream] = smooth, 0
-                    hist[f"best_epoch_{stream}"] = ep + 1
-                    for k, v in state.items():
-                        if stream_of(k) == stream:
-                            best_state[k] = v.detach().cpu().clone()
-                    improved_any = True
+                    if stream in ("kin", "eeg"):
+                        hist[f"best_epoch_{stream}"] = ep + 1
+                        for k, v in state.items():
+                            if stream_of(k) == stream:
+                                best_state[k] = v.detach().cpu().clone()
+                        improved_any = True
                 else:
                     bad[stream] += 1
 
@@ -494,6 +512,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                     "valE": f"{v_eeg:.4f}",
                     "badK": f"{bad['kin']}/{tc['patience']}",
                     "badE": f"{bad['eeg']}/{tc['patience']}",
+                    "badVK": f"{bad['total']}/{tc['patience']}",
                 }
                 if skipped["kin"] or skipped["eeg"]:
                     postfix["sk"] = f"K{skipped['kin']}E{skipped['eeg']}"
@@ -534,8 +553,15 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             # --- metrics.json / metrics.csv / metrics_report.md ---
             _save_metrics(ckpt_dir, hist, elapsed, cfg)
 
-            if bad["kin"] >= tc["patience"] and bad["eeg"] >= tc["patience"]:
-                _write("  both streams stopped improving: early stop")
+            if bad["kin"] >= tc["patience"] or bad["eeg"] >= tc["patience"] or bad["total"] >= tc["patience"]:
+                stopped = []
+                if bad["kin"] >= tc["patience"]:
+                    stopped.append(f"K ({bad['kin']}/{tc['patience']})")
+                if bad["eeg"] >= tc["patience"]:
+                    stopped.append(f"E ({bad['eeg']}/{tc['patience']})")
+                if bad["total"] >= tc["patience"]:
+                    stopped.append(f"V+K ({bad['total']}/{tc['patience']})")
+                _write(f"  early stop: {', '.join(stopped)} reached patience")
                 break
     finally:
         if _TQDM_AVAILABLE:

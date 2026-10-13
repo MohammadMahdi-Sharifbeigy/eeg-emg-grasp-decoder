@@ -17,7 +17,7 @@ CONFIG_V2 = {
     },
     "loss": {"w_main": 1.0, "w_ccc": 0.3, "w_lift": 0.5, "w_diff": 0.1, "huber_delta": 0.5},
     "training": {
-        "lr": 1e-3, "weight_decay": 0.01, "warmup_epochs": 3, "max_epochs": 150, "patience": 15,
+        "lr": 1e-3, "weight_decay": 0.01, "warmup_epochs": 5, "max_epochs": 150, "patience": 30,
         "batch_size": 32, "gradient_accumulation_steps": 1, "grad_clip_norm": 1.0, "use_amp": True,
         "smooth_window": 3, "seed": 42,
     },
