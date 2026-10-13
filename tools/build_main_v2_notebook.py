@@ -136,10 +136,14 @@ for subj, sd in subject_data.items():
           f"E is saved from epoch {ep_e} ({e_alone[ep_e - 1] if ep_e else float('nan'):.4f}), K from epoch {ep_k}")
     vc = history["val_combined"]                     # the saved model joins each stream's own best epoch
     l_k, l_f = weighted_stream_loss(vc["components"], "K", lc), weighted_stream_loss(vc["components"], "F", lc)
-    differ = ep_k != ep_e
-    fusion_checked = not (differ and l_f > l_k)      # False: this K and this fusion never met in training, and F lost
+    # The saved fusion met the saved K in training when both come from one epoch, or when K was frozen at its
+    # best weights before the fusion's best epoch (v2.train freezes a stream that runs out of patience).
+    k_frozen = history.get("frozen_epoch", {}).get("kin", 0)
+    same_k = ep_k == ep_e or bool(k_frozen and ep_e > k_frozen)
+    fusion_checked = same_k or l_f <= l_k            # False: this K and this fusion never met in training, and F lost
     print(f"{subj}: combined best model, validation loss E + F {vc['eeg']:.4f}, K alone {l_k:.4f}, F alone {l_f:.4f} "
-          f"-> F can be interpreted: "
+          f"({'F is not better than K on validation' if l_f >= l_k else 'F is better than K on validation'}; "
+          + (f"K frozen at epoch {k_frozen}, " if k_frozen else "") + f"fusion from epoch {ep_e}) -> F can be interpreted: "
           + ("yes" if fusion_checked else "NO (fusion and K come from different epochs and F is worse than K on validation)"))
     results[subj] = dict(model=model, history=history, fusion_checked=fusion_checked)
     fig, ax = plt.subplots(1, 2, figsize=(11, 3.5))
@@ -288,6 +292,38 @@ for subj, sd in subject_data.items():
     print(f"{subj}: {saved} triptychs saved to {out_dir}")
 """
 
+RESIDUAL = """# V2-RESIDUAL
+# Can the EEG predict what the kinematic stream misses? F = K + EEG correction can only beat K if it can.
+# A ridge regression from EEG features to the residual (actual - K, model units) is fitted on the validation
+# series (K was not trained on them) and scored on the test series, against the same prediction shifted in time.
+#   tokens     output of the EEG stream's temporal encoder (what the fusion reads)
+#   bandpower  the normalised band power the model gets, 1 s mean (does not depend on the trained EEG stream)
+# r: correlation of predicted and real residual; d_vaf: VAF of K + predicted residual minus VAF of K (points);
+# r_model: correlation of the model's own correction F_eeg with the residual. The row MEAN is the test.
+# Reads the trained models of V2-TRAIN; no training.
+from v2.residual import residual_test
+
+res_rows = []
+for subj, sd in subject_data.items():
+    rt = residual_test(results[subj]["model"], sd["tokens"]["val"], sd["tokens"]["test"], sd["norm"], CONFIG, device, sd["names"])
+    res_rows.append(rt.assign(subject=subj))
+    print(f"\\n=== {subj}: residual of K from EEG ({rt['n_fit'].iloc[0]} validation tokens to fit, {rt['n_test'].iloc[0]} test tokens, "
+          f"{rt['n_shifts'].iloc[0]} time shifts) ===")
+    print(rt[["features", "muscle", "r", "r_null_mean", "p", "d_vaf", "d_vaf_null_mean", "p_d_vaf", "r_model"]].round(3).to_string(index=False))
+res_all = pd.concat(res_rows, ignore_index=True)
+res_all.to_csv(RESULTS / "residual.csv", index=False)
+mean_rows = res_all[res_all["muscle"] == "MEAN"]
+print("\\nmean over muscles, per participant:")
+print(mean_rows.pivot(index="subject", columns="features", values=["r", "p", "d_vaf"]).round(3).to_string())
+for feat, d in mean_rows.groupby("features"):
+    ok = int(((d["p"] <= 0.05) & (d["d_vaf"] > 0)).sum())
+    print(f"{feat}: mean r {d['r'].mean():.3f} (shifted {d['r_null_mean'].mean():.3f}), mean VAF gain over K {d['d_vaf'].mean():.2f} points; "
+          f"{ok} of {len(d)} participants have p <= 0.05 and a positive gain")
+print("If no feature set predicts the residual, the EEG holds nothing beyond the kinematics here and F = K is the result.")
+print("If one does while F does not beat K, the fusion fails to learn it and a fusion-only training phase is worth adding.")
+print("saved", RESULTS / "residual.csv")
+"""
+
 
 def _cell(kind, src):
     lines = src.rstrip("\n").split("\n")
@@ -298,7 +334,7 @@ def _cell(kind, src):
 
 
 def build() -> dict:
-    code = (SETUP, CONFIG, BUDGET, DATA, TRAIN, EVAL, COMPARE, INTERP, TRIPTYCH)
+    code = (SETUP, CONFIG, BUDGET, DATA, TRAIN, EVAL, COMPARE, INTERP, TRIPTYCH, RESIDUAL)
     cells = [_cell("markdown", TITLE)] + [_cell("code", s) for s in code]
     return {"cells": cells,
             "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},

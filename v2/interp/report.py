@@ -22,6 +22,9 @@ HIST_NAMES = ["has history", "hold count", "time in series", "time since hold", 
               "mean load", "mean grip"]
 
 
+FLOW_FLAT = 0.10            # electrode flow counts as flat when (max - min) is below this fraction of its mean
+FLOW_MAP = "attention flow (colours from min to max)"
+
 def _share(x):
     """Rescale each event's non-negative map to sum to 1 (over all axes but the first); an all-zero map stays zero."""
     x = np.asarray(x, dtype=np.float64)
@@ -125,7 +128,7 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
             done = True
             label = OUTPUT_LABELS[output]
             fl = stack(output, 0, event, flow=True, limit=ic["max_events"])           # flow is the same for every muscle
-            curves, own_share, flow_panel = {"rollout": ([], []), "relevance": ([], [])}, {}, None
+            curves, own_share, flow_panel, scalp_note = {"rollout": ([], []), "relevance": ([], [])}, {}, None, ""
             profiles, shares = {}, []
             for mi, (mname, st) in enumerate(zip(names, stacks)):
                 tag = {"output": output, "muscle": mname, "event": event}
@@ -189,18 +192,28 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
                                                     "time_s": t_bin, "mean": mean, "sem": sem}))
                 # Raw flow next to the flow of a model that attends to everything equally: where the two
                 # coincide, flow is saturated and cannot say where the output came from.
-                raw, raw_sem = mean_sem(fl["flow/time"])
                 excess, excess_sem = mean_sem(fl["flow/time"] - fl["flow/time_uniform"])
                 tables["time"].append(pd.DataFrame({"output": output, "muscle": "all", "event": event,
                                                     "view": "flow_excess", "time_s": t_bin, "mean": excess,
                                                     "sem": excess_sem}))
-                flow_panel = {"t": t_bin, "mean": raw, "sem": raw_sem, "uniform": fl["flow/time_uniform"].mean(0)}
+                # The figure shows flow above the uniform baseline. The explained token's own bin is left out:
+                # it always holds the skip path.
+                own_bin = (window // 2) // bin_size
+                excess, excess_sem = excess.copy(), excess_sem.copy()
+                excess[own_bin], excess_sem[own_bin] = np.nan, np.nan
+                flow_panel = {"t": t_bin, "mean": excess, "sem": excess_sem}
                 if output != "K":
                     mean, sem = mean_sem(_share(fl["flow/input"].sum(1)))
                     tables["electrodes"].append(pd.DataFrame({"output": output, "muscle": "all", "event": event,
                                                               "view": "flow", "electrode": eeg_names, "mean": mean, "sem": sem}))
-                    profiles = {"rollout": profiles["rollout"], "attention flow": mean,
-                                **{k: v for k, v in profiles.items() if k != "rollout"}}
+                    # Flow from an electrode is capped by the pooling over electrodes. When it comes out equal
+                    # for all of them it says nothing about where the output came from: no map is drawn then.
+                    if float(mean.max() - mean.min()) < FLOW_FLAT * float(mean.mean()):
+                        scalp_note = ("; attention flow is left out: it is equal for all electrodes, "
+                                      f"{100 * mean.min():.2f}-{100 * mean.max():.2f} %")
+                    else:
+                        profiles = {"rollout": profiles["rollout"], FLOW_MAP: mean,
+                                    **{k: v for k, v in profiles.items() if k != "rollout"}}
             views["relevance"] = (t_tok, np.stack(curves["relevance"][0]), np.stack(curves["relevance"][1]))
             emit(f"time_{output}_{event}", P.plot_time_views(
                 views, names, f"{label}: where in time, around {event} (mean and SEM over lifts)", event,
@@ -210,7 +223,8 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
                 f"{label}: attention of the {event} token, per temporal layer and head", event))
             if output != "K":
                 emit(f"scalp_{output}_{event}", P.plot_scalp(
-                    profiles, eeg_names, f"{label}: which electrodes, around {event} (share per electrode)"))
+                    profiles, eeg_names, f"{label}: which electrodes, around {event} (share per electrode{scalp_note})",
+                    tight=(FLOW_MAP,)))
             if output == "E":
                 layers = arrays[f"E__{event}__electrode_layers"].mean(1)                 # (layers, E, E), heads averaged
                 emit(f"electrode_layers_{event}", P.plot_matrices(

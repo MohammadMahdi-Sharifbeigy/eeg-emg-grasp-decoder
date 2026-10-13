@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MARKERS = ["# V2-SETUP", "# V2-CONFIG", "# V2-BUDGET", "# V2-DATA", "# V2-TRAIN", "# V2-EVAL", "# V2-COMPARE", "# V2-INTERP", "# V2-TRIPTYCH"]
+MARKERS = ["# V2-SETUP", "# V2-CONFIG", "# V2-BUDGET", "# V2-DATA", "# V2-TRAIN", "# V2-EVAL", "# V2-COMPARE", "# V2-INTERP", "# V2-TRIPTYCH", "# V2-RESIDUAL"]
 
 
 def _builder():
@@ -81,7 +81,7 @@ def test_train_cell_says_whether_e_and_f_can_be_interpreted():
     cell = _cell("# V2-TRAIN")
     assert cell.count("weighted_stream_loss(") == 3 and "w_main" not in cell          # the arithmetic lives in v2.train
     assert 'history["components"]' in cell and 'vc["components"]' in cell and "np.argmin(" in cell
-    assert "fusion_checked = not (differ and l_f > l_k)" in cell and "fusion_checked=fusion_checked" in cell
+    assert "fusion_checked = same_k or l_f <= l_k" in cell and "ep_e > k_frozen" in cell and "fusion_checked=fusion_checked" in cell
     assert "weighted_stream_loss" in _cell("# V2-SETUP")
 
 

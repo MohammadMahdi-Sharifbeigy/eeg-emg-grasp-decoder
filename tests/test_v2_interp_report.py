@@ -178,12 +178,13 @@ def test_time_figure_with_own_share_and_a_flow_row():
     mean = rng.random((5, 50))
     mean[:, 24:27] = np.nan                                                  # the explained token is left out
     curves = {"rollout": (t, mean, 0.1 * rng.random((5, 50))), "relevance": (t, mean * 0.5, 0.1 * rng.random((5, 50)))}
-    flow = {"t": t[::5], "mean": rng.random(10), "sem": 0.05 * rng.random(10), "uniform": np.full(10, 0.5)}
+    flow = {"t": t[::5], "mean": rng.random(10) - 0.5, "sem": 0.05 * rng.random(10)}
     fig = P.plot_time_views(curves, NAMES, "title", "lift_off", flow=flow,
                             own_share={"rollout": np.full(5, 0.25), "relevance": np.full(5, 0.4)})
-    assert len(fig.axes) == 6 and "own token" in fig.axes[0].get_title(loc="left")
+    assert len(fig.axes) == 6 and [ax.get_title(loc="left") for ax in fig.axes[:5]] == NAMES   # short titles: no overlap
+    assert fig.axes[0].texts[0].get_text() == "own token: rollout 25%, grad-weighted 40%"
     assert fig.axes[0].get_ylabel() == "share among the other tokens"
-    assert len(fig.axes[5].lines) == 3 and fig.axes[5].get_ylim() == (0.0, 1.05)      # baseline, flow, event line
+    assert len(fig.axes[5].lines) == 3 and fig.axes[5].get_ylabel() == "flow above uniform"   # zero line, flow, event line
     plt.close(fig)
 
 

@@ -32,6 +32,7 @@ _RC = {
     "lines.linewidth": 1.5, "axes.linewidth": 0.8, "grid.alpha": 1.0, "figure.dpi": 100, "savefig.dpi": "figure",
     "savefig.bbox": None,
 }
+_SHORT = {"rollout": "rollout", "relevance": "grad-weighted"}
 _MIN_WIDTH = 7.5            # inches: room for the figure title
 
 
@@ -70,8 +71,8 @@ def plot_time_views(curves, panel_names, title, event_label="event", flow=None, 
 
     own_share: {view: (n_panels,)} share held by the explained token itself, written into each panel when the
                curves show the share among the other tokens only.
-    flow:      {"t", "mean", "sem", "uniform"} raw attention flow per time bin and the flow of a model that
-               attends to everything equally; drawn in a second row on its own axis (flow is not a share).
+    flow:      {"t", "mean", "sem"} attention flow per time bin minus the flow of a model that attends to
+               everything equally (NaN leaves a gap); drawn in a second row on its own axis.
     """
     n = len(panel_names)
     with style():
@@ -85,11 +86,11 @@ def plot_time_views(curves, panel_names, title, event_label="event", flow=None, 
                 ax.fill_between(t, mean[p] - sem[p], mean[p] + sem[p], color=VIEW_COLORS[view], alpha=0.18, linewidth=0)
                 ax.plot(t, mean[p], color=VIEW_COLORS[view], linewidth=1.5, label=VIEW_LABELS[view])
             ax.axvline(0.0, color=MUTED, linewidth=0.8)
-            if own_share:
-                held = ", ".join(f"{VIEW_LABELS[v].split()[0]} {100 * s[p]:.0f}%" for v, s in own_share.items())
-                ax.set_title(f"{panel_names[p]}  (own token: {held})", loc="left", fontsize=7.5, fontweight="bold")
-            else:
-                ax.set_title(panel_names[p], loc="left", fontweight="bold")
+            ax.set_title(panel_names[p], loc="left", fontweight="bold")
+            if own_share:                                       # short, right-aligned: never reaches the next panel
+                held = ", ".join(f"{_SHORT.get(v, v)} {100 * s[p]:.0f}%" for v, s in own_share.items())
+                ax.text(1.0, 1.02, f"own token: {held}", transform=ax.transAxes, ha="right", va="bottom",
+                        fontsize=6.5, color=MUTED)
             ax.set_xlabel(f"time from {event_label} (s)")
             if p:
                 ax.tick_params(labelleft=False)
@@ -99,16 +100,16 @@ def plot_time_views(curves, panel_names, title, event_label="event", flow=None, 
             ax = fig.add_subplot(grid[1, :])
             _pin([ax])
             t, mean, sem = flow["t"], np.asarray(flow["mean"], float), np.asarray(flow["sem"], float)
-            ax.plot(t, flow["uniform"], color=CONTEXT, linewidth=1.5, label="uniform attention (carries no information)")
+            ax.axhline(0.0, color=CONTEXT, linewidth=1.5, label="uniform attention (carries no information)")
             ax.fill_between(t, mean - sem, mean + sem, color=VIEW_COLORS["flow"], alpha=0.18, linewidth=0)
-            ax.plot(t, mean, color=VIEW_COLORS["flow"], linewidth=1.5, label=VIEW_LABELS["flow"])
+            ax.plot(t, mean, color=VIEW_COLORS["flow"], linewidth=1.5, label="attention flow minus uniform")
             ax.axvline(0.0, color=MUTED, linewidth=0.8)
-            ax.set_ylim(0.0, 1.05)
-            ax.set_ylabel("maximum flow (0-1)")
+            ax.set_ylabel("flow above uniform")
             ax.set_xlabel(f"time from {event_label} (s)")
-            ax.set_title("Attention flow per time bin (same for all muscles). Where it follows the grey line, flow is "
-                         "saturated and does not localise.", loc="left", fontsize=7.5, fontweight="bold")
-            ax.legend(loc="lower right", frameon=False, ncol=2)
+            ax.set_title("Attention flow per time bin minus the flow of uniform attention (same for all muscles; the "
+                         "token's own bin is left out). Above 0 = more than attending equally.",
+                         loc="left", fontsize=7.5, fontweight="bold")
+            ax.legend(loc="best", frameon=False, ncol=2)
     return _title(fig, title)
 
 
@@ -154,9 +155,10 @@ def plot_matrices(mats, title, row_names=None, col_names=None, signed=False, xla
     return _title(fig, title)
 
 
-def plot_scalp(maps, ch_names, title, signed=False, masks=None):
+def plot_scalp(maps, ch_names, title, signed=False, masks=None, tight=()):
     """A row of scalp maps, each with its own colour bar. maps: {label: (n_electrodes,)};
-    masks: {label: bool (n_electrodes,)} marks electrodes (for example corrected p < 0.05)."""
+    masks: {label: bool (n_electrodes,)} marks electrodes (for example corrected p < 0.05);
+    tight: labels whose colours run from the smallest to the largest value instead of from 0."""
     import mne
 
     info = mne.create_info(list(ch_names), 500.0, "eeg")
@@ -170,7 +172,8 @@ def plot_scalp(maps, ch_names, title, signed=False, masks=None):
             top = float(np.abs(v).max()) or 1.0
             mask = None if masks is None or label not in masks else np.asarray(masks[label], dtype=bool)
             im, _ = mne.viz.plot_topomap(v, info, axes=ax, show=False, cmap=DIVERGING if signed else SEQUENTIAL,
-                                         vlim=(-top if signed else 0.0, top), contours=0, mask=mask)
+                                         vlim=(-top if signed else (float(v.min()) if label in tight else 0.0), top),
+                                         contours=0, mask=mask)
             ax.set_title(label, fontsize=8)
             _pin([fig.colorbar(im, ax=ax, orientation="horizontal", fraction=0.05, pad=0.04,
                                ticks=MaxNLocator(4)).ax])              # few ticks: the bars sit side by side
