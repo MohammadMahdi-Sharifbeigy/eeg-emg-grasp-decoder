@@ -252,37 +252,40 @@ for subj, sd in subject_data.items():
 """
 
 TRIPTYCH = """# V2-TRIPTYCH
-# Triptych per test series, like the interpretability figure of main_1stage: 10 s stretches that lead into a lift.
+# Triptych of every test series, like the interpretability figure of main_1stage: the whole series is cut into
+# consecutive 10 s stretches and each stretch is one figure.
 #   Panel 1  actual EMG envelope against K, E and F
 #   Panel 2  exact parts of the outputs: K_base, K = K_base x gain, and the EEG correction F_eeg inside F
 #   Panel 3  muscle-graph attention of the kinematic stream, change from its rest mean
-# Reads the trained models of V2-TRAIN; writes PNG files under CONFIG["outputs"]["interpretability_dir"].
+# Reads the trained models of V2-TRAIN. Figures are only saved, not shown in the notebook:
+#   CONFIG["outputs"]["interpretability_dir"] / {subject} / triptych / series{S}_window{w}_{t}s-{t+10}s.png
 from main.interp import lift_events
 from v2.interp import plots as P
-from v2.interp.triptych import plot_triptych, series_internals, stretch_starts
+from v2.interp.triptych import plot_triptych, series_internals, tile_starts
 
-TRIPTYCH_STRETCHES, TRIPTYCH_SECONDS = 2, 10.0          # stretches per test series, length of a stretch
+TRIPTYCH_SECONDS = 10.0              # length of one plotted stretch; the model window stays CONFIG["tokens"]["window"]
+MAX_STRETCHES_PER_SERIES = None      # None = every 10 s stretch of every test series; a number N = only the first N
 INTERP_DIR = Path(CONFIG["outputs"]["interpretability_dir"])
 tc = CONFIG["tokens"]
 for subj, sd in subject_data.items():
-    out_dir = INTERP_DIR / subj
+    out_dir = INTERP_DIR / subj / "triptych"
     out_dir.mkdir(parents=True, exist_ok=True)
-    shown = False
+    saved = 0
     for tok in sd["tokens"]["test"]:
         internals = series_internals(results[subj]["model"], tok, sd["norm"], device, tc["window"], tc["hop"],
                                      clip=CONFIG["eeg"]["clip"], residual=CONFIG["interp"]["residual"])
         events = lift_events(sd["p_id"], tok["series"], fs=CONFIG["data"]["fs"], n_samples=tok["n_samples"])
-        for start in stretch_starts(tok, TRIPTYCH_STRETCHES, TRIPTYCH_SECONDS):
+        starts = tile_starts(tok, TRIPTYCH_SECONDS)[:MAX_STRETCHES_PER_SERIES]
+        for w, start in enumerate(starts):
+            t0 = w * TRIPTYCH_SECONDS
             fig = plot_triptych(internals, tok, sd["norm"], sd["names"], start, TRIPTYCH_SECONDS, events=events,
-                                title=f"{subj}, test series {tok['series']}, from {start / 50:.0f} s")
-            png = out_dir / f"triptych_S{tok['series']}_{start}.png"
+                                title=f"{subj}, test series {tok['series']}, {t0:.0f} s to {t0 + TRIPTYCH_SECONDS:.0f} s")
             with P.style():
-                fig.savefig(png, dpi=130)
+                fig.savefig(out_dir / f"series{tok['series']:02d}_window{w:03d}_{t0:.0f}s-{t0 + TRIPTYCH_SECONDS:.0f}s.png", dpi=130)
             plt.close(fig)
-            if not shown:                               # one figure per participant in the notebook; all are on disk
-                display(Image(filename=str(png)))
-                shown = True
-    print(f"{subj}: triptychs saved to {out_dir}")
+            saved += 1
+        print(f"  {subj} series {tok['series']}: {len(starts)} stretches of {TRIPTYCH_SECONDS:.0f} s")
+    print(f"{subj}: {saved} triptychs saved to {out_dir}")
 """
 
 

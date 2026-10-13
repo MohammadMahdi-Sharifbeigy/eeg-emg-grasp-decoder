@@ -52,6 +52,12 @@ def series_internals(model, tok, norm, device, window=400, hop=200, clip=5.0, re
     return out
 
 
+def tile_starts(tok, length_s=10.0) -> list:
+    """Token index of every complete, non-overlapping stretch of length_s over the whole series."""
+    length = int(round(length_s * FS_TOK))
+    return list(range(0, len(tok["hold_id"]) - length + 1, length))
+
+
 def stretch_starts(tok, n=2, length_s=10.0, lead_s=3.0) -> list:
     """Token index where n stretches start: lead_s before a detected hold, holds spread over the series."""
     hold, length = np.asarray(tok["hold_id"]), int(round(length_s * FS_TOK))

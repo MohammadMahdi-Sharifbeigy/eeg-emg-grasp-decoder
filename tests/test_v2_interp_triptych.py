@@ -7,7 +7,7 @@ import torch
 from v2 import data as D
 from v2.config import CONFIG_V2
 from v2.infer import predict_tokens
-from v2.interp.triptych import PARTS, plot_triptych, series_internals, stretch_starts
+from v2.interp.triptych import PARTS, plot_triptych, series_internals, stretch_starts, tile_starts
 from v2.model import build_model
 
 NAMES = ["AD", "BR", "FD", "ED", "FDI"]
@@ -52,6 +52,12 @@ def test_stretch_starts_lead_into_detected_holds():
     assert stretch_starts(tok, n=1, length_s=4.0, lead_s=1.0) == [100]
     flat = dict(tok, hold_id=np.zeros_like(tok["hold_id"]))
     assert stretch_starts(flat, n=2) == [0]
+
+
+def test_tile_starts_cover_the_series_in_complete_stretches():
+    tok = _tok()                                                        # 900 tokens = 18 s
+    assert tile_starts(tok, 10.0) == [0] and tile_starts(tok, 4.0) == [0, 200, 400, 600]
+    assert tile_starts(tok, 20.0) == []
 
 
 def test_triptych_has_three_panels_per_muscle():
