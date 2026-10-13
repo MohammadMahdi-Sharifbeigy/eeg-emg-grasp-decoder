@@ -39,7 +39,7 @@ def test_config_values_from_the_spec():
     assert c["tokens"] == {"window": 400, "stride": 100, "hop": 200}
     assert c["model"]["d_model"] == 64 and c["model"]["kin_layers"] == 3 and c["model"]["eeg_layers"] == 2
     assert c["loss"] == {"w_main": 1.0, "w_ccc": 0.3, "w_lift": 0.5, "w_diff": 0.1, "huber_delta": 0.5}
-    assert c["training"]["max_epochs"] == 150 and c["training"]["patience"] == 15 and "max_train_minutes" not in c["training"]
+    assert c["training"]["max_epochs"] == 150 and c["training"]["patience"] == 30 and "max_train_minutes" not in c["training"]
     assert c["data"]["cache_dir"] == "data/cache_main_stride500_square_pose_force_sg51"
     assert c["outputs"]["checkpoint_dir"] == "outputs/checkpoints_v2" and c["outputs"]["results_dir"] == "results/v2"
     assert c["outputs"]["interpretability_dir"] == "outputs/interpretability_v2"

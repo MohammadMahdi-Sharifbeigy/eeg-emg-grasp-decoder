@@ -47,7 +47,7 @@ def test_resume_skips_training_and_restores_weights(tmp_path):
     fit(m, tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)
     saved = {k: v.clone() for k, v in m.state_dict().items()}
     m2 = build_model(CONFIG_V2)
-    h2 = fit(m2, tr, va, _cfg(epochs=5), torch.device("cpu"), tmp_path, log=lambda *_: None)
+    h2 = fit(m2, tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)   # finished run: reused
     assert h2["epochs_run"] == 1
     assert all(torch.equal(saved[k], v) for k, v in m2.state_dict().items())
     m3 = build_model(CONFIG_V2)
@@ -138,8 +138,7 @@ def test_combined_best_model_is_validated(tmp_path):
     assert sum("combined best model" in line for line in logged) == 1
 
 
-def test_resume_refuses_a_checkpoint_of_another_config(tmp_path):
-    import pytest
+def test_resume_reuses_continues_or_ignores_a_checkpoint(tmp_path):
     tr, va, _ = _datasets()
     m = build_model(CONFIG_V2)
     fit(m, tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)
@@ -147,12 +146,14 @@ def test_resume_refuses_a_checkpoint_of_another_config(tmp_path):
     assert stored == {k: CONFIG_V2[k] for k in ("model", "tokens", "eeg", "history", "loss")}
     other = _cfg(epochs=1)
     other["loss"]["w_ccc"] = 0.0
-    with pytest.raises(RuntimeError) as err:
-        fit(build_model(CONFIG_V2), tr, va, other, torch.device("cpu"), tmp_path, log=lambda *_: None)
-    assert "'loss'" in str(err.value) and str(tmp_path / "best.pt") in str(err.value)
-    training_only = _cfg(epochs=9)                                    # the training block is not part of the identity
-    assert fit(build_model(CONFIG_V2), tr, va, training_only, torch.device("cpu"), tmp_path,
-               log=lambda *_: None)["epochs_run"] == 1
+    same = fit(build_model(CONFIG_V2), tr, va, _cfg(epochs=1), torch.device("cpu"), tmp_path, log=lambda *_: None)
+    assert same["epochs_run"] == 1                                    # a finished run of the same config is reused
+    longer, said = _cfg(epochs=3), []                                 # the training block is not part of the identity:
+    h = fit(build_model(CONFIG_V2), tr, va, longer, torch.device("cpu"), tmp_path, log=said.append)
+    assert h["epochs_run"] == 3 and any("resumed" in s for s in said)  # an unfinished run continues from last.pt
+    said = []                                                         # another loss: the checkpoint is not used
+    h = fit(build_model(CONFIG_V2), tr, va, other, torch.device("cpu"), tmp_path, log=said.append)
+    assert any("config mismatch" in s and "'loss'" in s for s in said) and h["epochs_run"] == 1
     assert load_best(build_model(CONFIG_V2), tmp_path, torch.device("cpu"))["epochs_run"] == 1
 
 
@@ -182,6 +183,6 @@ def test_skipped_steps_are_counted_per_epoch_and_stream(tmp_path, monkeypatch):
     logged = []
     h = fit(build_model(CONFIG_V2), tr, va, _cfg(epochs=2), torch.device("cpu"), tmp_path, log=logged.append)
     assert h["skipped_eeg"] == [2, 0] and h["skipped_kin"] == [0, 0]
-    epochs = [line for line in logged if line.lstrip().startswith("epoch")]
-    assert len(epochs) == 2 and "skipped steps K 0, E 2" in epochs[0] and "skipped" not in epochs[1]
+    told = [line for line in logged if "skipped steps" in line]
+    assert len(told) == 1 and "epoch   1" in told[0] and "skipped steps K 0, E 2" in told[0]
     assert json.loads((tmp_path / "history.json").read_text())["skipped_eeg"] == [2, 0]

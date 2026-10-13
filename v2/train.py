@@ -121,18 +121,15 @@ def _save_best(path, epoch, model, opts, scheds, scaler, best_state, hist, cfg,
 
 def _is_training_complete(ck, hist, bad, epoch, total_epochs, patience):
     """Check if a checkpoint represents an already completed training run."""
-    if ck.get("training_complete", False):
-        return True
     if epoch >= total_epochs:
         return True
-    if isinstance(bad, dict):
-        if (
-            bad.get("kin", 0) >= patience
-            or bad.get("eeg", 0) >= patience
-            or bad.get("total", 0) >= patience
-        ):
-            return True
-    return False
+    if isinstance(bad, dict) and "kin" in bad and "eeg" in bad:
+        # Finished only when BOTH streams ran out of patience. The streams share no weights, so a stream that
+        # is still improving must keep training after the other one has stopped improving. The stored
+        # "training_complete" flag is not trusted here: runs saved under the earlier "any stream" rule set it
+        # while one stream was still improving, and those runs must be able to continue.
+        return bad["kin"] >= patience and bad["eeg"] >= patience
+    return bool(ck.get("training_complete", False))
 
 
 
@@ -428,7 +425,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                 log(f"  found incomplete {best_pt} (epoch {b_ep}/{total}) without last.pt; starting fresh")
 
     # tqdm.write is the only safe way to print without breaking live bars
-    _write = _tqdm.write if _TQDM_AVAILABLE else log
+    _write = _tqdm.write if (_TQDM_AVAILABLE and log is print) else log     # a caller's own log gets every line
 
     if _TQDM_AVAILABLE:
         epoch_bar = _tqdm(
@@ -488,6 +485,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             hist["skipped_kin"].append(skipped["kin"])
             hist["skipped_eeg"].append(skipped["eeg"])
             hist["epochs_run"] = ep + 1
+            if skipped["kin"] or skipped["eeg"]:
+                _write(f"  epoch {ep + 1:3d}: skipped steps K {skipped['kin']}, E {skipped['eeg']} (no finite gradient)")
             state = model.state_dict()
             improved_any = False
             for stream, value in (("kin", v_kin), ("eeg", v_eeg), ("total", v_total)):
@@ -553,7 +552,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             # --- metrics.json / metrics.csv / metrics_report.md ---
             _save_metrics(ckpt_dir, hist, elapsed, cfg)
 
-            if bad["kin"] >= tc["patience"] or bad["eeg"] >= tc["patience"] or bad["total"] >= tc["patience"]:
+            if bad["kin"] >= tc["patience"] and bad["eeg"] >= tc["patience"]:     # both streams, see _is_training_complete
                 stopped = []
                 if bad["kin"] >= tc["patience"]:
                     stopped.append(f"K ({bad['kin']}/{tc['patience']})")
