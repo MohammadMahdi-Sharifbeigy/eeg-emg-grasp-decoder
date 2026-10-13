@@ -123,6 +123,9 @@ def _is_training_complete(ck, hist, bad, epoch, total_epochs, patience):
     """Check if a checkpoint represents an already completed training run."""
     if epoch >= total_epochs:
         return True
+    frozen = hist.get("frozen_epoch") if isinstance(hist, dict) else None
+    if frozen is not None:
+        return bool(frozen["kin"] and frozen["eeg"])                 # a run with freezing ends when both are frozen
     if isinstance(bad, dict) and "kin" in bad and "eeg" in bad:
         # Finished only when BOTH streams ran out of patience. The streams share no weights, so a stream that
         # is still improving must keep training after the other one has stopped improving. The stored
@@ -427,6 +430,43 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
     # tqdm.write is the only safe way to print without breaking live bars
     _write = _tqdm.write if (_TQDM_AVAILABLE and log is print) else log     # a caller's own log gets every line
 
+    # --- freezing: a stream that ran out of patience goes back to its best weights and is no longer updated,
+    #     while the other stream keeps training. Training ends when both are frozen.
+    frozen = hist.setdefault("frozen_epoch", {"kin": 0, "eeg": 0})      # epoch of the freeze, 0 = still training
+    stream_modules = {s: [m for name, m in model.named_children() if stream_of(name + ".") == s] for s in ("kin", "eeg")}
+
+    def set_trainable(stream, on):
+        for mod in stream_modules[stream]:
+            for p in mod.parameters():
+                p.requires_grad_(on)
+
+    def freeze(stream, ep):
+        state = model.state_dict()
+        model.load_state_dict({k: (best_state[k].to(v.device) if stream_of(k) == stream else v) for k, v in state.items()})
+        set_trainable(stream, False)
+        frozen[stream] = ep
+        name = "K" if stream == "kin" else "E + fusion"
+        _write(f"  epoch {ep:3d}: {name} frozen at its best epoch {hist[f'best_epoch_{stream}']} "
+               f"(no improvement for {patience} epochs)")
+
+    def update_freezes(ep):
+        if not frozen["kin"] and bad["kin"] >= patience:
+            freeze("kin", ep)
+            # F is built on K, so the EEG stream and the fusion are judged again from here, against the K that
+            # will be saved: their best epoch must have been validated together with that K.
+            if frozen["eeg"]:
+                set_trainable("eeg", True)
+                frozen["eeg"] = 0
+            best["eeg"], bad["eeg"], recent["eeg"] = math.inf, 0, []
+            _write(f"  epoch {ep:3d}: E + fusion now train against the frozen K (their patience starts again)")
+        if not frozen["eeg"] and bad["eeg"] >= patience:
+            freeze("eeg", ep)
+
+    for s in ("kin", "eeg"):                                             # a resumed run keeps what was frozen
+        if frozen[s]:
+            set_trainable(s, False)
+    update_freezes(start_ep)                                            # a run saved under an older stopping rule
+
     if _TQDM_AVAILABLE:
         epoch_bar = _tqdm(
             range(start_ep, total),
@@ -445,6 +485,10 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
         for ep in epoch_bar:
             train_ds.set_epoch(ep)
             model.train()
+            for s in ("kin", "eeg"):
+                if frozen[s]:
+                    for mod in stream_modules[s]:
+                        mod.eval()                                       # a frozen stream is the fixed model it will be
             running, steps = 0.0, 0
             skipped = {"kin": 0, "eeg": 0}                               # optimizer steps left out: no finite gradient norm
             for opt in opts.values():
@@ -459,10 +503,12 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                     b = _to(batch, device)
                     with torch.autocast(device.type, enabled=use_amp):
                         out = model(b["kin"], b["hist"], b["eeg"])
-                        loss, _, _ = v2_loss(out, b["target"], b["hold_id"], crit)
-                    scaler.scale(loss / accum).backward()
+                        loss, per, _ = v2_loss(out, b["target"], b["hold_id"], crit)
+                    active = {s: opt for s, opt in opts.items() if not frozen[s]}
+                    trained = sum(per[o] for o in ("K", "E", "F") if not frozen["kin" if o == "K" else "eeg"])
+                    scaler.scale(trained / accum).backward()
                     if (i + 1) % accum == 0 or (i + 1) == len(train_loader):
-                        for stream, stepped in step_streams(model, opts, scaler, tc["grad_clip_norm"]).items():
+                        for stream, stepped in step_streams(model, active, scaler, tc["grad_clip_norm"]).items():
                             skipped[stream] += not stepped
                     batch_loss = float(loss.detach())
                     running += batch_loss
@@ -490,6 +536,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             state = model.state_dict()
             improved_any = False
             for stream, value in (("kin", v_kin), ("eeg", v_eeg), ("total", v_total)):
+                if frozen.get(stream):
+                    continue
                 recent[stream] = (recent[stream] + [value])[-tc["smooth_window"]:]
                 smooth = sum(recent[stream]) / len(recent[stream])
                 if smooth < best[stream] - 1e-6:
@@ -517,6 +565,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                     postfix["sk"] = f"K{skipped['kin']}E{skipped['eeg']}"
                 epoch_bar.set_postfix(postfix)
 
+            update_freezes(ep + 1)
             elapsed = accum_time_s + (time.time() - t_start)
             hist["total_time_s"] = elapsed
 
@@ -552,15 +601,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             # --- metrics.json / metrics.csv / metrics_report.md ---
             _save_metrics(ckpt_dir, hist, elapsed, cfg)
 
-            if bad["kin"] >= tc["patience"] and bad["eeg"] >= tc["patience"]:     # both streams, see _is_training_complete
-                stopped = []
-                if bad["kin"] >= tc["patience"]:
-                    stopped.append(f"K ({bad['kin']}/{tc['patience']})")
-                if bad["eeg"] >= tc["patience"]:
-                    stopped.append(f"E ({bad['eeg']}/{tc['patience']})")
-                if bad["total"] >= tc["patience"]:
-                    stopped.append(f"V+K ({bad['total']}/{tc['patience']})")
-                _write(f"  early stop: {', '.join(stopped)} reached patience")
+            if frozen["kin"] and frozen["eeg"]:
+                _write(f"  early stop: both streams are frozen (K at epoch {frozen['kin']}, E + fusion at epoch {frozen['eeg']})")
                 break
     finally:
         if _TQDM_AVAILABLE:
@@ -568,6 +610,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
 
     total_time_s = accum_time_s + (time.time() - t_start)
     hist["total_time_s"] = total_time_s
+    for s in ("kin", "eeg"):
+        set_trainable(s, True)                                           # the returned model is an ordinary model again
     model.load_state_dict(best_state)
     # the saved model joins each stream's own best epoch, so it is validated once more as a whole
     v_kin, v_eeg, comps = evaluate_loss(model, val_loader, crit, device, use_amp)

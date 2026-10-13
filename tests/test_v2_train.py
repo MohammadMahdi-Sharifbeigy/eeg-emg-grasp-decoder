@@ -186,3 +186,37 @@ def test_skipped_steps_are_counted_per_epoch_and_stream(tmp_path, monkeypatch):
     told = [line for line in logged if "skipped steps" in line]
     assert len(told) == 1 and "epoch   1" in told[0] and "skipped steps K 0, E 2" in told[0]
     assert json.loads((tmp_path / "history.json").read_text())["skipped_eeg"] == [2, 0]
+
+
+def test_a_stale_stream_is_frozen_at_its_best_while_the_other_keeps_training(tmp_path, monkeypatch):
+    import v2.train as T
+    tr, va, _ = _datasets()
+    now, kin_at = {"epoch": 0}, {}
+    set_epoch = tr.set_epoch
+    monkeypatch.setattr(tr, "set_epoch", lambda e: (now.update(epoch=e + 1), set_epoch(e))[1])
+    real = T.evaluate_loss
+    k_script = {1: 1.0, 2: 0.9}                                         # K: best at epoch 2, worse from epoch 3 on
+
+    def scripted(model, loader, crit, device, use_amp):                 # E + F: better every epoch
+        _, _, comps = real(model, loader, crit, device, use_amp)
+        ep = now["epoch"]
+        kin_at.setdefault(ep, {k: v.clone() for k, v in model.kin.state_dict().items()})
+        return k_script.get(ep, 0.95), 1.0 / ep, comps
+
+    monkeypatch.setattr(T, "evaluate_loss", scripted)
+    cfg = _cfg(epochs=8, patience=1)
+    cfg["training"]["smooth_window"] = 1
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2)
+    said = []
+    h = fit(m, tr, va, cfg, torch.device("cpu"), tmp_path, log=said.append)
+    assert h["frozen_epoch"] == {"kin": 3, "eeg": 0} and h["best_epoch_kin"] == 2 and h["epochs_run"] == 8
+    assert any("K frozen at its best epoch 2" in s for s in said)
+    same = lambda a, b: all(torch.equal(a[k], b[k]) for k in a)
+    assert not same(kin_at[2], kin_at[3])                               # K was still training in epoch 3
+    assert same(kin_at[2], kin_at[4]) and same(kin_at[2], kin_at[8])    # frozen: back at epoch 2 and never updated again
+    assert same(kin_at[2], {k: v for k, v in m.kin.state_dict().items()})
+    assert h["best_epoch_eeg"] == 8                                     # E + fusion kept training and improving
+    assert all(p.requires_grad for p in m.parameters())                 # the returned model is not left frozen
+    last = torch.load(tmp_path / "last.pt", map_location="cpu", weights_only=False)
+    assert last["history"]["frozen_epoch"]["kin"] == 3                  # a resumed run would keep K frozen
