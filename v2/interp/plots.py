@@ -64,22 +64,51 @@ def _legend(fig, ax):
     fig.legend(handles, labels, loc="outside lower center", ncol=ncol, frameon=False)
 
 
-def plot_time_views(curves, panel_names, title, event_label="event"):
+def plot_time_views(curves, panel_names, title, event_label="event", flow=None, own_share=None):
     """One panel per muscle, one line per view with a +-SEM band. curves: {view: (t, mean, sem)}, mean and
-    sem are (n_panels, n_t); views may use different time axes (flow is on time bins)."""
+    sem are (n_panels, n_t); views may use different time axes. NaN in a curve leaves a gap.
+
+    own_share: {view: (n_panels,)} share held by the explained token itself, written into each panel when the
+               curves show the share among the other tokens only.
+    flow:      {"t", "mean", "sem", "uniform"} raw attention flow per time bin and the flow of a model that
+               attends to everything equally; drawn in a second row on its own axis (flow is not a share).
+    """
+    n = len(panel_names)
     with style():
-        fig, axes = plt.subplots(1, len(panel_names), figsize=(max(2.7 * len(panel_names), _MIN_WIDTH), 3.2),
-                                 sharex=True, sharey=True, squeeze=False, layout="constrained")
-        _pin(axes[0])
-        for p, ax in enumerate(axes[0]):
+        fig = plt.figure(figsize=(max(2.7 * n, _MIN_WIDTH), 3.2 if flow is None else 5.6), layout="constrained")
+        grid = fig.add_gridspec(1 if flow is None else 2, n, height_ratios=None if flow is None else [3, 2])
+        axes = [fig.add_subplot(grid[0, 0])]
+        axes += [fig.add_subplot(grid[0, p], sharex=axes[0], sharey=axes[0]) for p in range(1, n)]
+        _pin(axes)
+        for p, ax in enumerate(axes):
             for view, (t, mean, sem) in curves.items():
                 ax.fill_between(t, mean[p] - sem[p], mean[p] + sem[p], color=VIEW_COLORS[view], alpha=0.18, linewidth=0)
                 ax.plot(t, mean[p], color=VIEW_COLORS[view], linewidth=1.5, label=VIEW_LABELS[view])
             ax.axvline(0.0, color=MUTED, linewidth=0.8)
-            ax.set_title(panel_names[p], loc="left", fontweight="bold")
+            if own_share:
+                held = ", ".join(f"{VIEW_LABELS[v].split()[0]} {100 * s[p]:.0f}%" for v, s in own_share.items())
+                ax.set_title(f"{panel_names[p]}  (own token: {held})", loc="left", fontsize=7.5, fontweight="bold")
+            else:
+                ax.set_title(panel_names[p], loc="left", fontweight="bold")
             ax.set_xlabel(f"time from {event_label} (s)")
-        axes[0, 0].set_ylabel("share per token")
-        _legend(fig, axes[0, 0])
+            if p:
+                ax.tick_params(labelleft=False)
+        axes[0].set_ylabel("share among the other tokens" if own_share else "share per token")
+        _legend(fig, axes[0])
+        if flow is not None:
+            ax = fig.add_subplot(grid[1, :])
+            _pin([ax])
+            t, mean, sem = flow["t"], np.asarray(flow["mean"], float), np.asarray(flow["sem"], float)
+            ax.plot(t, flow["uniform"], color=CONTEXT, linewidth=1.5, label="uniform attention (carries no information)")
+            ax.fill_between(t, mean - sem, mean + sem, color=VIEW_COLORS["flow"], alpha=0.18, linewidth=0)
+            ax.plot(t, mean, color=VIEW_COLORS["flow"], linewidth=1.5, label=VIEW_LABELS["flow"])
+            ax.axvline(0.0, color=MUTED, linewidth=0.8)
+            ax.set_ylim(0.0, 1.05)
+            ax.set_ylabel("maximum flow (0-1)")
+            ax.set_xlabel(f"time from {event_label} (s)")
+            ax.set_title("Attention flow per time bin (same for all muscles). Where it follows the grey line, flow is "
+                         "saturated and does not localise.", loc="left", fontsize=7.5, fontweight="bold")
+            ax.legend(loc="lower right", frameon=False, ncol=2)
     return _title(fig, title)
 
 

@@ -107,7 +107,7 @@ def test_interpret_subject_writes_tables_and_figures(tmp_path, monkeypatch):
     t = {k: df[df["event"] == "lift_off"] if "event" in df else df for k, df in res["tables"].items()}
     assert set(res["tables"]["time"]["event"]) == {"first_touch", "lift_off"}
     assert set(t) == set(TABLES) and all(len(df) for df in t.values())
-    assert set(t["time"]["view"]) == {"rollout", "flow", "relevance"} and set(t["time"]["output"]) == {"K", "E", "F_eeg"}
+    assert set(t["time"]["view"]) == {"rollout", "flow", "flow_excess", "relevance"} and set(t["time"]["output"]) == {"K", "E", "F_eeg"}
     assert set(t["electrodes"]["output"]) == {"E", "F_eeg"} and len(t["rest_contrast"]) == 5 * 32
     rc = t["rest_contrast"]
     assert set(rc["n_pairs"]) == {3} and set(rc["muscle"]) == set(NAMES)             # lift 4 has no rest after it
@@ -170,3 +170,32 @@ def test_max_events_counts_the_events_whose_window_fits(tmp_path, monkeypatch):
     assert "flow" in set(t["time"]["view"])                            # the one event of the limit is the first that fits
     assert len(t["faithfulness"]) and (t["sanity"]["n"] == 1).all()
     assert (t["parts"]["n"] == 2).all()                                # the views without a limit still use both lifts that fit
+
+
+def test_time_figure_with_own_share_and_a_flow_row():
+    rng = np.random.default_rng(0)
+    t = np.linspace(-4, 4, 50)
+    mean = rng.random((5, 50))
+    mean[:, 24:27] = np.nan                                                  # the explained token is left out
+    curves = {"rollout": (t, mean, 0.1 * rng.random((5, 50))), "relevance": (t, mean * 0.5, 0.1 * rng.random((5, 50)))}
+    flow = {"t": t[::5], "mean": rng.random(10), "sem": 0.05 * rng.random(10), "uniform": np.full(10, 0.5)}
+    fig = P.plot_time_views(curves, NAMES, "title", "lift_off", flow=flow,
+                            own_share={"rollout": np.full(5, 0.25), "relevance": np.full(5, 0.4)})
+    assert len(fig.axes) == 6 and "own token" in fig.axes[0].get_title(loc="left")
+    assert fig.axes[0].get_ylabel() == "share among the other tokens"
+    assert len(fig.axes[5].lines) == 3 and fig.axes[5].get_ylim() == (0.0, 1.05)      # baseline, flow, event line
+    plt.close(fig)
+
+
+def test_flow_comes_with_the_uniform_attention_baseline():
+    from v2.interp.explain import explain
+    torch.manual_seed(0)
+    m = build_model(CONFIG_V2).eval()
+    g = torch.Generator().manual_seed(0)
+    x = (torch.randn(1, 48, 24, generator=g), torch.rand(1, 48, 8, generator=g), torch.randn(1, 48, 32, 4, generator=g))
+    for output in ("K", "E", "F_eeg"):
+        f = explain(m, *x, output=output, t=20, flow=True, bin_size=4)["flow"]
+        assert f["time_uniform"].shape == f["time"].shape and (f["time_uniform"] <= 1 + 1e-5).all()
+        assert (f["time_uniform"] > 0.4).all()                              # equal attention already routes a lot of flow
+        if output != "K":
+            assert f["electrode_uniform"].shape == f["electrode"].shape and f["input_uniform"].shape == f["input"].shape

@@ -111,22 +111,45 @@ def flow_maps(model, tape, kind, t, residual=0.5, bin_size=4, b=0) -> dict:
       electrode (bins, E)   maximum flow from each electrode into the pooled token of that bin    [E, F]
       input     (bins, E)   min(time, electrode): the pooled token is the only way out of a time
                             step's electrode graph, so the flow through it is the smaller of the two
+      time_uniform, electrode_uniform, input_uniform
+                            the same three maps for a model that attends to everything equally (same
+                            layers, same residual weight, same stem). Maximum flow saturates when
+                            attention is spread out: every source can then route about `residual` of
+                            flow through the many intermediate tokens, so the raw map is nearly flat.
+                            Flow minus this baseline is what the attention pattern itself adds or removes.
     """
     L = model.attention_layers()
     item = lambda x: x[b].cpu().numpy().astype(np.float64)
     sink = [int(t) // bin_size]
+
+    def uniform(n, skip=True):
+        """One layer that attends to all n sources equally (with the skip connection, or without)."""
+        flat = np.full((n, n), 1.0 / n)
+        return (1.0 - residual) * flat + residual * np.eye(n) if skip else flat
+
+    def time_flow(mats):
+        return attention_flow([bin_matrix(m, bin_size) for m in mats], sink)[0]
+
     if kind == "K":
         mats = [item(m) for m in _stack(tape, L["kin"]["temporal"], residual)]
-        mats.insert(0, model.kin.stem_matrix(mats[0].shape[-1]).numpy())
-        return {"time": attention_flow([bin_matrix(m, bin_size) for m in mats], sink)[0]}
+        n, stem = mats[0].shape[-1], model.kin.stem_matrix(mats[0].shape[-1]).numpy()
+        return {"time": time_flow([stem] + mats), "time_uniform": time_flow([stem] + [uniform(n)] * len(mats))}
     mats = [item(m) for m in _stack(tape, L["eeg"]["temporal"], residual)]
+    n = mats[0].shape[-1]
+    flat = [uniform(n)] * len(mats)
     if kind == "F":
         mats.append(item(_single(tape, L["fusion"]["cross"])))
-    time = attention_flow([bin_matrix(m, bin_size) for m in mats], sink)[0]
+        flat = flat + [uniform(n, skip=False)]
+    time, time_u = time_flow(mats), time_flow(flat)
     graph = [_bin_time(item(m), bin_size) for m in _stack(tape, L["eeg"]["electrode"], residual)]   # each (bins, E, E)
     pool = _bin_time(item(_single(tape, L["eeg"]["pool"])), bin_size)                               # (bins, 1, E)
     electrode = np.stack([attention_flow([m[s] for m in graph] + [pool[s]])[0] for s in range(len(pool))])
-    return {"time": time, "electrode": electrode, "input": np.minimum(time[:, None], electrode)}
+    e = pool.shape[-1]
+    one = attention_flow([uniform(e)] * len(graph) + [np.full((1, e), 1.0 / e)])[0]                 # the same in every bin
+    electrode_u = np.tile(one, (len(pool), 1))
+    return {"time": time, "electrode": electrode, "input": np.minimum(time[:, None], electrode),
+            "time_uniform": time_u, "electrode_uniform": electrode_u,
+            "input_uniform": np.minimum(time_u[:, None], electrode_u)}
 
 
 def explain(model, kin, hist, eeg, output="E", muscle=0, t=None, residual=0.5, flow=False, bin_size=4) -> dict:

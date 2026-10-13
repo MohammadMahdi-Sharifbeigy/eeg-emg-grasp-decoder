@@ -125,14 +125,23 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
             done = True
             label = OUTPUT_LABELS[output]
             fl = stack(output, 0, event, flow=True, limit=ic["max_events"])           # flow is the same for every muscle
-            curves = {"rollout": ([], []), "relevance": ([], [])}
+            curves, own_share, flow_panel = {"rollout": ([], []), "relevance": ([], [])}, {}, None
             profiles, shares = {}, []
             for mi, (mname, st) in enumerate(zip(names, stacks)):
                 tag = {"output": output, "muscle": mname, "event": event}
                 for view in ("rollout", "relevance"):
-                    mean, sem = mean_sem(_share(st[f"{view}/time"]))
-                    curves[view][0].append(mean)
-                    curves[view][1].append(sem)
+                    share = _share(st[f"{view}/time"])                                  # (events, T), sums to 1
+                    mean, sem = mean_sem(share)
+                    # The figure shows the share among the OTHER tokens: the explained token itself (and the
+                    # 5-token stem footprint around it) always holds the skip path and would hide the rest.
+                    own = slice(window // 2 - 2, window // 2 + 3)
+                    rest = share.copy()
+                    rest[:, own] = 0.0
+                    r_mean, r_sem = mean_sem(_share(rest))
+                    r_mean[own], r_sem[own] = np.nan, np.nan
+                    curves[view][0].append(r_mean)
+                    curves[view][1].append(r_sem)
+                    own_share.setdefault(view, []).append(float(share[:, own].sum(1).mean()))
                     tables["time"].append(pd.DataFrame({**tag, "view": view, "time_s": t_tok, "mean": mean, "sem": sem}))
                     if output != "K":
                         mean, sem = mean_sem(_share(st[f"{view}/input"].sum(1)))        # (events, E) -> share per electrode
@@ -178,7 +187,14 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
                 mean, sem = mean_sem(_share(fl["flow/time"]) / bin_size)                # share per token, like the others
                 tables["time"].append(pd.DataFrame({"output": output, "muscle": "all", "event": event, "view": "flow",
                                                     "time_s": t_bin, "mean": mean, "sem": sem}))
-                views["flow"] = (t_bin, np.tile(mean, (len(names), 1)), np.tile(sem, (len(names), 1)))
+                # Raw flow next to the flow of a model that attends to everything equally: where the two
+                # coincide, flow is saturated and cannot say where the output came from.
+                raw, raw_sem = mean_sem(fl["flow/time"])
+                excess, excess_sem = mean_sem(fl["flow/time"] - fl["flow/time_uniform"])
+                tables["time"].append(pd.DataFrame({"output": output, "muscle": "all", "event": event,
+                                                    "view": "flow_excess", "time_s": t_bin, "mean": excess,
+                                                    "sem": excess_sem}))
+                flow_panel = {"t": t_bin, "mean": raw, "sem": raw_sem, "uniform": fl["flow/time_uniform"].mean(0)}
                 if output != "K":
                     mean, sem = mean_sem(_share(fl["flow/input"].sum(1)))
                     tables["electrodes"].append(pd.DataFrame({"output": output, "muscle": "all", "event": event,
@@ -187,7 +203,8 @@ def interpret_subject(model, test_tokens, norm, cfg, device, participant, names,
                                 **{k: v for k, v in profiles.items() if k != "rollout"}}
             views["relevance"] = (t_tok, np.stack(curves["relevance"][0]), np.stack(curves["relevance"][1]))
             emit(f"time_{output}_{event}", P.plot_time_views(
-                views, names, f"{label}: where in time, around {event} (mean and SEM over lifts)", event))
+                views, names, f"{label}: where in time, around {event} (mean and SEM over lifts)", event,
+                flow=flow_panel, own_share={v: np.asarray(s) for v, s in own_share.items()}))
             emit(f"layers_{output}_{event}", P.plot_layer_heads(
                 arrays[f"{output}__{event}__time_layers"], t_tok,
                 f"{label}: attention of the {event} token, per temporal layer and head", event))

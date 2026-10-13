@@ -4,7 +4,7 @@ import re
 from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
-MARKERS = ["# V2-SETUP", "# V2-CONFIG", "# V2-BUDGET", "# V2-DATA", "# V2-TRAIN", "# V2-EVAL", "# V2-COMPARE", "# V2-INTERP"]
+MARKERS = ["# V2-SETUP", "# V2-CONFIG", "# V2-BUDGET", "# V2-DATA", "# V2-TRAIN", "# V2-EVAL", "# V2-COMPARE", "# V2-INTERP", "# V2-TRIPTYCH"]
 
 
 def _builder():
@@ -17,10 +17,11 @@ def _code(nb):
     return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 
 
-def test_committed_notebook_equals_the_generator_output_and_has_no_outputs():
+def test_committed_notebook_has_the_generators_cells():
+    """The notebook is committed with the user's outputs, so only the cells' kind and text are compared."""
     nb = json.loads((ROOT / "main_v2.ipynb").read_text(encoding="utf-8"))
-    assert nb == _builder().build()
-    assert all(c.get("outputs", []) == [] and c.get("execution_count") is None for c in nb["cells"] if c["cell_type"] == "code")
+    cells = lambda book: [(c["cell_type"], "".join(c["source"])) for c in book["cells"]]
+    assert cells(nb) == cells(_builder().build())
 
 
 def test_cells_compile_and_are_in_order():

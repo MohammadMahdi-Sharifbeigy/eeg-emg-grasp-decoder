@@ -47,7 +47,7 @@ def test_views_have_the_documented_shapes(output, n_layers):
     assert fl["time"].shape == (T // 4,) and (fl["time"] <= 1 + 1e-5).all()
     assert {k: tuple(v.shape) for k, v in res["saliency"].items()} == {"kin": (2, T, 24), "hist": (2, T, 8), "eeg": (2, T, 32, 4)}
     if output == "K":
-        assert set(ro) == {"time", "muscle"} and set(fl) == {"time"}
+        assert set(ro) == {"time", "muscle"} and set(fl) == {"time", "time_uniform"}
     else:
         assert ro["electrode"].shape == re["electrode"].shape == ro["input"].shape == re["input"].shape == (2, T, 32)
         torch.testing.assert_close(ro["electrode"].sum(-1), torch.ones(2, T), atol=1e-4, rtol=0)

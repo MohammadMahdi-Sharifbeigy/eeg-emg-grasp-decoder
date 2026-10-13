@@ -76,7 +76,7 @@ print("device:", device)
 
 CONFIG = """# V2-CONFIG
 CONFIG = copy.deepcopy(CONFIG_V2)
-subject_list = [1]                      # participants to run; each needs its cache built by main_1stage.ipynb
+subject_list = [1,2,3,4,5,6,7,8,9,10,11,12]                      # participants to run; each needs its cache built by main_1stage.ipynb
 RESULTS = Path(CONFIG["outputs"]["results_dir"]); RESULTS.mkdir(parents=True, exist_ok=True)
 CKPT = Path(CONFIG["outputs"]["checkpoint_dir"])
 print(json.dumps({k: CONFIG[k] for k in ("tokens", "model", "loss", "training", "interp")}, indent=1))
@@ -251,6 +251,40 @@ for subj, sd in subject_data.items():
             display(Image(filename=str(png)))
 """
 
+TRIPTYCH = """# V2-TRIPTYCH
+# Triptych per test series, like the interpretability figure of main_1stage: 10 s stretches that lead into a lift.
+#   Panel 1  actual EMG envelope against K, E and F
+#   Panel 2  exact parts of the outputs: K_base, K = K_base x gain, and the EEG correction F_eeg inside F
+#   Panel 3  muscle-graph attention of the kinematic stream, change from its rest mean
+# Reads the trained models of V2-TRAIN; writes PNG files under CONFIG["outputs"]["interpretability_dir"].
+from main.interp import lift_events
+from v2.interp import plots as P
+from v2.interp.triptych import plot_triptych, series_internals, stretch_starts
+
+TRIPTYCH_STRETCHES, TRIPTYCH_SECONDS = 2, 10.0          # stretches per test series, length of a stretch
+INTERP_DIR = Path(CONFIG["outputs"]["interpretability_dir"])
+tc = CONFIG["tokens"]
+for subj, sd in subject_data.items():
+    out_dir = INTERP_DIR / subj
+    out_dir.mkdir(parents=True, exist_ok=True)
+    shown = False
+    for tok in sd["tokens"]["test"]:
+        internals = series_internals(results[subj]["model"], tok, sd["norm"], device, tc["window"], tc["hop"],
+                                     clip=CONFIG["eeg"]["clip"], residual=CONFIG["interp"]["residual"])
+        events = lift_events(sd["p_id"], tok["series"], fs=CONFIG["data"]["fs"], n_samples=tok["n_samples"])
+        for start in stretch_starts(tok, TRIPTYCH_STRETCHES, TRIPTYCH_SECONDS):
+            fig = plot_triptych(internals, tok, sd["norm"], sd["names"], start, TRIPTYCH_SECONDS, events=events,
+                                title=f"{subj}, test series {tok['series']}, from {start / 50:.0f} s")
+            png = out_dir / f"triptych_S{tok['series']}_{start}.png"
+            with P.style():
+                fig.savefig(png, dpi=130)
+            plt.close(fig)
+            if not shown:                               # one figure per participant in the notebook; all are on disk
+                display(Image(filename=str(png)))
+                shown = True
+    print(f"{subj}: triptychs saved to {out_dir}")
+"""
+
 
 def _cell(kind, src):
     lines = src.rstrip("\n").split("\n")
@@ -261,7 +295,7 @@ def _cell(kind, src):
 
 
 def build() -> dict:
-    code = (SETUP, CONFIG, BUDGET, DATA, TRAIN, EVAL, COMPARE, INTERP)
+    code = (SETUP, CONFIG, BUDGET, DATA, TRAIN, EVAL, COMPARE, INTERP, TRIPTYCH)
     cells = [_cell("markdown", TITLE)] + [_cell("code", s) for s in code]
     return {"cells": cells,
             "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
