@@ -1,0 +1,133 @@
+\section{تفسیرپذیری در \lr{v2}}
+\label{sec:interp}
+
+\subsection{چه چیزی توضیح داده می‌شود}
+
+هر توضیح دربار‌ه‌ی یک عدد است: یک خروجی $o\in\{K,E,F_{eeg}\}$، یک عضله‌ی $c$ و یک \lr{token} $t$ از یک پنجره‌ی ۸ ثانیه‌ای:
+\begin{equation}
+y=\mathrm{out}_o[t,c].
+\end{equation}
+پنجره‌ها حول رخدادهای آزمایش (اولین تماس و جداشدن جسم از سطح) در سری‌های آزمون چیده می‌شوند و $t$ مرکز پنجره است، یعنی خودِ لحظه‌ی رخداد. مسیر هر خروجی:
+\begin{itemize}
+\item $K$: \lr{stem}، سه لایه‌ی زمانی سینماتیک، دو لایه‌ی \lr{muscle graph}؛
+\item $E$: دو لایه‌ی \lr{electrode graph}، \lr{pooling}، دو لایه‌ی زمانی \lr{EEG}، دو لایه‌ی \lr{muscle graph}؛
+\item $F_{eeg}$: \lr{electrode graph}، \lr{pooling}، لایه‌های زمانی \lr{EEG} و \lr{cross-attention}.
+\end{itemize}
+\lr{recorder} در یک گذر رو به جلو ماتریس توجه همه‌ی این لایه‌ها را برمی‌دارد: $A^{h}_{l}\in\mathbb{R}^{n\times n}$ برای لایه‌ی $l$ و سر $h$. هر روش زیر از همین ماتریس‌ها یا از گرادیان $y$ نسبت به آن‌ها ساخته می‌شود. شکل~\ref{fig:interp-pipeline} کل مسیر را نشان می‌دهد.
+
+\begin{figure}[htbp]
+\centering
+\input{diagrams/pipeline}
+\caption{مسیر تفسیر در \lr{v2}: هر روش از یک گذر ثبت‌شده ساخته می‌شود، روی رخدادها میانگین گرفته می‌شود و پیش از هر ادعا سنجیده می‌شود.}
+\label{fig:interp-pipeline}
+\end{figure}
+
+\subsection{\lr{attention rollout} و \lr{attention flow}}
+
+این دو روش هر لایه‌ی توجه را از خروجی تا ورودی دنبال می‌کنند و برای همه‌ی مسیرهای مدل به کار می‌روند. تعریف ریاضی آن‌ها، فرایند کامل هر کدام در یک شکل، پیاده‌سازی و نتایجشان در بخش جداگانه‌ی~\ref{sec:rollout-flow} آمده است. برای ادامه‌ی این بخش کافی است بدانیم \lr{rollout} با ماتریس‌های $\hat A_l=\tfrac12\overline{A}_l+\tfrac12 I$ (میانگین سرها به‌علاوه‌ی \lr{residual connection}) و حاصل‌ضرب $R=\hat A_L\cdots\hat A_1$ ساخته می‌شود، برای هر \lr{token} ورودی سهمی بین ۰ و ۱ می‌دهد که جمعشان ۱ است، و برای پنج عضله‌ی یک جریان یکسان است.
+
+\subsection{\lr{gradient-weighted rollout}}
+
+\textbf{مفهوم.} \lr{plain rollout} نمی‌داند کدام توجه برای عضله‌ی موردنظر مهم است. این روش \cite{chefer2021} هر وزن توجه را در گرادیان خروجی نسبت به همان وزن ضرب می‌کند و فقط بخش مثبت را نگه می‌دارد، پس نقشه برای هر عضله جداست.
+
+\textbf{ریاضی.}
+\begin{equation}
+G_l=\frac1H\sum_h\Big(A^{h}_l\odot\frac{\partial y}{\partial A^{h}_l}\Big)^{+},\qquad
+\tilde A_l=\frac{G_l}{G_l\mathbf 1},\qquad
+R^{\nabla}=\prod_{l=L}^{1}\Big(\tfrac12\tilde A_l+\tfrac12 I\Big),
+\end{equation}
+که تقسیم سطری است (هر سطر دوباره جمع ۱ می‌گیرد) و سطری که همه‌ی آن صفر است همان $I$ می‌ماند. گرادیان‌ها با \lr{recorder} در حالت \lr{grad=True} گرفته می‌شوند.
+
+\begin{figure}[htbp]
+\centering
+\input{diagrams/chain_gradw}
+\caption{\lr{gradient-weighted rollout}.}
+\end{figure}
+
+\subsection{نمای هر لایه}
+
+توجه هر لایه و هر سر در \lr{token} رخداد، بدون ترکیب لایه‌ها: سطر $t$ از $A^{h}_l$ برای لایه‌های زمانی، و کل ماتریس برای \lr{electrode graph} و \lr{muscle graph}. این نما نشان می‌دهد ترکیب \lr{rollout} از کدام لایه‌ها آمده است.
+
+\subsection{\lr{gradient × input}}
+
+\textbf{مفهوم.} لایه‌هایی که توجه ندارند (\lr{embedding}، \lr{feed-forward}، \lr{decoder}) در \lr{rollout} دیده نمی‌شوند. \lr{gradient × input} \cite{shrikumar2016} اثر موضعی خطیِ هر ورودی را از کل مدل می‌گیرد.
+
+\textbf{ریاضی.} برای ورودی $x$ (سینماتیک، تاریخچه یا \lr{band power} \lr{EEG}):
+\begin{equation}
+s_i=\Big|x_i\,\frac{\partial y}{\partial x_i}\Big|,
+\end{equation}
+که برای هر ویژگی سینماتیک روی زمان، و برای هر باند \lr{EEG} روی زمان و الکترودها جمع زده و سپس به سهم (جمع ۱) تبدیل می‌شود.
+
+\begin{figure}[htbp]
+\centering
+\input{diagrams/chain_gxi}
+\caption{\lr{gradient × input}.}
+\end{figure}
+
+\subsection{میانگین روی رخدادها و مقایسه با استراحت}
+
+\textbf{میانگین روی رخدادها.} هیچ نقشه‌ای از یک پنجره گزارش نمی‌شود. برای هر رخداد یک پنجره ساخته می‌شود و نقشه‌ها به سهم (جمع ۱) تبدیل و سپس میانگین و \lr{SEM} ($\mathrm{SEM}=\sigma/\sqrt n$) روی رخدادها گرفته می‌شود. رخدادی که پنجره‌اش در سری جا نشود کنار می‌رود.
+
+\textbf{مقایسه با استراحت (فقط \lr{E}).} هر بلندکردن با پنجره‌ی استراحتِ پس از آن (وسط فاصله‌ی دو بلندکردن) جفت می‌شود. برای هر الکترود $e$ تفاوت جفت‌شده‌ی سهم‌ها $d_{ie}=a_{ie}-b_{ie}$ و آماره‌ی $t_e=\bar d_e/(s_e/\sqrt n)$ حساب می‌شود. \lr{null distribution} با برگرداندن تصادفی علامت هر جفت ساخته می‌شود (۱۰۰۰ بار)؛ هر بار بیشینه‌ی $|t|$ روی همه‌ی الکترودها نگه داشته می‌شود و $p$ هر الکترود از مقایسه با این بیشینه‌ها به دست می‌آید \cite{nichols2002}. این کار خطای آزمودن ۳۲ الکترود را کنترل می‌کند و هر چه دو عضو جفت در آن مشترک‌اند (خودِ پنجره‌ی سیگنال) حذف می‌شود.
+
+\begin{figure}[htbp]
+\centering
+\input{diagrams/chain_rest}
+\caption{مقایسه‌ی رخداد با استراحت.}
+\end{figure}
+
+\subsection{سنجش خودِ نقشه‌ها}
+
+\textbf{\lr{deletion check}} \cite{samek2017}. خانه‌هایی از ورودی که یک روش مهم‌تر می‌داند به صفر (یعنی میانگین آموزش) تغییر داده می‌شوند و جابه‌جایی $y$ اندازه گرفته می‌شود. برای \lr{EEG} هر خانه یک الکترود در یک \lr{token} است (هر چهار باند) و برای سینماتیک همه‌ی ویژگی‌های یک \lr{token}. کسرهای ۵، ۱۰، ۲۰ و ۴۰ درصد آزموده می‌شوند و با حذف همان تعداد خانه‌ی تصادفی (میانگین ۱۰ بار) مقایسه می‌شوند:
+\begin{equation}
+\Delta_{top}(q)=\big|\,y(x)-y(x_{\setminus \mathrm{top}(q)})\,\big|,\qquad \Delta_{rand}(q)=\operatorname{mean}_{10}\big|\,y(x)-y(x_{\setminus \mathrm{rand}(q)})\,\big|,
+\end{equation}
+که $x_{\setminus \mathrm{top}(q)}$ ورودی بدون $q$ درصد خانه‌های برتر و $x_{\setminus \mathrm{rand}(q)}$ ورودی بدون همان تعداد خانه‌ی تصادفی است. روشی که $\Delta_{top}$ آن بزرگ‌تر است، ورودی‌های واقعاً اثرگذار را بهتر پیدا می‌کند.
+
+\textbf{\lr{weight-shuffle check}} \cite{adebayo2018}. در یک نسخه از مدل، درایه‌های هر ماتریس وزن (دو بعد یا بیشتر) به‌هم ریخته می‌شوند و نقشه‌ها دوباره ساخته می‌شوند. \lr{Spearman correlation} نقشه‌ی مدل آموزش‌دیده و مدل به‌هم‌ریخته باید نزدیک صفر باشد؛ نقشه‌ای که برای مدل به‌هم‌ریخته هم همان شکل را دارد به آموخته‌های مدل بستگی ندارد.
+
+\begin{figure}[htbp]
+\centering
+\input{diagrams/chain_deletion}
+\caption{\lr{deletion check} (بالا) و \lr{weight-shuffle check} (پایین).}
+\end{figure}
+
+\subsection{نتایج برای همه‌ی شرکت‌کننده‌ها}
+
+جدول~\ref{tab:interp-del} مهم‌ترین نتیجه‌ی سنجش است. برای \lr{E} \lr{gradient-weighted rollout} با فاصله‌ی زیاد بهترین روش است (\lr{۰٫۲۰۵} در برابر حدود \lr{۰٫۰۹} برای روش‌های دیگر و \lr{۰٫۰۲۱} برای حذف تصادفی) و در هر ۱۲ شرکت‌کننده اول است (جدول~\ref{tab:interp-parts}). برای \lr{K} \lr{rollout}، \lr{gradient-weighted rollout} و \lr{gradient × input} هم‌ترازند و \lr{attention flow} ضعیف‌تر است. همه‌ی روش‌ها از حذف تصادفی بهترند.
+
+\input{tables/interp_deletion}
+
+جدول~\ref{tab:interp-sanity} یک هشدار دارد: \lr{plain rollout} \lr{K} برای مدل با وزن‌های به‌هم‌ریخته هم شکل مشابهی دارد (اسپیرمن \lr{۰٫۴۷}). علت آن ساختار است، نه یادگیری: \lr{residual connection} و ردپای \lr{stem} بیشترین سهم را همیشه به \lr{token} خودِ رخداد و همسایه‌هایش می‌دهند. برای \lr{E} \lr{gradient × input} کمترین وابستگی به یادگیری را دارد (\lr{۰٫۲۷}). \lr{gradient-weighted rollout} در هر دو خروجی نزدیک صفر است؛ پس برای ادعاهای این گزارش \lr{gradient-weighted rollout} روش اصلی است.
+
+\input{tables/interp_sanity}
+\input{tables/interp_parts}
+
+\subsection{نتایج \lr{P1} و \lr{P2}}
+
+شکل‌های این بخش برای رخداد «جداشدن جسم از سطح» (\lr{lift\_off}) و میانگین روی همه‌ی بلندکردن‌های سری‌های آزمون است. شکل‌های زمانی از جدول‌های ذخیره‌شده با نسخه‌ی تازه‌ی رسم دوباره ساخته شده‌اند: سهم \lr{token} خودِ رخداد (که همیشه بزرگ‌ترین است) جداگانه نوشته شده و منحنی‌ها سهم \lr{tokens} دیگر را نشان می‌دهند.
+
+\textbf{زمان.} برای \lr{K} در \lr{P1}، هر دو \lr{rollout} در یک ثانیه‌ی پیش از جداشدن بالا می‌روند، در دو ثانیه‌ی پس از آن کمترین سهم را دارند و دوباره حدود ۳ تا ۴ ثانیه بعد بالا می‌روند. \lr{gradient-weighted rollout} برای هر عضله قله‌های متفاوتی دارد (برای نمونه \lr{ED} و \lr{FD} حدود \lr{۰٫۸} ثانیه پیش از رخداد). برای \lr{E} الگو در \lr{P1} شبیه \lr{K} است، اما در \lr{P2} سهم تقریباً یکنواخت است و فقط در لبه‌ی پایانی پنجره (۴+ ثانیه) جهش دارد که بیشتر به اثر لبه‌ی پنجره می‌ماند تا به رویداد حرکتی.
+
+\textbf{الکترودها.} در هر دو شرکت‌کننده یکی از کانون‌های سهم \lr{E} روی الکترودهای چپِ مرکزی (\lr{C3}، \lr{FC5}، \lr{CP5}) است، یعنی بالای قشر حرکتی نیمکره‌ی مقابل دست راست، و لایه‌ی اول \lr{electrode graph} در \lr{P1} بیشتر از همین الکترودها می‌خواند. اما سهم قابل‌توجهی هم روی الکترودهای پس‌سری و (در \lr{P2}) پیشانی راست است؛ بنابراین بخشی از اطلاعات \lr{E} ممکن است از \lr{artifact} حرکت چشم یا عضلات سر و گردن باشد، نه فقط از قشر حرکتی.
+
+\textbf{\lr{muscle graph}.} قطر ماتریس‌ها قوی است (هر عضله بیشتر از خودش می‌خواند) و روابط بین عضلات بیشتر در \lr{gradient-weighted rollout} دیده می‌شوند.
+
+\fig{P1_time_K_lift_off.png}{1.0}{\lr{P1}، خروجی \lr{K}: سهم هر \lr{token} زمانی حول جداشدن جسم (بالا) و \lr{attention flow} منهای \lr{uniform-attention flow} (پایین).}
+\fig{P1_time_E_lift_off.png}{1.0}{\lr{P1}، خروجی \lr{E}: سهم زمانی و \lr{attention flow} منهای خط پایه.}
+\fig{P1_scalp_E_lift_off.png}{1.0}{\lr{P1}، خروجی \lr{E}: سهم هر الکترود در \lr{rollout} و \lr{gradient-weighted rollout} برای هر عضله. نقشه‌ی \lr{attention flow} حذف شده چون برای همه‌ی الکترودها برابر است.}
+\fig{P1_electrode_layers_lift_off.png}{0.8}{\lr{P1}: توجه دو لایه‌ی \lr{electrode graph} در لحظه‌ی جداشدن (سطر = الکترود گیرنده).}
+\fig{P1_muscle_graph_lift_off.png}{0.95}{\lr{P1}: \lr{muscle graph} در لحظه‌ی جداشدن برای \lr{K} و \lr{E}، \lr{rollout} و \lr{gradient-weighted rollout}.}
+\fig{P1_rest_contrast_lift_off.png}{0.95}{\lr{P1}: سهم الکترودها در \lr{E} هنگام جداشدن منهای استراحت پس از آن؛ آماره‌ی $t$ جفت‌شده، دایره‌ها $p$ تصحیح‌شده کمتر از \lr{۰٫۰۵}.}
+\fig{P1_inputs_lift_off.png}{0.85}{\lr{P1}: سهم ویژگی‌های سینماتیک و تاریخچه در \lr{K} و سهم باندهای \lr{EEG} در \lr{E} (\lr{gradient × input}).}
+\fig{P1_deletion.png}{0.75}{\lr{P1}: منحنی‌های \lr{deletion check}.}
+
+\fig{P2_time_K_lift_off.png}{1.0}{\lr{P2}، خروجی \lr{K}: سهم زمانی و \lr{attention flow} منهای خط پایه.}
+\fig{P2_time_E_lift_off.png}{1.0}{\lr{P2}، خروجی \lr{E}: سهم زمانی و \lr{attention flow} منهای خط پایه.}
+\fig{P2_scalp_E_lift_off.png}{1.0}{\lr{P2}، خروجی \lr{E}: سهم هر الکترود. در این شرکت‌کننده جریان الکترودها کمی پراکندگی دارد (\lr{۱۱٫۵} درصد) و نقشه‌اش با رنگ از کمینه تا بیشینه رسم شده است.}
+\fig{P2_electrode_layers_lift_off.png}{0.8}{\lr{P2}: توجه دو لایه‌ی \lr{electrode graph} در لحظه‌ی جداشدن.}
+\fig{P2_muscle_graph_lift_off.png}{0.95}{\lr{P2}: \lr{muscle graph} در لحظه‌ی جداشدن.}
+\fig{P2_rest_contrast_lift_off.png}{0.95}{\lr{P2}: مقایسه‌ی رخداد با استراحت برای \lr{E}.}
+\fig{P2_inputs_lift_off.png}{0.85}{\lr{P2}: سهم ورودی‌ها (\lr{gradient × input}).}
+\fig{P2_deletion.png}{0.75}{\lr{P2}: منحنی‌های \lr{deletion check}.}
+\clearpage

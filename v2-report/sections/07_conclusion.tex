@@ -1,0 +1,35 @@
+\section{جمع‌بندی و محدودیت‌ها}
+
+\paragraph{آنچه به دست آمد.} \lr{v2} سه پرسش را که مدل پایه در یک خروجی با هم مخلوط می‌کرد جدا کرد.
+\begin{enumerate}
+\item \textbf{دقت از سینماتیک:} \lr{K} با \lr{VAF} برابر \lr{۷۵٫۸} درصد و \lr{r} برابر \lr{۰٫۸۷۲} در هر ۱۲ شرکت‌کننده از مدل پایه بهتر است و دامنه را در هر سه وزن جسم با خطای کمتر از یک درصد پیش‌بینی می‌کند. بافت ۸ ثانیه‌ای، تاریخچه‌ی بلندکردن‌ها، حوزه‌ی جذر و جزء سطح نگه‌داشتن در هزینه پشت این بهبودند.
+\item \textbf{\lr{EEG} به‌تنهایی:} \lr{E} با \lr{r} برابر \lr{۰٫۶۴۵} در هر ۱۲ نفر از \lr{null test} گذشت؛ \lr{EEG} حالت حرکت را رمز می‌کند.
+\item \textbf{\lr{EEG} فراتر از سینماتیک:} \lr{F} برابر \lr{K} است. \lr{residual test} سیگنالی واقعی اما بسیار کوچک یافت (\lr{r} حدود \lr{۰٫۰۷}، کمتر از نیم واحد \lr{VAF}) که ماژول \lr{fusion} هم همان را یافته بود.
+\end{enumerate}
+
+\paragraph{تفسیرپذیری.} قاعده‌ی «یک مخلوط‌کننده» و \lr{recorder} بیرونی، \lr{rollout}، جریان، \lr{gradient-weighted rollout} و نمای هر لایه را برای هر خروجی و در همه‌ی لایه‌ها بدون حالت خاص ممکن کرد. سنجش نقشه‌ها نشان داد \lr{gradient-weighted rollout} قابل‌اعتمادترین روش است (بهترین در \lr{deletion check}، کمترین شباهت با مدل به‌هم‌ریخته). \lr{attention flow} در این معماری اشباع می‌شود و فقط در برابر خط پایه‌ی توجه یکنواخت معنا دارد. نقشه‌های الکترود \lr{E} کانونی بالای قشر حرکتی چپ دارند، اما سهم الکترودهای پیشانی و پس‌سری هشدار می‌دهد که بخشی از اطلاعات ممکن است \lr{artifact} باشد.
+
+\paragraph{محدودیت‌ها.}
+\begin{itemize}
+\item \lr{rollout} و جریان فقط وزن‌های توجه را می‌بینند؛ وزن \lr{۰٫۵} \lr{residual connection} یک قرارداد است. روش‌های گرادیانی موضعی و مرتبه‌ی اول‌اند.
+\item \lr{plain rollout} \lr{K} در \lr{weight-shuffle check} شباهت بالایی دارد (\lr{۰٫۴۷})؛ شکل آن بیشتر از ساختار مدل می‌آید تا از یادگیری.
+\item پنجره‌های رخدادهای نزدیک هم‌پوشانی دارند، پس $p$ مقایسه‌ی رخداد با استراحت تقریبی است.
+\item همه‌ی نتایج برای هر شرکت‌کننده جداگانه است؛ تعمیم به شرکت‌کننده‌ی تازه آزموده نشده است.
+\item پیش‌بینی برون‌خط است: هر \lr{token} از کل پنجره‌ی ۸ ثانیه‌ای، از جمله آینده، استفاده می‌کند.
+\item سقف داده (به‌ویژه برای \lr{FD}) هر بهبود دیگری را محدود می‌کند.
+\end{itemize}
+
+\paragraph{بازتولید.} کد در شاخه‌ی \lr{KG-GT-v2} (بسته‌ی \lr{v2/} و دفترچه‌ی \lr{main\_v2.ipynb}) است. جدول‌ها و شکل‌های این گزارش را اسکریپت \lr{v2-report/build\_assets.py} از نتایج ذخیره‌شده می‌سازد و هیچ مدلی را اجرا نمی‌کند.
+
+\begin{thebibliography}{99}
+\bibitem{luciw2014} \lr{M. D. Luciw, E. Jarocka, B. B. Edin. Multi-channel EEG recordings during 3,936 grasp and lift trials with varying weight and friction. Scientific Data, 1:140047, 2014.}
+\bibitem{vaswani2017} \lr{A. Vaswani et al. Attention is all you need. NeurIPS, 2017.}
+\bibitem{velickovic2018} \lr{P. Veli\v{c}kovi\'c et al. Graph attention networks. ICLR, 2018.}
+\bibitem{abnar2020} \lr{S. Abnar, W. Zuidema. Quantifying attention flow in transformers. ACL, 2020.}
+\bibitem{chefer2021} \lr{H. Chefer, S. Gur, L. Wolf. Generic attention-model explainability for interpreting bi-modal and encoder-decoder transformers. ICCV, 2021.}
+\bibitem{shrikumar2016} \lr{A. Shrikumar, P. Greenside, A. Shcherbina, A. Kundaje. Not just a black box: learning important features through propagating activation differences. arXiv:1605.01713, 2016.}
+\bibitem{samek2017} \lr{W. Samek, A. Binder, G. Montavon, S. Lapuschkin, K.-R. M\"uller. Evaluating the visualization of what a deep neural network has learned. IEEE TNNLS, 28(11), 2017.}
+\bibitem{adebayo2018} \lr{J. Adebayo, J. Gilmer, M. Muelly, I. Goodfellow, M. Hardt, B. Kim. Sanity checks for saliency maps. NeurIPS, 2018.}
+\bibitem{nichols2002} \lr{T. E. Nichols, A. P. Holmes. Nonparametric permutation tests for functional neuroimaging: a primer with examples. Human Brain Mapping, 15(1), 2002.}
+\bibitem{lin1989} \lr{L. I. Lin. A concordance correlation coefficient to evaluate reproducibility. Biometrics, 45(1), 1989.}
+\end{thebibliography}

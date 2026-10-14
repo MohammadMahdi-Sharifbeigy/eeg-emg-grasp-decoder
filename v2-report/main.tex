@@ -1,0 +1,44 @@
+% گزارش KG-GT v2. کامپایل: xelatex main.tex (دو بار، برای فهرست و ارجاع‌ها)
+\documentclass[11pt,a4paper]{article}
+\usepackage[margin=2.2cm]{geometry}
+\usepackage{amsmath,amssymb,bm}
+\usepackage{graphicx,booktabs,float,array}
+\usepackage{tikz}
+\usetikzlibrary{positioning,arrows.meta,fit,calc,shapes.geometric,backgrounds,decorations.pathreplacing}
+\usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black]{hyperref}
+\usepackage{xepersian}
+\settextfont[Path=fonts/,BoldFont=Vazirmatn-Bold.ttf,ItalicFont=Vazirmatn-Medium.ttf,BoldItalicFont=Vazirmatn-Bold.ttf]{Vazirmatn-Regular.ttf}
+\setlatintextfont[Path=fonts/,BoldFont=Vazirmatn-Bold.ttf,ItalicFont=Vazirmatn-Medium.ttf,BoldItalicFont=Vazirmatn-Bold.ttf]{Vazirmatn-Regular.ttf}
+\setdigitfont[Path=fonts/,BoldFont=Vazirmatn-Bold.ttf,ItalicFont=Vazirmatn-Medium.ttf,BoldItalicFont=Vazirmatn-Bold.ttf]{Vazirmatn-Regular.ttf}
+
+\linespread{1.25}
+\setlength{\parskip}{0.35em}
+\renewcommand{\arraystretch}{1.12}
+\setcounter{tocdepth}{2}
+
+\input{styles}
+\newcommand{\fig}[3]{\begin{figure}[htbp]\centering\includegraphics[width=#2\textwidth,height=0.8\textheight,keepaspectratio]{figures/#1}\caption{#3}\label{fig:#1}\end{figure}}
+
+\title{گزارش مدل \lr{KG-GT v2}:\\ پیش‌بینی پوش \lr{EMG} از سینماتیک و \lr{EEG} با تفسیرپذیری در همه‌ی لایه‌ها}
+\author{تیم ۶، مدرسه‌ی بین‌رشته‌ای علوم اعصاب محاسباتی}
+\date{مهر ۱۴۰۵}
+
+\begin{document}
+\maketitle
+
+\begin{abstract}
+این گزارش دو مدل را برای پیش‌بینی پوش فعالیت پنج عضله‌ی دست و بازو در داده‌ی \lr{WAY-EEG-GAL} مقایسه می‌کند. مدل پایه (\lr{KG-GT}، دفترچه‌ی \lr{main\_1stage} در شاخه‌ی \lr{KG-GT-CUDA}) یک \lr{encoder} \lr{Transformer} روی \lr{EEG} و یک \lr{muscle graph} با هدایت سینماتیک دارد و یک خروجی می‌دهد. روی سری‌های آزمون ۱۲ شرکت‌کننده به \lr{VAF} برابر \lr{۷۲٫۲} درصد و ضریب همبستگی \lr{۰٫۸۵۱} رسید، اما آزمون‌های حذف ورودی نشان دادند که تقریباً همه‌ی این دقت از سینماتیک می‌آید و نمی‌توان سهم \lr{EEG} را از سهم سینماتیک جدا کرد. مدل \lr{v2} سه خروجی جدا می‌دهد: \lr{K} از سینماتیک و تاریخچه‌ی بلندکردن‌ها، \lr{E} فقط از \lr{EEG} و \lr{F} که \lr{K} را با یک اصلاحِ \lr{gated} از \lr{EEG} ترکیب می‌کند. \lr{K} با \lr{VAF} برابر \lr{۷۵٫۸} درصد و \lr{r} برابر \lr{۰٫۸۷۲} در هر ۱۲ شرکت‌کننده از مدل پایه بهتر شد. \lr{E} به‌تنهایی به \lr{r} برابر \lr{۰٫۶۴۵} رسید و در هر ۱۲ نفر از \lr{null test} گذشت. \lr{F} عملاً برابر \lr{K} ماند. \lr{residual test} نشان داد \lr{EEG} اطلاعات کمی درباره‌ی خطای \lr{K} دارد (\lr{r} حدود \lr{۰٫۰۷}، معنادار در ۱۰ نفر از ۱۲) که کمتر از نیم واحد درصد به \lr{VAF} اضافه می‌کند. مدل \lr{v2} از ابتدا طوری ساخته شد که هر خروجی را بتوان در همه‌ی لایه‌ها با \lr{rollout} توجه، \lr{attention flow}، \lr{gradient-weighted rollout} و \lr{gradient × input} ردیابی کرد؛ این روش‌ها با \lr{deletion check} و \lr{weight-shuffle check} سنجیده شدند.
+\end{abstract}
+
+\tableofcontents
+\newpage
+
+\input{sections/01_baseline}
+\input{sections/02_v2}
+\input{sections/03_results}
+\input{sections/04_interp}
+\input{sections/05_rollout_flow}
+\input{sections/06_residual}
+\input{sections/07_conclusion}
+
+\end{document}

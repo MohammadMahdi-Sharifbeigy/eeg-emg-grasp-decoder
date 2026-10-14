@@ -1,0 +1,20 @@
+% Interpretability pipeline of v2.
+\begin{latin}
+\begin{tikzpicture}[node distance=5mm and 3mm, font=\footnotesize]
+\node[io, text width=6cm] (ev) {test series and their lift events};
+\node[box, below=of ev, text width=6cm] (win) {one 8 s window centred on each event};
+\node[box, below=of win, text width=6cm] (rec) {one forward pass with the recorder:\\ $A^{h}_{l}$, $\partial y/\partial A^{h}_{l}$ and $\partial y/\partial x$};
+\node[box, below=10mm of rec, text width=2.4cm] (v3) {attention flow};
+\node[box, left=of v3, text width=2.4cm] (v2) {gradient-weighted rollout};
+\node[box, left=of v2, text width=2.4cm] (v1) {rollout};
+\node[box, right=of v3, text width=2.4cm] (v4) {gradient $\times$ input};
+\node[box, right=of v4, text width=2.4cm] (v5) {per-layer view};
+\node[box, below=10mm of v3, text width=6cm] (avg) {mean and SEM over events};
+\node[box, below=of avg, text width=6cm] (chk) {deletion check and weight-shuffle check};
+\node[box, below=of chk, text width=6cm] (con) {event against rest contrast (E only)};
+\node[result, below=of con, text width=6cm] (out) {tables and figures per participant};
+\draw[arr] (ev)--(win); \draw[arr] (win)--(rec);
+\foreach \v in {v1,v2,v3,v4,v5}{\draw[arr] (rec)--(\v); \draw[arr] (\v)--(avg);}
+\draw[arr] (avg)--(chk); \draw[arr] (chk)--(con); \draw[arr] (con)--(out);
+\end{tikzpicture}
+\end{latin}

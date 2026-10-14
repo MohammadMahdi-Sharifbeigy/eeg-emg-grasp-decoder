@@ -1,0 +1,14 @@
+\begin{table}[htbp]
+\centering
+\small
+\caption{\lr{weight-shuffle check}: \lr{Spearman correlation} بین نقشه‌ی مدل آموزش‌دیده و نقشه‌ی مدلی با ماتریس‌های وزنِ به‌هم‌ریخته (میانگین روی ۱۲ شرکت‌کننده). نزدیک صفر بهتر است: یعنی نقشه به آموخته‌های مدل وابسته است.}
+\label{tab:interp-sanity}
+\begin{tabular}{ccccc}
+\toprule
+خروجی & \lr{rollout} & \lr{attention flow} & \lr{gradient-weighted rollout} & \lr{gradient × input} \\
+\midrule
+\lr{E} & \lr{۰٫۰۳۶} & \lr{۰٫۰۷۵} & \lr{۰٫۰۱۲} & \lr{۰٫۲۷۱} \\
+\lr{K} & \lr{۰٫۴۷۳} & \lr{−۰٫۰۰۸} & \lr{۰٫۰۷۰} & \lr{۰٫۰۷۶} \\
+\bottomrule
+\end{tabular}
+\end{table}

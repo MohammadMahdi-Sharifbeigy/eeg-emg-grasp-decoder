@@ -1,0 +1,11 @@
+% Event against rest contrast.
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm and 4mm, font=\footnotesize, box/.append style={text width=2.45cm}]
+\node[box] (a) {electrode shares at the event and at the rest after it};
+\node[box, right=of a] (b) {paired difference $d_{ie}$};
+\node[box, right=of b] (c) {$t_e$ per electrode};
+\node[box, right=of c] (d) {1000 random sign flips, keep $\max_e |t|$};
+\node[result, right=of d] (e) {corrected $p$ per electrode};
+\draw[arr] (a)--(b); \draw[arr] (b)--(c); \draw[arr] (c)--(d); \draw[arr] (d)--(e);
+\end{tikzpicture}
+\end{latin}

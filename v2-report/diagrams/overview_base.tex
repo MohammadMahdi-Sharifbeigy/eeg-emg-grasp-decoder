@@ -1,0 +1,55 @@
+% Baseline KG-GT (main_1stage, branch KG-GT-CUDA): overview in the style of a paper's first figure (portrait).
+\begin{latin}\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize]
+% ================= inputs
+\node[lab, font=\normalsize\bfseries, anchor=west] at (-0.3,0.55) {Inputs: one window of 1 s};
+\node[lab, font=\small\bfseries, anchor=west] at (-0.3,0.0) {EEG};
+\node[lab, anchor=west] at (0.55,0.0) {32 channels, 500 Hz};
+\foreach \k in {0,...,5}{\begin{scope}[shift={(0,-0.45-0.3*\k)}]\sig{0}{5.2}{0.12}{eegc!80!black}{40*\k}\end{scope}}
+\node[lab, anchor=west] at (-0.3,-2.35) {band-pass 0.5--40 Hz, notch 50 Hz, artefact removal with ICA};
+\node[lab, font=\small\bfseries, anchor=west] at (9.6,0.0) {Kinematics};
+\node[lab, anchor=west] at (11.65,0.0) {24 features, 500 Hz};
+\foreach \k in {0,...,4}{\begin{scope}[shift={(9.6,-0.45-0.3*\k)}]\sig{0}{5.8}{0.1}{kinc!85!black}{70*\k+15}\end{scope}}
+\node[lab, anchor=west, align=left] at (9.5,-2.35) {hand pose (10), gated forces $F_L, F_G$ (2),\\ pose velocity (10), gated force rate (2)};
+
+% ================= EEG path
+\tblock{enc}{2.6,-4.65}{4.4cm}{Transformer encoder (raw EEG)}{4}{eegc}{attention $\to$ add $\to$ LayerNorm}{FFN $\to$ add $\to$ LayerNorm}{post-norm block}
+\node[lab, anchor=west, align=left] at (5.9,-4.6) {$d=128$, 8 heads,\\ FFN 512, dropout 0.2,\\ attention in chunks\\ of 500 samples,\\ sinusoidal positions};
+\draw[arr] (2.6,-2.6)--(enc.north);
+\node[ebox, align=center] (proj) at (2.6,-6.85) {Linear projection: each time step $\to$ 5 muscle nodes (64-d)};
+\draw[arr] (enc.south)--(proj.north);
+\foreach \m/\k in {AD/0,BR/1,FD/2,ED/3,FDI/4}{\node[mnode, fill=eegc!8] (n\m) at (1.0+0.8*\k,-7.85) {\m};}
+\draw[arr] (proj.south)--(2.6,-7.5);
+
+% ================= kinematics-guided muscle GAT
+\node[lab, font=\small\bfseries, anchor=west] at (3.0,-8.45) {Kinematics-guided muscle GAT (one layer, 4 heads, at every time step)};
+\musclegraph{g}{2.6,-10.65}{1.25}{intc}
+\draw[arr] (2.6,-8.15)--(gAD.north);
+\node[box, fill=intc!6, align=center, text width=7.6cm] (score) at (8.6,-10.75) {attention score of edge $j\to i$ in head $h$ at time $t$:\\[3pt]
+  \mbox{$s^{h}_{ij}(t)=\dfrac{q_i\cdot k_j}{\sqrt{d}}\;+\;\underbrace{B^{h}_{ij}}_{\text{static, from EMG}}\;+\;\underbrace{\big[W x^{g}(t)+b\big]^{h}_{ij}}_{\text{dynamic, from kinematics}}$}\\[3pt]
+  \mbox{$\alpha^{h}_{ij}(t)=\mathrm{softmax}_j\, s^{h}_{ij}(t)$,\quad nodes $\leftarrow$ nodes $+\sum_j \alpha_{ij} v_j$}};
+\draw[darr, intc!80!black] (score.west)--(3.95,-10.6);
+\node[grp, draw=intc!60, fit=(gAD)(gFD)(gED)(gFDI)(gBR)(score)] (gatbox) {};
+
+% ================= kinematic paths
+\coordinate (kx) at (11.0,0);
+\draw[arr, kinc!80!black] (11.0,-2.9)--(score.north -| kx) node[lab, pos=0.66, anchor=east, align=right]{12 features\\ (pose, gated forces)\\ $\to$ dynamic edge bias};
+\node[kbox, align=center] (skip) at (14.3,-6.0) {Kinematic skip MLP\\ 14 $\to$ 128 $\to$ 5$\times$64\\ (gated forces\\ + all velocities)};
+\draw[arr, kinc!80!black] (14.3,-2.9)--(skip.north);
+\node[circle, draw, inner sep=1.5pt, fill=white, font=\normalsize] (plus) at (2.6,-13.45) {$+$};
+\draw[arr] (2.6,-11.95)--(plus.north);
+\draw[arr, kinc!80!black] (skip.south)|-(plus.east) node[lab, pos=0.7, below]{added to the node embeddings (amplitude path)};
+
+% ================= decoder and output
+\node[box, align=center] (dec) at (2.6,-14.55) {Per-muscle linear decoder};
+\node[box, align=center] (lag) at (2.6,-15.65) {Learnable lag per muscle ($\pm$300 ms)};
+\draw[arr] (plus)--(dec); \draw[arr] (dec)--(lag);
+\node[lab, font=\small\bfseries, anchor=west] at (7.4,-14.3) {Output: EMG envelope of 5 muscles (z-scored, 500 Hz)};
+\foreach \m/\k in {AD/0,BR/1,FD/2,ED/3,FDI/4}{
+  \node[lab, anchor=east] at (7.9+1.65*\k,-14.65) {\m};
+  \begin{scope}[shift={(7.9+1.65*\k,-15.75)}]\env{0}{1.4}{0.9}{black!80}{25*\k}\end{scope}}
+\draw[arr] (lag.east)--(7.3,-15.65);
+
+% ================= loss
+\node[box, fill=black!3, anchor=north west, align=left, text width=16.1cm] (loss) at (-0.3,-16.45) {\textbf{Training loss} (z domain, per window; weights in brackets): peak-weighted Huber with under-prediction asymmetry (1.0) + $1-\mathrm{CCC}$ (0.5) + $1-r$ (0.2) + temporal difference (0.1) + rest level (0.05) + over-prediction at rest (1.0) + active-level error (0.5) + $\mathrm{KL}\big(\mathrm{softmax}\,B\,\|\,\mathrm{softmax}\,B_0\big)$ (0.001).\\ One stage for the whole model: AdamW (encoder at 0.1 $\times$ lr), cosine schedule, early stopping on the smoothed validation loss.};
+\end{tikzpicture}}\end{latin}

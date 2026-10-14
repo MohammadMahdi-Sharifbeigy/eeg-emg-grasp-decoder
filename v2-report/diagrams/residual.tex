@@ -1,0 +1,18 @@
+% Residual test.
+\begin{latin}
+\begin{tikzpicture}[node distance=5mm and 7mm, font=\footnotesize, box/.append style={text width=3.6cm}]
+\node[io] (val) {validation series};
+\node[box, below=of val] (rv) {residual $u-\hat u_K$ and EEG features (tokens or band power)};
+\node[box, below=of rv] (fit) {ridge regression; $\alpha$ by cross-validation over blocks of time};
+\node[io, right=32mm of val] (te) {test series};
+\node[box, below=of te] (rt) {residual and EEG features};
+\node[box, below=of rt] (pr) {prediction $\hat\varepsilon$};
+\node[box, below=of pr] (sc) {$r$ and $\Delta\mathrm{VAF}$};
+\node[box, right=of pr] (sh) {$\hat\varepsilon$ shifted by multiples of 200 tokens (99 draws)};
+\node[box, below=of sh] (nl) {null distribution of $r$ and $\Delta\mathrm{VAF}$};
+\node[result, below=of sc] (p) {one-sided $p$ per muscle and for the mean over muscles};
+\draw[arr] (val)--(rv); \draw[arr] (rv)--(fit); \draw[arr] (te)--(rt); \draw[arr] (rt)--(pr);
+\draw[arr] (fit.east)--(pr.west); \draw[arr] (pr)--(sc); \draw[arr] (pr)--(sh); \draw[arr] (sh)--(nl);
+\draw[arr] (sc)--(p); \draw[arr] (nl)|-(p);
+\end{tikzpicture}
+\end{latin}

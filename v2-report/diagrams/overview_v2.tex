@@ -1,0 +1,80 @@
+% KG-GT v2: overview in the style of a paper's first figure (portrait).
+\begin{latin}\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize, box/.append style={font=\scriptsize}]
+% ================= inputs
+\node[lab, font=\normalsize\bfseries, anchor=west] at (-0.3,0.65) {Inputs: one window of 8 s = 400 tokens at 50 Hz (anti-aliased reduction from 500 Hz)};
+\node[lab, font=\small\bfseries, anchor=west] at (-0.3,0.0) {Kinematics};
+\node[lab, anchor=west] at (1.95,0.0) {24 features (as in the baseline)};
+\foreach \k in {0,...,3}{\begin{scope}[shift={(0,-0.45-0.3*\k)}]\sig{0}{5.3}{0.1}{kinc!85!black}{70*\k+15}\end{scope}}
+\node[lab, font=\small\bfseries, anchor=west] at (-0.3,-1.85) {Trial history};
+\node[lab, anchor=west] at (2.25,-1.85) {8 features, past only, no EMG};
+\draw[kinc!60!black, line width=0.8pt] (0,-2.8)--(1.1,-2.8)--(1.1,-2.55)--(2.6,-2.55)--(2.6,-2.4)--(4.2,-2.4)--(4.2,-2.3)--(5.3,-2.3);
+\node[lab, anchor=west, align=left] at (-0.3,-3.25) {holds so far, time since last hold, previous and mean load / grip force};
+\node[lab, font=\small\bfseries, anchor=west] at (9.6,0.0) {EEG band power};
+\headgraph{h0}{10.75,-1.45}{1.05}
+\node[lab, anchor=west, align=left] at (12.05,-1.45) {32 electrodes $\times$ 4 bands\\ ($\theta$ 4--8, $\alpha$ 8--13, $\beta$ 13--30,\\ low $\gamma$ 30--40 Hz)\\ log power, z-scored, clip $\pm$5};
+
+% ================= kinematic stream (x = 2.4)
+\node[kbox, align=center, text width=4.3cm] (stem) at (2.4,-4.35) {conv stem, kernel 5 (100 ms)\\ 32 $\to$ 64 channels + sinusoidal positions};
+\draw[arr] (2.4,-3.5)--(stem.north);
+\tblock{kenc}{2.4,-7.0}{4.3cm}{Kinematic temporal encoder}{3}{kinc}{LayerNorm $\to$ attention $\to$ add}{LayerNorm $\to$ FFN $\to$ add}{pre-norm block, d = 64, 4 heads, FFN 256}
+\draw[arr] (stem.south)--(kenc.north);
+\node[kbox, align=center, text width=4.3cm] (kproj) at (2.4,-9.15) {each token $\to$ 5 muscle nodes (32-d)};
+\draw[arr] (kenc.south)--(kproj.north);
+\musclegraph{km}{2.4,-11.2}{1.1}{kinc}
+\draw[arr] (kproj.south)--(kmAD.north);
+\node[lab, anchor=east, align=right] at (0.8,-10.55) {muscle\\ graph $\times$2\\ prior: EMG\\ co-activation};
+\node[kbox, align=center, text width=4.3cm] (kdec) at (2.4,-13.2) {per-muscle decoder + softplus $\to K_{base}$};
+\draw[arr] (2.4,-12.35)--(kdec.north);
+\node[circle, draw, inner sep=1pt, fill=white, font=\normalsize] (times) at (2.4,-14.3) {$\times$};
+\draw[arr] (kdec.south)--(times.north);
+\node[kbox, align=center, text width=1.9cm] (gain) at (5.4,-14.3) {history gain\\ MLP 8$\to$16$\to$5\\ $g\in[0.5,2]$};
+\draw[arr, kinc!70!black] (5.4,-3.5)--(gain.north);
+\draw[arr] (gain.west)--(times.east);
+
+% ================= EEG stream (x = 13.0)
+\node[ebox, align=center, text width=4.3cm] (emb) at (13.0,-4.35) {electrode embedding: MLP 4$\to$32\\ + identity vector per electrode};
+\draw[arr] (10.75,-2.65)--(10.75,-3.25)-|(emb.north);
+\headgraph{h1}{13.0,-6.65}{1.05}
+\draw[arr] (emb.south)--(13.0,-5.38);
+\node[lab, anchor=west, align=left] at (14.2,-6.65) {electrode\\ graph $\times$2,\\ per token\\ prior: scalp\\ distance};
+\node[trapezium, trapezium left angle=70, trapezium right angle=70, shape border rotate=180, draw=eegc!70!black, fill=eegc!10, align=center, minimum width=3.8cm, font=\scriptsize] (pool) at (13.0,-8.4) {attention pooling over 32 electrodes};
+\draw[arr] (13.0,-7.72)--(pool.north);
+\tblock{eenc}{13.0,-10.6}{4.3cm}{EEG temporal encoder}{2}{eegc}{LayerNorm $\to$ attention $\to$ add}{LayerNorm $\to$ FFN $\to$ add}{pre-norm block, d = 64, 4 heads, FFN 256}
+\draw[arr] (pool.south)--(eenc.north);
+\node[ebox, align=center, text width=4.3cm] (eproj) at (13.0,-12.75) {each token $\to$ 5 muscle nodes (32-d)};
+\draw[arr] (eenc.south)--(eproj.north);
+\musclegraph{em}{13.0,-14.8}{1.1}{eegc}
+\draw[arr] (eproj.south)--(emAD.north);
+\node[lab, anchor=west, align=left] at (14.55,-13.75) {muscle\\ graph $\times$2};
+\node[ebox, align=center, text width=4.3cm] (edec) at (13.0,-16.65) {per-muscle decoder + softplus};
+\draw[arr] (13.0,-15.95)--(edec.north);
+
+% ================= fusion (x = 8.2)
+\node[fbox, align=center, text width=3.1cm] (cross) at (8.2,-10.6) {\textbf{cross-attention}\\ query: kinematic tokens\\ key, value: EEG tokens};
+\draw[darr, kinc!70!black] ($(kenc.east)+(0.55,-0.8)$)-|node[lab, pos=0.25, above]{stop-gradient}(cross.north);
+\draw[arr, eegc!70!black] (eenc.west)--(cross.east);
+\node[fbox, align=center, text width=3.1cm] (gate) at (8.2,-12.7) {linear per muscle $\times$ gate $\gamma$\\ (starts at 0) $\to F_{eeg}$};
+\draw[arr] (cross)--(gate);
+\node[circle, draw, inner sep=1pt, fill=white, font=\normalsize] (plus) at (8.2,-15.3) {$+$};
+\draw[arr] (gate)--(plus);
+\coordinate (kt) at (2.4,-15.3);
+\draw[darr, kinc!70!black] (kt)--node[lab, pos=0.62, below]{K, stop-gradient}(plus.west);
+\node[fbox, align=center] (relu) at (8.2,-16.35) {$F=\mathrm{relu}(K+F_{eeg})$};
+\draw[arr] (plus)--(relu);
+
+% ================= outputs
+\node[result, draw=kinc!80!black, fill=kinc!12, align=center, text width=3.2cm] (K) at (2.4,-17.75) {\textbf{K}: kinematics-led};
+\node[result, draw=fusc!80!black, fill=fusc!12, align=center, text width=3.2cm] (F) at (8.2,-17.75) {\textbf{F}: fused};
+\node[result, draw=eegc!80!black, fill=eegc!12, align=center, text width=3.2cm] (E) at (13.0,-17.75) {\textbf{E}: EEG only};
+\draw[arr] (times.south)--(K.north); \draw[arr] (relu)--(F); \draw[arr] (edec)--(E);
+\node[lab, align=center] at (8.2,-18.45) {EMG envelope of 5 muscles in the model domain $u=\sqrt{y/s_c}$, interpolated back to 500 Hz for scoring};
+\begin{scope}[shift={(0.65,-19.6)}]\env{0}{3.5}{0.75}{kinc!85!black}{10}\end{scope}
+\begin{scope}[shift={(6.45,-19.6)}]\env{0}{3.5}{0.75}{fusc!85!black}{10}\end{scope}
+\begin{scope}[shift={(11.25,-19.6)}]\env{0}{3.5}{0.6}{eegc!85!black}{-10}\end{scope}
+
+% ================= loss, training, recorder
+\node[box, font=\footnotesize, fill=black!3, anchor=north west, align=left, text width=16.4cm] (loss) at (-0.3,-19.9) {\textbf{Loss} $L=L_K+L_E+L_F$, for each output: Huber ($\delta=0.5$) + 0.3$\,(1-\mathrm{CCC})$ + 0.5 level error per detected hold + 0.1 temporal difference.\\
+\textbf{Training}: one AdamW for the kinematic stream, one for the EEG stream and fusion (gate without weight decay); a stream with no improvement for 30 epochs returns to its best weights and is frozen, the other one goes on.\\
+\textbf{Attention recorder} (outside the model): all 13 attention layers, per head and with gradients $\to$ rollout, attention flow, gradient-weighted rollout.};
+\end{tikzpicture}}\end{latin}

@@ -1,0 +1,23 @@
+% Freeze rule at the end of every epoch.
+\begin{latin}
+\begin{tikzpicture}[node distance=7mm and 9mm, font=\footnotesize]
+\node[box, text width=5.6cm] (ep) {end of an epoch: smoothed validation loss of each stream ($L_K$; $L_E+L_F$)};
+\node[box, below=of ep, text width=5.6cm] (kq) {K not frozen and no new best for 30 epochs?};
+\node[kbox, right=of kq, text width=5.2cm] (kf) {restore the best K weights and freeze K;\\ restart the patience of EEG + fusion\\ (unfreeze them if they were frozen)};
+\node[box, below=10mm of kq, text width=5.6cm] (eq) {EEG + fusion not frozen and no new best for 30 epochs?};
+\node[ebox, right=of eq, text width=5.2cm] (ef) {restore the best EEG + fusion weights\\ and freeze them};
+\node[box, below=10mm of eq, text width=5.6cm] (both) {both streams frozen, or epoch 150 reached?};
+\node[result, right=of both, text width=5.2cm] (stop) {stop: best.pt = best K + best EEG and fusion};
+\node[box, below=of both, text width=5.6cm] (next) {next epoch: only the streams that are not frozen are trained};
+\draw[arr] (ep)--(kq);
+\draw[arr] (kq)--node[lab, above]{yes}(kf);
+\draw[arr] (kq)--node[lab, right]{no}(eq);
+\draw[arr] (kf.south)|-($(kq.south)!0.5!(eq.north)$);
+\draw[arr] (eq)--node[lab, above]{yes}(ef);
+\draw[arr] (eq)--node[lab, right]{no}(both);
+\draw[arr] (ef.south)|-($(eq.south)!0.5!(both.north)$);
+\draw[arr] (both)--node[lab, above]{yes}(stop);
+\draw[arr] (both)--node[lab, right]{no}(next);
+\draw[arr] (next.west)--++(-0.5,0)|-(ep.west);
+\end{tikzpicture}
+\end{latin}

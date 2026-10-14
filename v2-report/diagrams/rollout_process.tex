@@ -1,0 +1,68 @@
+% Attention rollout: the whole process in the style of a paper figure.
+\begin{latin}\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,
+  stepc/.style={circle, fill=black!80, text=white, font=\scriptsize\bfseries, inner sep=1.2pt, minimum size=4.6mm},
+  stitle/.style={lab, font=\small\bfseries, anchor=west}]
+% ---------------- step 1: record
+\node[stepc] at (-0.4,0.3) {1};
+\node[stitle] at (-0.05,0.3) {Record every attention layer in one forward pass (after softmax, per head)};
+\foreach \l/\x/\s in {1/1.6/0,2/6.1/-1,3/10.6/1}{
+  \foreach \h in {2,1,0}{\attnmap{r1\l\h}{\x+0.18*\h,-1.65+0.18*\h}{8}{0.2}{\s+\h-1}{intc}{0}}
+  \node[lab] at (\x+0.2,-2.75) {layer \l: $A^{h}_{\l}$, heads $h=1..H$};}
+\node[lab, align=left, anchor=west] at (12.75,-1.55) {row $i$ = receiving\\ token (query),\\ column $j$ = source};
+
+% ---------------- step 2: heads and residual
+\node[stepc] at (-0.4,-3.45) {2};
+\node[stitle] at (-0.05,-3.45) {Average the heads and add the residual path};
+\foreach \l/\x/\s in {1/1.6/0,2/6.1/-1,3/10.6/1}{
+  \attnmap{r2\l}{\x,-5.05}{8}{0.2}{\s}{intc}{30}
+  \node[lab] at (\x,-6.1) {$\hat A_{\l}=\tfrac12\,\overline{A}_{\l}+\tfrac12 I$};
+  }
+\node[lab, align=left, anchor=west] at (12.75,-5.05) {$\overline{A}_l=\frac1H\sum_h A^{h}_l$\\ rows still sum to 1\\ $I$: the skip connection};
+
+% ---------------- step 3: multiply
+\node[stepc] at (-0.4,-6.85) {3};
+\node[stitle] at (-0.05,-6.85) {Multiply the layers from the last to the first};
+\attnmap{m3}{1.2,-8.4}{8}{0.2}{1}{intc}{30}\node[lab] at (1.2,-9.45) {$\hat A_3$};
+\node at (2.4,-8.4) {$\cdot$};
+\attnmap{m2}{3.6,-8.4}{8}{0.2}{-1}{intc}{30}\node[lab] at (3.6,-9.45) {$\hat A_2$};
+\node at (4.8,-8.4) {$\cdot$};
+\attnmap{m1}{6.0,-8.4}{8}{0.2}{0}{intc}{30}\node[lab] at (6.0,-9.45) {$\hat A_1$};
+\node at (7.2,-8.4) {$\cdot$};
+\attnmap{ms}{8.4,-8.4}{8}{0.2}{0}{kinc}{25}\node[lab] at (8.4,-9.45) {$S$ (K only: stem)};
+\node at (9.6,-8.4) {$=$};
+\attnmap{rr}{10.9,-8.4}{8}{0.2}{0}{black}{10}\node[lab] at (10.9,-9.45) {$R$};
+\draw[red!75!black, line width=1pt] (10.1,-8.4+0.0) rectangle (11.7,-8.2);
+\node[lab, text=red!75!black, anchor=west] at (11.75,-8.3) {row $t$ = the explained token};
+\node[lab, align=left, anchor=west] at (12.75,-9.05) {$R[t,\tau]=\sum_{\text{paths }\tau\to t}\prod_l \hat A_l$\\ $\sum_\tau R[t,\tau]=1$};
+
+% ---------------- step 4: read the row
+\node[stepc] at (-0.4,-10.2) {4};
+\node[stitle] at (-0.05,-10.2) {Read row $t$: the share of every input in the explained output};
+\draw[black!60] (0.3,-12.7)--(8.3,-12.7);
+\foreach \v [count=\k] in {0.10,0.12,0.15,0.2,0.28,0.42,0.6,0.5,0.35,1.55,0.3,0.22,0.16,0.12,0.1,0.09,0.08,0.08,0.07,0.07}{
+  \fill[intc!70] (0.3+0.38*\k,-12.7) rectangle ++(0.28,\v);}
+\fill[black!70] (0.3+0.38*10,-12.7) rectangle ++(0.28,1.55);
+\node[lab, anchor=west] at (4.35,-11.0) {own token (skip path) $\to$ written apart};
+\node[lab] at (4.3,-13.0) {input token $\tau$ (time)};
+
+% ---------------- step 5: what R means in each stream
+\node[stepc] at (-0.4,-13.6) {5};
+\node[stitle] at (-0.05,-13.6) {The same product, stage by stage, for every output};
+\node[kbox, text width=3.6cm, align=left] (b1) at (1.75,-15.05) {\textbf{K}: $R_K=\hat A_3\hat A_2\hat A_1 S$\\ time map, 400 tokens};
+\node[ebox, text width=3.6cm, align=left] (b2) at (5.95,-15.05) {\textbf{E}, time: $R_E=\hat A_2\hat A_1$\\ (EEG temporal layers)};
+\node[ebox, text width=4.4cm, align=left] (b3) at (10.45,-15.05) {\textbf{E}, electrodes at token $\tau$:\\ \mbox{$e_\tau=\pi_\tau\,\hat A^{(e)}_2\hat A^{(e)}_1$}, $\pi$ = pooling row};
+\headgraph{hr}{14.2,-15.05}{0.75}
+\node[ebox, text width=5.6cm, align=left] (b4) at (3.0,-16.75) {\textbf{E}, time $\times$ electrode:\\ $M_E[\tau,e]=R_E[t,\tau]\;e_\tau[e]$};
+\node[fbox, text width=4.2cm, align=left] (b5) at (8.55,-16.75) {\textbf{F$_{eeg}$}: cross-attention $C$ last,\\ no residual: $C\,R_E$};
+\node[box, fill=intc!8, text width=4.4cm, align=left] (b6) at (13.45,-16.75) {\textbf{muscle graph}: $\hat A^{(m)}_2\hat A^{(m)}_1$\\ 5$\times$5, row = receiving muscle};
+
+% ---------------- step 6: average over events
+\node[stepc] at (-0.4,-17.95) {6};
+\node[stitle] at (-0.05,-17.95) {One map per lift event, then mean $\pm$ SEM over events (never a single window)};
+\fill[intc!20] plot[smooth, domain=0.3:8.3, samples=50] (\x,{-19.6+0.55*exp(-((\x-3.6)^2)/0.8)+0.25*exp(-((\x-6.9)^2)/0.5)+0.12}) -- (8.3,-19.75) -- plot[smooth, domain=8.3:0.3, samples=50] (\x,{-19.75+0.55*exp(-((\x-3.6)^2)/0.8)+0.25*exp(-((\x-6.9)^2)/0.5)+0.05}) -- cycle;
+\draw[intc!80!black, line width=0.9pt] plot[smooth, domain=0.3:8.3, samples=50] (\x,{-19.68+0.55*exp(-((\x-3.6)^2)/0.8)+0.25*exp(-((\x-6.9)^2)/0.5)+0.08});
+\draw[black!60] (0.3,-19.75)--(8.3,-19.75); \draw[black!50, dashed] (4.3,-19.8)--(4.3,-18.75);
+\node[lab] at (4.3,-20.05) {time from the event (s); dashed = event};
+\node[box, fill=black!3, text width=7.4cm, align=left] at (12.6,-19.35) {\textbf{gradient-weighted variant}: replace $\overline{A}_l$ by\\ $\tilde A_l=\mathrm{rownorm}\Big(\frac1H\sum_h\big(A^{h}_l\odot\frac{\partial y}{\partial A^{h}_l}\big)^{+}\Big)$\\ and run steps 2--6 unchanged: one map per muscle.};
+\end{tikzpicture}}\end{latin}

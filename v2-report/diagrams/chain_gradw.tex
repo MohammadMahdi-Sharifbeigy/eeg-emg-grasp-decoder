@@ -1,0 +1,11 @@
+% Gradient-weighted rollout.
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm and 4mm, font=\footnotesize, box/.append style={text width=2.45cm}]
+\node[box] (a) {$A^{h}_l$ and $\partial y/\partial A^{h}_l$};
+\node[box, right=of a] (b) {element-wise product, positive part};
+\node[box, right=of b] (c) {mean over heads, rows rescaled to sum 1};
+\node[box, right=of c] (d) {$\tfrac12\tilde A_l+\tfrac12I$, product over layers};
+\node[result, right=of d] (e) {map for one muscle};
+\draw[arr] (a)--(b); \draw[arr] (b)--(c); \draw[arr] (c)--(d); \draw[arr] (d)--(e);
+\end{tikzpicture}
+\end{latin}

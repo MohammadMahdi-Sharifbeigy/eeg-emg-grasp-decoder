@@ -1,0 +1,21 @@
+% Layered graph of rollout and attention flow.
+\begin{latin}
+\begin{tikzpicture}[x=2.6cm, y=1.9cm, font=\footnotesize,
+  nd/.style={circle, draw, minimum size=7mm, inner sep=0pt, font=\small, fill=white},
+  att/.style={-{Stealth[length=1.6mm]}, black!35},
+  res/.style={-{Stealth[length=2mm]}, line width=1.2pt, black!70},
+  hot/.style={-{Stealth[length=2.2mm]}, line width=1.6pt, black}]
+\foreach \l in {0,1,2,3}{\foreach \i in {1,2,3,4}{\node[nd] (n\l\i) at (\i,\l) {$\i$};}}
+\foreach \l/\p in {1/0,2/1,3/2}{
+  \foreach \i in {1,2,3,4}{\foreach \j in {1,2,3,4}{\ifnum\i=\j\else\draw[att] (n\p\j)--(n\l\i);\fi}}
+  \foreach \i in {1,2,3,4}{\draw[res] (n\p\i)--(n\l\i);}
+}
+\draw[hot] (n01)--(n12); \draw[hot] (n12)--(n22); \draw[hot] (n22)--(n33);
+\node[nd, line width=1.4pt] at (3,3) {$3$};
+\foreach \l/\t in {0/{inputs (tokens or electrodes)},1/layer 1,2/layer 2,3/{output (layer 3)}}{\node[lab, anchor=west] at (4.35,\l) {\t};}
+\node[lab] at (2.5,3.6) {target node: token $t=3$ of the output};
+\draw[res] (0.6,-0.7)--(1.0,-0.7); \node[lab, anchor=west] at (1.05,-0.7) {residual edge, capacity $\tfrac12+\tfrac12\overline{A}_{ii}$};
+\draw[att] (0.6,-1.05)--(1.0,-1.05); \node[lab, anchor=west] at (1.05,-1.05) {attention edge, capacity $\tfrac12\overline{A}_{ij}$};
+\draw[hot] (0.6,-1.4)--(1.0,-1.4); \node[lab, anchor=west] at (1.05,-1.4) {one path from input 1 to the target};
+\end{tikzpicture}
+\end{latin}

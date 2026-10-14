@@ -1,0 +1,75 @@
+% Attention flow: the whole process in the style of a paper figure.
+\begin{latin}\resizebox{\textwidth}{!}{%
+\begin{tikzpicture}[font=\footnotesize,
+  stepc/.style={circle, fill=black!80, text=white, font=\scriptsize\bfseries, inner sep=1.2pt, minimum size=4.6mm},
+  stitle/.style={lab, font=\small\bfseries, anchor=west},
+  fn/.style={circle, draw=black!60, fill=white, minimum size=5.5mm, inner sep=0pt, font=\scriptsize},
+  capedge/.style={black!30, line width=0.5pt},
+  resedge/.style={black!65, line width=1.1pt},
+  fl/.style={-{Stealth[length=1.8mm]}, fusc!70!black, line width=1.4pt}]
+% ---------------- step 1: same matrices, binned
+\node[stepc] at (-0.4,0.3) {1};
+\node[stitle] at (-0.05,0.3) {Start from the same layer matrices $\hat A_l=\tfrac12\overline{A}_l+\tfrac12I$ and bin the time axis};
+\attnmap{f1}{1.6,-1.35}{8}{0.2}{0}{intc}{30}
+\node[lab] at (1.6,-2.4) {$\hat A_l$: 400 $\times$ 400 tokens};
+\draw[arr] (2.6,-1.35)--(4.1,-1.35) node[lab, midway, above]{bins of 4};
+\attnmap{f2}{5.1,-1.35}{4}{0.4}{0}{intc}{30}
+\node[lab] at (5.1,-2.4) {100 $\times$ 100 bins (80 ms)};
+\node[box, fill=black!3, text width=7.0cm, align=left] at (11.2,-1.35) {$\hat A^{bin}[a,b]=\dfrac{1}{|a|}\displaystyle\sum_{i\in a}\sum_{j\in b}\hat A[i,j]$\\[2pt] queries averaged, sources summed: rows still sum to 1, and the graph shrinks from $L\cdot400^2$ to $L\cdot100^2$ edges.};
+
+% ---------------- step 2: the flow network
+\node[stepc] at (-0.4,-3.1) {2};
+\node[stitle] at (-0.05,-3.1) {Read the layers as a flow network: every edge is a pipe with capacity $\hat A_l[i,j]$};
+\foreach \l in {0,1,2,3}{\foreach \i in {1,2,3,4}{\node[fn] (g\l\i) at (0.9+1.3*\i,-8.1+1.3*\l) {};}}
+\foreach \l/\p in {1/0,2/1,3/2}{
+  \foreach \i in {1,2,3,4}{\foreach \j in {1,2,3,4}{\ifnum\i=\j\else\draw[capedge] (g\p\j)--(g\l\i);\fi}}
+  \foreach \i in {1,2,3,4}{\draw[resedge] (g\p\i)--(g\l\i);}}
+\node[fn, fill=fusc!45, draw=fusc!70!black] at (g01) {$\tau$};
+\node[fn, fill=red!35, draw=red!70!black] at (g33) {$t$};
+\draw[fl] (g01)--(g12); \draw[fl] (g12)--(g22); \draw[fl] (g22)--(g33);
+\draw[fl] (g01)--(g11); \draw[fl] (g11)--(g23); \draw[fl] (g23)--(g33);
+\draw[red!70!black, dashed, line width=1pt] (1.6,-4.85)..controls (3.5,-5.0) and (5.6,-4.5)..(6.4,-4.7);
+\node[lab, text=red!70!black, anchor=east] at (1.55,-4.85) {minimum cut};
+\node[lab, anchor=east] at (1.9,-8.1) {inputs}; \node[lab, anchor=east] at (1.9,-6.8) {layer 1};
+\node[lab, anchor=east] at (1.9,-5.5) {layer 2}; \node[lab, anchor=east] at (1.9,-4.2) {output};
+\node[lab, text=fusc!60!black] at (4.15,-8.65) {source: input bin $\tau$ (one problem per source)};
+\node[box, fill=black!3, text width=7.0cm, align=left] at (11.2,-6.15) {\textbf{maximum flow} from source $\tau$ to target $t$:\\[3pt]
+ $\displaystyle\mathrm{flow}(\tau\!\to\!t)=\max_{f}\sum_{e\,\text{out of}\,\tau} f_e$\\[2pt]
+ subject to $0\le f_e\le c_e$ (capacity $c_e=\hat A_l[i,j]$)\\ and inflow = outflow at every inner node.\\[3pt]
+ \textbf{max-flow = min-cut}: the value equals the capacity of the cheapest set of pipes that separates $\tau$ from $t$.\\[3pt]
+ Rollout multiplies along each path; flow adds parallel paths, each limited by its narrowest pipe.};
+
+% ---------------- step 3: solve
+\node[stepc] at (-0.4,-9.5) {3};
+\node[stitle] at (-0.05,-9.5) {Solve one maximum-flow problem per source bin (100 per window)};
+\node[box, text width=5.6cm, align=left] at (2.8,-10.85) {capacities $\times 10^{6}$, rounded to integers\\ \texttt{scipy...csgraph.maximum\_flow}\\ result divided by $10^{6}$};
+\draw[black!60] (6.3,-11.7)--(14.3,-11.7);
+\foreach \v [count=\k] in {0.42,0.44,0.43,0.46,0.47,0.45,0.48,0.47,0.5,0.95,0.48,0.46,0.45,0.44,0.46,0.43,0.42,0.41,0.42,0.4}{
+  \fill[intc!65] (6.3+0.4*\k-0.3,-11.7) rectangle ++(0.26,\v*1.3);}
+\fill[black!70] (6.3+0.4*10-0.3,-11.7) rectangle ++(0.26,0.95*1.3);
+\draw[black!55, dashed, line width=0.8pt] (6.3,-11.7+0.5*1.3)--(14.3,-11.7+0.5*1.3) node[lab, anchor=west]{uniform: 0.5};
+\node[lab] at (10.3,-12.0) {source bin $\tau$ (time); dark bar = the target's own bin};
+
+% ---------------- step 4: baseline
+\node[stepc] at (-0.4,-12.75) {4};
+\node[stitle] at (-0.05,-12.75) {Subtract the flow of a model that attends to everything equally};
+\node[box, text width=7.3cm, align=left] at (3.6,-13.95) {uniform layers $\tfrac12\,\tfrac1n J+\tfrac12 I$ (same residual, same stem)\\[2pt] $\mathrm{excess}(\tau)=\mathrm{flow}(\tau)-\mathrm{flow}_{uniform}(\tau)$\\[2pt] two uniform layers: every source gets exactly $\tfrac12$};
+\draw[black!60] (7.9,-13.5)--(14.3,-13.5) node[lab, anchor=west]{0};
+\draw[intc!80!black, line width=0.9pt] plot[smooth, domain=7.9:14.3, samples=40] (\x,{-13.5-0.45-0.18*sin(\x*140)-0.1*sin(\x*310)});
+\node[lab, anchor=west, align=left] at (7.9,-14.6) {excess below 0: the learned attention is\\ more concentrated than uniform};
+
+% ---------------- step 5: electrodes
+\node[stepc] at (-0.4,-15.6) {5};
+\node[stitle] at (-0.05,-15.6) {Electrode flow (E and F$_{eeg}$): per time bin, through both electrode layers into the pooled token};
+\foreach \l in {0,1,2}{\foreach \i in {1,...,5}{\node[fn, minimum size=4.2mm, fill=eegc!10, draw=eegc!70!black] (e\l\i) at (0.7+0.75*\i,-19.2+0.95*\l) {};}}
+\node[fn, minimum size=5mm, fill=eegc!35, draw=eegc!70!black] (pool) at (2.95,-16.35) {p};
+\foreach \l/\p in {1/0,2/1}{\foreach \i in {1,...,5}{\foreach \j in {1,...,5}{\draw[capedge] (e\p\j)--(e\l\i);}}}
+\foreach \i in {1,...,5}{\draw[eegc!60, line width=0.7pt] (e2\i)--(pool);}
+\node[lab, anchor=west] at (4.95,-19.2) {32 electrodes};
+\node[lab, anchor=west] at (4.95,-18.25) {graph layer 1};
+\node[lab, anchor=west] at (4.95,-17.3) {graph layer 2};
+\node[lab, anchor=west, align=left] at (3.4,-16.35) {pooled token\\ (capacities $\pi_e$, sum 1)};
+\node[box, fill=black!3, text width=7.2cm, align=left] at (11.35,-17.85) {$\mathrm{flow}_{elec}(\tau,e)$: maximum flow from electrode $e$ to the pooled token of bin $\tau$.\\[3pt]
+ The pooled token is the only exit of a time step, so the input flow is\\ $\mathrm{flow}(\tau,e)=\min\big(\mathrm{flow}_{time}(\tau),\ \mathrm{flow}_{elec}(\tau,e)\big)$.\\[3pt]
+ If $\max_e-\min_e<10\,\%$ of the mean, every electrode reaches the same cap: the map carries no spatial information and is not drawn.};
+\end{tikzpicture}}\end{latin}

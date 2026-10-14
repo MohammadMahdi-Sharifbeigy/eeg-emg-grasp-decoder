@@ -1,0 +1,16 @@
+% Stitched inference over one series.
+\begin{latin}
+\begin{tikzpicture}[x=1.45cm, y=0.55cm, font=\footnotesize]
+\foreach \i/\s in {0/0,1/4,2/8,3/12}{
+  \draw[semithick] (\s/4,-\i) rectangle ++(2,0.6);
+  \fill[black!25] (\s/4+0.5,-\i) rectangle ++(1,0.6);
+  \node[lab, anchor=east] at (-0.1,-\i+0.3) {window \the\numexpr\i+1\relax};
+}
+\fill[black!25] (0,0) rectangle (0.5,0.6);
+\fill[black!25] (3.5,-3) rectangle (5,-2.4);
+\draw[arr] (-0.2,-4.1)--(5.4,-4.1);
+\foreach \x/\t in {0/0,1/4,2/8,3/12,4/16,5/20}{\draw (\x,-4.0)--(\x,-4.2) node[lab, below]{\t};}
+\node[lab] at (2.5,-5.4) {time in the series (s)};
+\node[lab, anchor=west, align=left] at (5.5,-1.2) {grey: the part kept from each\\ 8 s window (its central 4 s;\\ the first and last windows\\ also keep their outer edge)};
+\end{tikzpicture}
+\end{latin}

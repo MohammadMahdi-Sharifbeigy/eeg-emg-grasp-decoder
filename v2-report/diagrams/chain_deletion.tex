@@ -1,0 +1,15 @@
+% Deletion check (top) and weight-shuffle check (bottom).
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm and 4mm, font=\footnotesize, box/.append style={text width=2.45cm}]
+\node[box] (a) {map of one method};
+\node[box, right=of a] (b) {rank the input cells};
+\node[box, right=of b] (c) {set the top $q$\,\% and a random $q$\,\% to 0};
+\node[box, right=of c] (d) {$\Delta_{top}$ and $\Delta_{rand}$};
+\node[result, right=of d] (e) {deletion curve over $q$};
+\draw[arr] (a)--(b); \draw[arr] (b)--(c); \draw[arr] (c)--(d); \draw[arr] (d)--(e);
+\node[box, below=9mm of b] (f) {shuffle every weight matrix};
+\node[box, right=of f] (g) {build the map again};
+\node[result, right=of g] (h) {Spearman $\rho$ with the original map};
+\draw[arr] (a.south)|-(f.west); \draw[arr] (f)--(g); \draw[arr] (g)--(h);
+\end{tikzpicture}
+\end{latin}

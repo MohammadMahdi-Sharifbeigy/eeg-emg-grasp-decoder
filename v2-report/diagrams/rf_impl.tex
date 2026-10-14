@@ -1,0 +1,18 @@
+% Implementation of rollout (left) and attention flow (right) on the time path.
+\begin{latin}
+\begin{tikzpicture}[node distance=5mm and 5mm, font=\footnotesize, box/.append style={text width=4.2cm}]
+\node[io] (x) {one 8 s window, $(1,400,\cdot)$};
+\node[box, below=of x] (tr) {\texttt{trace}: one forward pass with the recorder};
+\node[box, below=of tr] (A) {$A^{h}_l$ of every layer, $(1,H,n,n)$};
+\node[box, below=of A] (L) {\texttt{layer\_matrix}: $\tfrac12\overline{A}_l+\tfrac12I$};
+\node[box, below=of L, align=left] (st) {stage list\\ K: $[S,\hat A_1,\hat A_2,\hat A_3]$ (stem first)\\ E: $[\hat A_1,\hat A_2]$\\ $F_{eeg}$: $[\hat A_1,\hat A_2,C]$ (cross-attention last)};
+\node[box, below left=7mm and -16mm of st] (ro) {\texttt{rollout}: product of the matrices; row $t$ gives 400 shares};
+\node[box, below right=7mm and -16mm of st] (bn) {\texttt{bin\_matrix}: bins of 4 tokens (80 ms); sources summed, queries averaged};
+\node[box, below=of bn] (fl) {\texttt{attention\_flow}: maximum flow from each of the 100 bins to the target bin};
+\node[box, below=of fl] (un) {same flow for uniform attention $\tfrac12\frac1n J+\tfrac12 I$};
+\node[result, below=of un] (ex) {flow minus the uniform baseline};
+\node[result, below=17mm of ro] (rs) {share of each token, the event's own token left out};
+\draw[arr] (x)--(tr); \draw[arr] (tr)--(A); \draw[arr] (A)--(L); \draw[arr] (L)--(st);
+\draw[arr] (st)--(ro); \draw[arr] (st)--(bn); \draw[arr] (bn)--(fl); \draw[arr] (fl)--(un); \draw[arr] (un)--(ex); \draw[arr] (ro)--(rs);
+\end{tikzpicture}
+\end{latin}

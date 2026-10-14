@@ -1,0 +1,56 @@
+% سبک‌های نمودار: متن همه‌ی نمودارها انگلیسی و چپ‌به‌راست است (فقط زیرنویس‌ها فارسی‌اند).
+\definecolor{kinc}{HTML}{EB6834}\definecolor{eegc}{HTML}{2A78D6}\definecolor{fusc}{HTML}{1BAF7A}\definecolor{intc}{HTML}{7B4FB5}
+\tikzset{
+  box/.style={draw, rounded corners=2pt, align=center, minimum height=7mm, inner sep=3pt, font=\footnotesize, fill=white,
+              execute at begin node={\hyphenpenalty=10000\exhyphenpenalty=10000}},
+  io/.style={box, fill=black!6},
+  result/.style={box, line width=0.9pt},
+  kbox/.style={box, fill=kinc!10, draw=kinc!70!black},
+  ebox/.style={box, fill=eegc!10, draw=eegc!70!black},
+  fbox/.style={box, fill=fusc!12, draw=fusc!70!black},
+  arr/.style={-{Stealth[length=2mm]}, semithick},
+  darr/.style={arr, dashed},
+  grp/.style={draw, dashed, rounded corners=3pt, inner sep=6pt},
+  lab/.style={font=\scriptsize, align=center},
+  mnode/.style={circle, draw, minimum size=6.2mm, inner sep=0pt, font=\tiny\bfseries, fill=white},
+  enode/.style={circle, fill=eegc!80!black, minimum size=1.6mm, inner sep=0pt},
+}
+% ---- رسم‌های تکرارشونده: گراف پنج عضله، سر با الکترودها، بلوک ترنسفورمر، سیگنال
+% \musclegraph{prefix}{center}{radius}{color}
+\newcommand{\musclegraph}[4]{%
+  \foreach \m/\a in {AD/90,BR/18,FD/-54,ED/-126,FDI/162}{\node[mnode, draw=#4!70!black, fill=#4!8] (#1\m) at ($(#2)+(\a:#3)$) {\m};}
+  \foreach \u/\v in {AD/BR,AD/FD,AD/ED,AD/FDI,BR/FD,BR/ED,BR/FDI,FD/ED,FD/FDI,ED/FDI}{\draw[#4!45, line width=0.5pt] (#1\u)--(#1\v);}
+  \draw[-{Stealth[length=1.4mm]}, #4!80!black, line width=0.9pt] (#1FD)--(#1AD);
+  \draw[-{Stealth[length=1.4mm]}, #4!80!black, line width=0.9pt] (#1ED)--(#1BR);}
+% \headgraph{prefix}{center}{radius}
+\newcommand{\headgraph}[3]{%
+  \draw[black!60] (#2) circle (#3);
+  \draw[black!60] ($(#2)+(-0.13*#3,0.99*#3)$)--($(#2)+(0,1.17*#3)$)--($(#2)+(0.13*#3,0.99*#3)$);
+  \foreach \x/\y [count=\i] in {-0.3/0.75,0.3/0.75,-0.6/0.4,-0.2/0.4,0.2/0.4,0.6/0.4,-0.75/0,-0.35/0,0/0,0.35/0,0.75/0,-0.6/-0.4,-0.2/-0.4,0.2/-0.4,0.6/-0.4,-0.3/-0.75,0.3/-0.75}{\node[enode] (#1\i) at ($(#2)+(\x*#3,\y*#3)$) {};}
+  \foreach \u/\v in {8/9,9/10,3/8,4/9,5/9,9/13,9/14,8/12,10/15,4/5,2/6}{\draw[eegc!60, line width=0.4pt] (#1\u)--(#1\v);}}
+% \tblock{name}{position}{width}{title}{N}{color}: بلوک ترنسفورمر با نرمال‌سازی پیشین
+% The title sits inside the block, so arrows reach its border without crossing text.
+% \tblock{name}{position}{width}{title}{N}{color}{line above attention}{line above FFN}{bottom note}
+\newcommand{\tblock}[9]{%
+  \node[draw=#6!70!black, fill=#6!6, rounded corners=3pt, minimum width=#3, minimum height=3.1cm] (#1) at (#2) {};
+  \node[lab, font=\scriptsize\bfseries] at ($(#1)+(0,1.25)$) {#4};
+  \node[lab, font=\tiny, text=black!70] at ($(#1)+(0,0.84)$) {#7};
+  \node[box, minimum width=#3-5mm, minimum height=5mm, font=\scriptsize] (#1a) at ($(#1)+(0,0.4)$) {Multi-head attention};
+  \node[lab, font=\tiny, text=black!70] at ($(#1)+(0,-0.12)$) {#8};
+  \node[box, minimum width=#3-5mm, minimum height=5mm, font=\scriptsize] (#1f) at ($(#1)+(0,-0.56)$) {Feed-forward};
+  \node[lab, font=\tiny, text=black!70] at ($(#1)+(0,-1.18)$) {#9};
+  \node[lab, font=\bfseries\small, anchor=west] at (#1.east) {$\times$#5};}
+% attnmap{name}{center}{n}{cell}{shift}{color}{diagonal boost}: a small attention-like heat map, rows = queries
+\newcommand{\attnmap}[7]{%
+  \begin{scope}[shift={(#2)}]
+  \foreach \i in {1,...,#3}{\foreach \j in {1,...,#3}{%
+    \pgfmathsetmacro\hmv{min(92,10+58*exp(-abs(\j-\i+#5)/1.5)+#7*(\i==\j))}%
+    \fill[#6!\hmv] ({(\j-1-#3/2)*#4},{(#3/2-\i)*#4}) rectangle ++(#4,#4);}}
+  \draw[black!55] ({-#3/2*#4},{-#3/2*#4}) rectangle ({#3/2*#4},{#3/2*#4});
+  \coordinate (#1) at (0,0);
+  \coordinate (#1-n) at (0,{#3/2*#4}); \coordinate (#1-s) at (0,{-#3/2*#4});
+  \coordinate (#1-w) at ({-#3/2*#4},0); \coordinate (#1-e) at ({#3/2*#4},0);
+  \end{scope}}
+% \sig{start}{length}{amplitude}{color}{seed-phase}: یک سیگنال کوچک
+\newcommand{\sig}[5]{\draw[#4, line width=0.6pt, domain=0:#2, samples=60, smooth] plot (\x+#1, {#3*(0.55*sin(\x*190+#5)+0.35*sin(\x*530+2*#5)+0.2*sin(\x*1100+3*#5))});}
+\newcommand{\env}[5]{\draw[#4, line width=0.8pt, domain=0:#2, samples=60, smooth] plot (\x+#1, {#3*max(0, sin(\x*120+#5))^2});}

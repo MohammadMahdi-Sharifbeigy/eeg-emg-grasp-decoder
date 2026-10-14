@@ -1,0 +1,11 @@
+% Gradient x input.
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm and 4mm, font=\footnotesize, box/.append style={text width=2.45cm}]
+\node[box] (a) {input $x$ (kinematics, history, band power)};
+\node[box, right=of a] (b) {back-propagate from $y$: $\partial y/\partial x$};
+\node[box, right=of b] (c) {$|x\odot\partial y/\partial x|$};
+\node[box, right=of c] (d) {sum over time (and electrodes)};
+\node[result, right=of d] (e) {share of each feature or band};
+\draw[arr] (a)--(b); \draw[arr] (b)--(c); \draw[arr] (c)--(d); \draw[arr] (d)--(e);
+\end{tikzpicture}
+\end{latin}
