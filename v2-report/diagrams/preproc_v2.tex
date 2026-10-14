@@ -1,0 +1,33 @@
+% v2 preprocessing: 500 Hz cache -> 50 Hz model inputs and target.
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm, font=\footnotesize, box/.append style={text width=2.85cm}]
+\node[io, text width=13cm] (c) {cache of one series at 500 Hz (eeg $T\times32$, kin $T\times26$, emg $T\times5$)};
+% kinematics
+\node[kbox, anchor=north] (k1) at ($(c.south)+(-5.04,-0.8)$) {drop $F_G/F_L$ and its velocity: 26 $\to$ 24};
+\node[kbox, below=of k1] (k2) {to tokens: FIR anti-alias, zero-phase, $\div 10$};
+\node[kbox, below=of k2] (k3) {z-score with train series};
+\node[result, below=of k3, text width=2.85cm] (k4) {$X^{k}$\ \ $T_{50}\times24$};
+% history
+\node[kbox, right=3mm of k1] (h1) {gated $F_L$, $F_G$ (500 Hz)};
+\node[kbox, below=of h1] (h2) {holds: $F_L>1$ N for $\ge0.5$ s};
+\node[kbox, below=of h2] (h3) {8 features, each known only after the hold ends};
+\node[kbox, below=of h3] (h3b) {every 10th sample (no filter)};
+\node[result, below=of h3b, text width=2.85cm] (h4) {$X^{h}$\ \ $T_{50}\times8$};
+% EEG
+\node[ebox, right=3mm of h1] (e1) {4 bands: $\theta,\alpha,\beta,\gamma_{low}$\\Butterworth 4, zero-phase};
+\node[ebox, below=of e1] (e2) {power $|\mathrm{Hilbert}|^2$, low-pass 5 Hz};
+\node[ebox, below=of e2] (e3) {$\log\max(P,\ \epsilon)$\\$\epsilon=10^{-3}\,\mathrm{median}\,P$};
+\node[ebox, below=of e3] (e3b) {to tokens ($\div 10$), z-score, clip $\pm5$};
+\node[result, below=of e3b, text width=2.85cm] (e4) {$X^{e}$\ \ $T_{50}\times32\times4$};
+% EMG
+\node[box, right=3mm of e1, fill=intc!8, draw=intc!70!black] (m1) {EMG envelope (500 Hz)};
+\node[box, below=of m1, fill=intc!8, draw=intc!70!black] (m2) {to tokens ($\div 10$), $\max(\cdot,0)$};
+\node[box, below=of m2, fill=intc!8, draw=intc!70!black] (m3) {$s_c$ = 95th pct. of train tokens};
+\node[box, below=of m3, fill=intc!8, draw=intc!70!black] (m3b) {$u=\sqrt{y/s_c}$};
+\node[result, below=of m3b, text width=2.85cm] (m4) {target $u$\ \ $T_{50}\times5$};
+\foreach \c in {k,h,e,m}{\draw[arr] (c.south-|\c1)--(\c1);}
+\foreach \a/\b in {k1/k2,k2/k3,k3/k4,h1/h2,h2/h3,h3/h3b,h3b/h4,e1/e2,e2/e3,e3/e3b,e3b/e4,m1/m2,m2/m3,m3/m3b,m3b/m4}{\draw[arr] (\a)--(\b);}
+\node[result, below=7mm of $(h4.south)!0.5!(e4.south)$, text width=13cm] (w) {training windows: 400 tokens (8 s), stride 100 tokens (2 s), random start offset in $[0,100)$ each epoch\\test: windows of 8 s every 4 s, keep the middle 4 s, spline back to 500 Hz};
+\foreach \x in {k4,h4,e4,m4}{\draw[arr] (\x)--(\x|-w.north);}
+\end{tikzpicture}
+\end{latin}

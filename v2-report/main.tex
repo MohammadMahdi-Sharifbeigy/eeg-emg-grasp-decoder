@@ -3,6 +3,7 @@
 \usepackage[margin=2.2cm]{geometry}
 \usepackage{amsmath,amssymb,bm}
 \usepackage{graphicx,booktabs,float,array}
+\usepackage{placeins}
 \usepackage{tikz}
 \usetikzlibrary{positioning,arrows.meta,fit,calc,shapes.geometric,backgrounds,decorations.pathreplacing}
 \usepackage[colorlinks=true,linkcolor=black,citecolor=black,urlcolor=black]{hyperref}
@@ -27,7 +28,13 @@
 \maketitle
 
 \begin{abstract}
-این گزارش دو مدل را برای پیش‌بینی پوش فعالیت پنج عضله‌ی دست و بازو در داده‌ی \lr{WAY-EEG-GAL} مقایسه می‌کند. مدل پایه (\lr{KG-GT}، دفترچه‌ی \lr{main\_1stage} در شاخه‌ی \lr{KG-GT-CUDA}) یک \lr{encoder} \lr{Transformer} روی \lr{EEG} و یک \lr{muscle graph} با هدایت سینماتیک دارد و یک خروجی می‌دهد. روی سری‌های آزمون ۱۲ شرکت‌کننده به \lr{VAF} برابر \lr{۷۲٫۲} درصد و ضریب همبستگی \lr{۰٫۸۵۱} رسید، اما آزمون‌های حذف ورودی نشان دادند که تقریباً همه‌ی این دقت از سینماتیک می‌آید و نمی‌توان سهم \lr{EEG} را از سهم سینماتیک جدا کرد. مدل \lr{v2} سه خروجی جدا می‌دهد: \lr{K} از سینماتیک و تاریخچه‌ی بلندکردن‌ها، \lr{E} فقط از \lr{EEG} و \lr{F} که \lr{K} را با یک اصلاحِ \lr{gated} از \lr{EEG} ترکیب می‌کند. \lr{K} با \lr{VAF} برابر \lr{۷۵٫۸} درصد و \lr{r} برابر \lr{۰٫۸۷۲} در هر ۱۲ شرکت‌کننده از مدل پایه بهتر شد. \lr{E} به‌تنهایی به \lr{r} برابر \lr{۰٫۶۴۵} رسید و در هر ۱۲ نفر از \lr{null test} گذشت. \lr{F} عملاً برابر \lr{K} ماند. \lr{residual test} نشان داد \lr{EEG} اطلاعات کمی درباره‌ی خطای \lr{K} دارد (\lr{r} حدود \lr{۰٫۰۷}، معنادار در ۱۰ نفر از ۱۲) که کمتر از نیم واحد درصد به \lr{VAF} اضافه می‌کند. مدل \lr{v2} از ابتدا طوری ساخته شد که هر خروجی را بتوان در همه‌ی لایه‌ها با \lr{rollout} توجه، \lr{attention flow}، \lr{gradient-weighted rollout} و \lr{gradient × input} ردیابی کرد؛ این روش‌ها با \lr{deletion check} و \lr{weight-shuffle check} سنجیده شدند.
+این گزارش دو مدل را مقایسه می‌کند که فعالیت پنج عضله‌ی دست و بازو (پوش \lr{EMG}) را در داده‌ی \lr{WAY-EEG-GAL} پیش‌بینی می‌کنند. در این داده ۱۲ نفر بارها جسمی را گرفته و بلند کرده‌اند.
+
+مدل پایه (\lr{KG-GT}، دفترچه‌ی \lr{main\_1stage} در شاخه‌ی \lr{KG-GT-CUDA}) یک \lr{Transformer} روی \lr{EEG} و یک \lr{muscle graph} دارد که سینماتیک دست آن را هدایت می‌کند، و فقط یک خروجی می‌دهد. روی سری‌های آزمون به \lr{VAF} \lr{۷۲٫۲} درصد و همبستگی \lr{۰٫۸۵۱} رسید. اما آزمون‌های حذف ورودی نشان دادند تقریباً همه‌ی این دقت از سینماتیک می‌آید، و با یک خروجی نمی‌توان سهم \lr{EEG} را جدا کرد.
+
+مدل \lr{v2} سه خروجی جدا دارد: \lr{K} فقط از سینماتیک و تاریخچه‌ی بلندکردن‌ها، \lr{E} فقط از \lr{EEG}، و \lr{F} که \lr{K} را با یک اصلاح کوچک از \lr{EEG} جمع می‌کند. \lr{K} با \lr{VAF} \lr{۷۵٫۸} درصد و $r$ \lr{۰٫۸۷۲} در هر ۱۲ نفر از مدل پایه بهتر شد. \lr{E} به‌تنهایی به $r$ \lr{۰٫۶۴۵} رسید و در هر ۱۲ نفر از \lr{null test} گذشت. \lr{F} عملاً با \lr{K} برابر ماند. \lr{residual test} نشان داد \lr{EEG} فقط اطلاعات بسیار کمی درباره‌ی خطای \lr{K} دارد ($r$ حدود \lr{۰٫۰۷}، معنادار در ۱۰ نفر از ۱۲) که کمتر از نیم واحد به \lr{VAF} اضافه می‌کند.
+
+\lr{v2} طوری ساخته شد که بتوان هر خروجی را از طریق همه‌ی لایه‌ها تا ورودی دنبال کرد: با \lr{attention rollout}، \lr{attention flow}، \lr{gradient-weighted rollout} و \lr{gradient × input}. خود این روش‌ها با \lr{deletion check} و \lr{weight-shuffle check} سنجیده شدند، یکسانی نقشه‌ها بین ۱۲ نفر اندازه گرفته شد و نتایج با پژوهش‌های پیشین مقایسه شد. نقشه‌ی گروهی \lr{EEG} کانونی تکرارپذیر روی \lr{C3} و \lr{CP1} دارد و باند بتا را ترجیح می‌دهد.
 \end{abstract}
 
 \tableofcontents
@@ -38,6 +45,8 @@
 \input{sections/03_results}
 \input{sections/04_interp}
 \input{sections/05_rollout_flow}
+\input{sections/05b_consistency}
+\input{sections/05c_literature}
 \input{sections/06_residual}
 \input{sections/07_conclusion}
 

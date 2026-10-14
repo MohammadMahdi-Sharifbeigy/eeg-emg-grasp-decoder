@@ -1,25 +1,28 @@
+\FloatBarrier
 \section{جمع‌بندی و محدودیت‌ها}
 
-\paragraph{آنچه به دست آمد.} \lr{v2} سه پرسش را که مدل پایه در یک خروجی با هم مخلوط می‌کرد جدا کرد.
+\paragraph{آنچه به دست آمد.} مدل پایه سه پرسش را در یک خروجی با هم قاطی می‌کرد. \lr{v2} با سه خروجی جدا به هر کدام جداگانه جواب داد.
 \begin{enumerate}
-\item \textbf{دقت از سینماتیک:} \lr{K} با \lr{VAF} برابر \lr{۷۵٫۸} درصد و \lr{r} برابر \lr{۰٫۸۷۲} در هر ۱۲ شرکت‌کننده از مدل پایه بهتر است و دامنه را در هر سه وزن جسم با خطای کمتر از یک درصد پیش‌بینی می‌کند. بافت ۸ ثانیه‌ای، تاریخچه‌ی بلندکردن‌ها، حوزه‌ی جذر و جزء سطح نگه‌داشتن در هزینه پشت این بهبودند.
-\item \textbf{\lr{EEG} به‌تنهایی:} \lr{E} با \lr{r} برابر \lr{۰٫۶۴۵} در هر ۱۲ نفر از \lr{null test} گذشت؛ \lr{EEG} حالت حرکت را رمز می‌کند.
-\item \textbf{\lr{EEG} فراتر از سینماتیک:} \lr{F} برابر \lr{K} است. \lr{residual test} سیگنالی واقعی اما بسیار کوچک یافت (\lr{r} حدود \lr{۰٫۰۷}، کمتر از نیم واحد \lr{VAF}) که ماژول \lr{fusion} هم همان را یافته بود.
+\item \textbf{سینماتیک چقدر خوب پیش‌بینی می‌کند؟} \lr{K} با \lr{VAF} \lr{۷۵٫۸} درصد و $r$ \lr{۰٫۸۷۲} در هر ۱۲ شرکت‌کننده از مدل پایه بهتر است و دامنه را در هر سه وزن جسم با خطای کمتر از یک درصد پیش‌بینی می‌کند. چهار تغییر پشت این بهبودند: پنجره‌ی ۸ ثانیه‌ای، ویژگی‌های تاریخچه، حوزه‌ی جذر و جزء \lr{lift} در \lr{loss function}.
+\item \textbf{آیا \lr{EEG} به‌تنهایی چیزی از حرکت می‌داند؟} بله. \lr{E} با $r$ \lr{۰٫۶۴۵} در هر ۱۲ نفر از \lr{null test} گذشت. اما آنچه می‌خواند بیشتر مرحله‌ی کلی حرکت است (رسیدن، گرفتن، بلند کردن، استراحت)، نه فرمان خاص هر عضله.
+\item \textbf{آیا \lr{EEG} چیزی بیش از سینماتیک دارد؟} تقریباً نه. \lr{F} با \lr{K} برابر است. \lr{residual test} سیگنالی واقعی ولی بسیار کوچک یافت ($r$ حدود \lr{۰٫۰۷}، کمتر از نیم واحد \lr{VAF})، و \lr{fusion} هم همین را یافته بود.
 \end{enumerate}
 
-\paragraph{تفسیرپذیری.} قاعده‌ی «یک مخلوط‌کننده» و \lr{recorder} بیرونی، \lr{rollout}، جریان، \lr{gradient-weighted rollout} و نمای هر لایه را برای هر خروجی و در همه‌ی لایه‌ها بدون حالت خاص ممکن کرد. سنجش نقشه‌ها نشان داد \lr{gradient-weighted rollout} قابل‌اعتمادترین روش است (بهترین در \lr{deletion check}، کمترین شباهت با مدل به‌هم‌ریخته). \lr{attention flow} در این معماری اشباع می‌شود و فقط در برابر خط پایه‌ی توجه یکنواخت معنا دارد. نقشه‌های الکترود \lr{E} کانونی بالای قشر حرکتی چپ دارند، اما سهم الکترودهای پیشانی و پس‌سری هشدار می‌دهد که بخشی از اطلاعات ممکن است \lr{artifact} باشد.
+\paragraph{تفسیرپذیری.} قاعده‌ی «یک مخلوط‌کننده» و \lr{recorder} بیرونی باعث شدند \lr{rollout}، \lr{attention flow}، \lr{gradient-weighted rollout} و نمای هر لایه برای هر خروجی و در همه‌ی لایه‌ها بدون حالت خاص کار کنند. آزمون‌های روی خودِ روش‌ها نشان دادند \lr{gradient-weighted rollout} قابل‌اعتمادترین است: در \lr{deletion check} بهترین است و کمترین شباهت را با مدل به‌هم‌ریخته دارد. \lr{attention flow} در این معماری به سقف می‌رسد و فقط در مقایسه با خط پایه‌ی توجه یکنواخت معنا دارد.
+
+در سطح گروه، نقشه‌ی الکترود \lr{E} کانون تکرارپذیری روی \lr{C3} و \lr{CP1} دارد، بالای قشر حسی-حرکتی نیمکره‌ی مقابل دست، و باند بتا را ترجیح می‌دهد؛ هر دو با پژوهش‌های پیشین می‌خوانند. نقشه‌ی هر فرد جداگانه پرنویز است. سهم الکترودهای پیشانی و پس‌سری هشدار می‌دهد که بخشی از اطلاعات \lr{E} ممکن است از \lr{artifact} باشد.
 
 \paragraph{محدودیت‌ها.}
 \begin{itemize}
-\item \lr{rollout} و جریان فقط وزن‌های توجه را می‌بینند؛ وزن \lr{۰٫۵} \lr{residual connection} یک قرارداد است. روش‌های گرادیانی موضعی و مرتبه‌ی اول‌اند.
-\item \lr{plain rollout} \lr{K} در \lr{weight-shuffle check} شباهت بالایی دارد (\lr{۰٫۴۷})؛ شکل آن بیشتر از ساختار مدل می‌آید تا از یادگیری.
-\item پنجره‌های رخدادهای نزدیک هم‌پوشانی دارند، پس $p$ مقایسه‌ی رخداد با استراحت تقریبی است.
-\item همه‌ی نتایج برای هر شرکت‌کننده جداگانه است؛ تعمیم به شرکت‌کننده‌ی تازه آزموده نشده است.
-\item پیش‌بینی برون‌خط است: هر \lr{token} از کل پنجره‌ی ۸ ثانیه‌ای، از جمله آینده، استفاده می‌کند.
-\item سقف داده (به‌ویژه برای \lr{FD}) هر بهبود دیگری را محدود می‌کند.
+\item \lr{rollout} و \lr{attention flow} فقط وزن‌های توجه را می‌بینند، و وزن \lr{۰٫۵} \lr{residual connection} یک قرارداد است. روش‌های گرادیانی فقط رفتار مدل را در نزدیکی ورودی فعلی و به‌صورت خطی می‌سنجند.
+\item \lr{plain rollout} \lr{K} برای مدل به‌هم‌ریخته هم شکل مشابهی دارد (همبستگی \lr{۰٫۴۷})؛ پس شکل آن بیشتر از ساختار مدل می‌آید تا از یادگیری.
+\item پنجره‌های رخدادهای نزدیک به هم هم‌پوشانی دارند، پس $p$ مقایسه‌ی رخداد با استراحت تقریبی است.
+\item هر مدل برای یک شرکت‌کننده آموزش دیده است؛ پیش‌بینی برای فرد تازه آزموده نشده است.
+\item پیش‌بینی برون‌خط است: هر \lr{token} از کل پنجره‌ی ۸ ثانیه‌ای، از جمله لحظه‌های بعد از خودش، استفاده می‌کند.
+\item سقف داده (به‌ویژه برای \lr{FD}) هر بهبود بیشتری را محدود می‌کند.
 \end{itemize}
 
-\paragraph{بازتولید.} کد در شاخه‌ی \lr{KG-GT-v2} (بسته‌ی \lr{v2/} و دفترچه‌ی \lr{main\_v2.ipynb}) است. جدول‌ها و شکل‌های این گزارش را اسکریپت \lr{v2-report/build\_assets.py} از نتایج ذخیره‌شده می‌سازد و هیچ مدلی را اجرا نمی‌کند.
+\paragraph{بازتولید.} کد در شاخه‌ی \lr{KG-GT-v2} است (بسته‌ی \lr{v2/} و دفترچه‌ی \lr{main\_v2.ipynb}). جدول‌ها و شکل‌های فصل یکسانی بین شرکت‌کننده‌ها را اسکریپت \lr{v2-report/analysis/consistency.py} از نتایج ذخیره‌شده می‌سازد و هیچ مدلی را اجرا نمی‌کند.
 
 \begin{thebibliography}{99}
 \bibitem{luciw2014} \lr{M. D. Luciw, E. Jarocka, B. B. Edin. Multi-channel EEG recordings during 3,936 grasp and lift trials with varying weight and friction. Scientific Data, 1:140047, 2014.}
@@ -32,4 +35,12 @@
 \bibitem{adebayo2018} \lr{J. Adebayo, J. Gilmer, M. Muelly, I. Goodfellow, M. Hardt, B. Kim. Sanity checks for saliency maps. NeurIPS, 2018.}
 \bibitem{nichols2002} \lr{T. E. Nichols, A. P. Holmes. Nonparametric permutation tests for functional neuroimaging: a primer with examples. Human Brain Mapping, 15(1), 2002.}
 \bibitem{lin1989} \lr{L. I. Lin. A concordance correlation coefficient to evaluate reproducibility. Biometrics, 45(1), 1989.}
+\bibitem{kilner2000} \lr{J. M. Kilner, S. N. Baker, S. Salenius, R. Hari, R. N. Lemon. Human cortical muscle coherence is directly related to specific motor parameters. J. Neurosci., 20(23):8838--8845, 2000.}
+\bibitem{chen2013} \lr{S. Chen, J. Entakli, M. Bonnard, E. Berton, J. B. De Graaf. Functional corticospinal projections from human supplementary motor area revealed by corticomuscular coherence during precise grip force control. PLOS ONE, 8(3):e60291, 2013.}
+\bibitem{cisotto2018} \lr{G. Cisotto, A. V. Guglielmi, L. Badia, A. Zanella. Classification of grasping tasks based on EEG-EMG coherence. IEEE Healthcom, 2018 (arXiv:1809.03300).}
+\bibitem{sburlea2018} \lr{A. I. Sburlea, G. R. M\"uller-Putz. Exploring representations of human grasping in neural, muscle and kinematic signals. Sci. Rep., 8:16669, 2018.}
+\bibitem{pfurtscheller1999} \lr{G. Pfurtscheller, F. H. Lopes da Silva. Event-related EEG/MEG synchronization and desynchronization: basic principles. Clin. Neurophysiol., 110(11):1842--1857, 1999.}
+\bibitem{ushiyama2011} \lr{J. Ushiyama et al. Between-subject variance in the magnitude of corticomuscular coherence during tonic isometric contraction of the tibialis anterior muscle in healthy young adults. J. Neurophysiol., 106(3):1379--1388, 2011.}
+\bibitem{matsuya2017} \lr{R. Matsuya, J. Ushiyama, J. Ushiba. Inhibitory interneuron circuits at cortical and spinal levels are associated with individual differences in corticomuscular coherence during isometric voluntary contraction. Sci. Rep., 7:44417, 2017.}
+\bibitem{pintoneto2026} \lr{O. Pinto Neto. Architecture-data matching for EEG-EMG decoding: compact deep models match classical spectral decoders on the WAY-EEG-GAL grasp-and-lift dataset. Front. Neurosci., 20:1874302, 2026.}
 \end{thebibliography}

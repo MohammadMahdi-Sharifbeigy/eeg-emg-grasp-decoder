@@ -1,0 +1,30 @@
+% Shared preprocessing: raw HS_P*_S*.mat -> 500 Hz cache (both models).
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm, font=\footnotesize, box/.append style={text width=3.9cm}]
+% EEG column
+\node[io, text width=3.9cm] (e0) {EEG, 32 channels, 500 Hz};
+\node[ebox, below=of e0] (e1) {band-pass 0.5--40 Hz\\(FIR, Hamming, zero-phase)};
+\node[ebox, below=of e1] (e2) {notch 50 Hz (FIR)};
+\node[ebox, below=of e2] (e3) {ICA (FastICA, per series)\\remove components that follow Fp1\\(eye-movement proxy, $|z|>2$)};
+\node[ebox, below=of e3] (e4) {second band-pass 0.5--40 Hz};
+\node[ebox, below=of e4] (e5) {robust clip per channel\\$\pm\max(5\,\mathrm{MAD}/0.6745,\ 50)$};
+% EMG column
+\node[io, right=6mm of e0, text width=3.9cm] (m0) {EMG, 5 muscles, 4000 Hz};
+\node[box, below=of m0, fill=intc!8, draw=intc!70!black] (m1) {band-pass 30--300 Hz\\(Butterworth 4, causal)};
+\node[box, below=of m1, fill=intc!8, draw=intc!70!black] (m2) {TKEO $x_t^2-x_{t-1}x_{t+1}$};
+\node[box, below=of m2, fill=intc!8, draw=intc!70!black] (m3) {$|\cdot|$, clip at $5\times$ 99.5th pct., $\sqrt{\cdot}$};
+\node[box, below=of m3, fill=intc!8, draw=intc!70!black] (m4) {low-pass 8 Hz\\(Butterworth 4, causal)};
+\node[box, below=of m4, fill=intc!8, draw=intc!70!black] (m5) {downsample $\times 8$ to 500 Hz\\(causal; total delay $\approx$ 60 ms)};
+% Kinematics column
+\node[io, right=6mm of m0, text width=3.9cm] (k0) {kinematics, 36 columns, 500 Hz};
+\node[kbox, below=of k0] (k1) {13 features: wrist, index, thumb (9),\\grip aperture, $F_L$, $F_G$, $F_G/F_L$};
+\node[kbox, below=of k1] (k2) {hand-near-object gate\\index--object distance 12$\to$20 cm};
+\node[kbox, below=of k2] (k3) {$F_L\leftarrow F_L\cdot\mathrm{gate}$,\ \ $F_G\leftarrow F_G\cdot\mathrm{gate}$};
+\node[kbox, below=of k3] (k4) {velocity of all 13\\(Savitzky--Golay, 51 samples, order 3)};
+\node[kbox, below=of k4] (k5) {26 columns [position 13 | velocity 13]};
+\foreach \c in {e,m,k}{\foreach \i/\j in {0/1,1/2,2/3,3/4,4/5}{\draw[arr] (\c\i)--(\c\j);}}
+\path let \p1=(e5.south), \p2=(m5.south), \p3=(k5.south) in coordinate (low) at ({\x2},{min(\y1,\y2,\y3)-8mm});
+\node[result, anchor=north, text width=12.6cm] (cache) at (low) {cache per series: \texttt{data/cache\_main\_stride500\_square\_pose\_force\_sg51/P\{p\}\_\{split\}\_S\{s\}.npz}\ \ (eeg, kin, emg at 500 Hz, cut to the same length)};
+\draw[arr] (e5)--(e5|-cache.north); \draw[arr] (m5)--(cache); \draw[arr] (k5)--(k5|-cache.north);
+\end{tikzpicture}
+\end{latin}
