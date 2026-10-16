@@ -161,6 +161,7 @@ C3 per-participant E r, condition against `all`.
 | R | none | about 3 min per participant and horizon |
 | S | E + fusion only | 2 subsets x 3 horizons x 12 = 72 runs |
 | E | E + fusion only | 3 horizons x 12 = 36 runs |
+| reference | E + fusion only | `all_frozen`: 3 horizons x 12 = 36 runs (added after review) |
 
 Freezing K roughly halves the time of a horizon run (about 10 to 15 minutes instead of 20 to 30).
 
@@ -168,10 +169,31 @@ Freezing K roughly halves the time of a horizon run (about 10 to 15 minutes inst
 
 1. The level of a lift is the mean envelope in the hold window (lift-off + 0.5 s to replace - 0.2 s), with the
    load window as a second view.
-2. Calibrated E uses one gain per muscle fitted on validation lifts.
+2. Calibrated E uses one gain per muscle fitted on validation lifts (per muscle and window since the review).
 3. `central` excludes FC1 and FC2; `edge` has 15 electrodes against 7 in `central`, so the edge set has more
    channels. This is noted in the results; no extra size-matched set.
 4. K is loaded from the existing horizon checkpoints and frozen in parts S and E.
 5. Eye references are Fp1, Fp2, F7, F8; regression per series.
 6. The per-phase ridge uses the recorded task events to split the phases.
 7. The design lives in `eeg_controls/DESIGN_phase1.md` because `/docs` is ignored by git.
+
+## Changes after review
+
+1. **Reference condition `all_frozen`.** The subsets train only E and the fusion on a loaded, frozen K, while `all`
+   (the horizon runs in `results/v2_horizon`) trained K and E jointly. A difference to `all` therefore mixes the
+   electrodes with the training procedure. `all_frozen` (all 32 electrodes, K loaded and frozen, E + fusion from
+   scratch: the same procedure as the subsets) is the primary reference. `vs_all.csv` has a column `reference`:
+   every subset is compared with `all_frozen` and with `all`, and `all_frozen` with `all` only (the cost of the
+   procedure itself). C1 and C2 show `all_frozen` next to `all`; C3 plots each condition against `all_frozen`.
+   Cost: 4 conditions x 3 horizons x 12 participants = 144 runs (about 24 to 36 hours).
+2. **per_phase is not causal.** The phase labels come from the recorded events at the target time, so a per-phase
+   fit (even its intercept alone) already knows the phase. A per_phase skill is therefore not a causal score and is
+   never read against 0. The feature set `none` (no columns: per phase it predicts the phase's mean residual) is
+   added, and `summary.csv` gives, for per_phase, `gain_vs_none` = skill(features) - skill(none) with its Wilcoxon p.
+   The fair comparisons are `both - events` and `X - none`. Runs saved before `none` existed must be deleted
+   (`eeg_controls/results/phase1/phase_ridge/runs/`) to recompute.
+3. **Robust long loop.** Before the first run every needed K checkpoint must exist and agree with the condition
+   config in the blocks that define K (model, tokens, history, loss); otherwise nothing trains. A failing run is
+   logged to `{results}/failures.log` and the loop continues. After each fit the `kin.*` tensors must equal the
+   loaded ones. `--smoke` appends `_smoke` to a `--results` or `--checkpoints` left at its default.
+4. **Weight check gain per window.** E_cal uses one gain per muscle and window (hold, load) instead of one per muscle.

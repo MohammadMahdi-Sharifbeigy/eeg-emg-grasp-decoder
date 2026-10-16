@@ -74,7 +74,7 @@ for "good for EEG" against "only timing or artifacts"), a RUN cell and a PLOT ce
 |------|--------|----------|---------|--------|
 | W | `eeg_controls/weight_check.py` | does E give light, medium and heavy lifts different levels? | no | `eeg_controls/results/phase1/weight/` |
 | R | `eeg_controls/phase_ridge.py` | does the EEG add anything beyond past task events, and does a ridge per phase help? | no | `eeg_controls/results/phase1/phase_ridge/` |
-| S, E | `eeg_controls/run_conditions.py` | what survives with central electrodes only, edge electrodes only, eyes regressed out? | E and fusion only (K loaded and frozen) | `results/v2_controls/`, `outputs/checkpoints_v2_controls/` |
+| S, E | `eeg_controls/run_conditions.py` | what survives with central electrodes only, edge electrodes only, eyes regressed out (against `all_frozen`)? | E and fusion only (K loaded and frozen) | `results/v2_controls/`, `outputs/checkpoints_v2_controls/` |
 
 Run times on the GTX 1660 Ti:
 
@@ -82,11 +82,10 @@ Run times on the GTX 1660 Ti:
 |------|----------|------|
 | W | none | about 1 min per participant |
 | R | none | about 3 min per participant and horizon |
-| S | E and fusion only | 2 subsets x 3 horizons x 12 participants = 72 runs |
-| E | E and fusion only | 3 horizons x 12 participants = 36 runs |
+| S, E | E and fusion only | 4 conditions (`all_frozen`, `central`, `edge`, `eye_clean`) x 3 horizons x 12 participants = 144 runs |
 
-Freezing K roughly halves a horizon run: about 10 to 15 minutes instead of 20 to 30, so the 108 runs of S and E take about
-18 to 27 hours. Every runner skips finished runs unless `--overwrite`, and `--smoke` (1 epoch, 5 null draws) with outputs in a
+Freezing K roughly halves a horizon run: about 10 to 15 minutes instead of 20 to 30, so the 144 runs of S and E take about
+24 to 36 hours. Every runner skips finished runs unless `--overwrite`, and `--smoke` (1 epoch, 5 null draws) with outputs in a
 scratch folder checks the code.
 
 ### W. Weight check
@@ -96,7 +95,7 @@ env/Scripts/python.exe -m eeg_controls.weight_check --participants all
 ```
 
 Non-causal v2 checkpoints (`outputs/checkpoints_v2`), test series. Per lift with a known weight (CurW 1, 2, 4), the level of
-the target, K, E, F and E_cal (E times one gain per muscle fitted on the validation lifts) in the hold window
+the target, K, E, F and E_cal (E times one gain per muscle and window fitted on the validation lifts) in the hold window
 (lift-off + 0.5 s to replace - 0.2 s) and the load window (first touch to lift-off). Writes `levels.csv`, `stats.csv`
 (per muscle: level per weight, heavy/light ratio, rho with weight, slope, size ratio) and `group.csv` (Wilcoxon over
 participants). Figures W1 to W4.
@@ -107,24 +106,40 @@ participants). Figures W1 to W4.
 env/Scripts/python.exe -m eeg_controls.phase_ridge --participants all --horizons-ms 0,200,500
 ```
 
-Causal horizon checkpoints (`outputs/checkpoints_v2_horizon`). Ridge on the residual of K with `eeg`, `events` (past-event
-bumps, lags 0 to 3 s after each of the 8 task events, only events at or before the token) and `both`, fitted pooled or per
-task phase. Writes `phase_ridge.csv`, `summary.csv` (including skill(both) - skill(events) with its Wilcoxon p) and one file
-per run in `runs/` (reused on the next call). Figures R1 to R3.
+Causal horizon checkpoints (`outputs/checkpoints_v2_horizon`). Ridge on the residual of K with `none` (intercept only),
+`eeg`, `events` (past-event bumps, lags 0 to 3 s after each of the 8 task events, only events at or before the token) and
+`both`, fitted pooled or per task phase. Writes `phase_ridge.csv`, `summary.csv` (including skill(both) - skill(events) with
+its Wilcoxon p, and for per_phase `gain_vs_none` = skill(X) - skill(none) with its p) and one file per run in `runs/`
+(reused on the next call). Figures R1 to R3.
+
+The per_phase skill is not causal: the phase labels come from the events at the target time, so a per-phase fit (even its
+intercept) already knows the phase. Read it only through `both - events` and `X - none`, never against 0.
+Runs computed before the `none` feature set was added are reused from `runs/` and lack it: delete
+`eeg_controls/results/phase1/phase_ridge/runs/` to recompute (the CLI and the notebook warn about such files).
 
 ### S and E. Electrode subsets and eye control
 
 ```
-env/Scripts/python.exe -m eeg_controls.run_conditions --participants all --conditions central,edge,eye_clean --horizons-ms 0,200,500
+env/Scripts/python.exe -m eeg_controls.run_conditions --participants all --conditions all_frozen,central,edge,eye_clean --horizons-ms 0,200,500
 env/Scripts/python.exe -m eeg_controls.run_conditions --summary-only        # table and tests over finished runs
 ```
 
 Flags: `--kin-checkpoints` (default `outputs/checkpoints_v2_horizon`, where K is loaded from), `--checkpoints`
 (`outputs/checkpoints_v2_controls`), `--results` (`results/v2_controls`), `--baseline` (`results/v2_horizon`, the `all` condition),
-`--smoke`, `--overwrite`, `--summary-only`. Conditions: `central` (C3, Cz, C4, CP1, CP2, CP5, CP6), `edge` (Fp1, Fp2, F7, F8,
-T7, T8, TP9, TP10, P7, P8, PO9, PO10, O1, Oz, O2), `eye_clean` (regress on Fp1, Fp2, F7, F8 and drop them). A missing K
-checkpoint stops the run with the expected path. Writes `summary.csv` and `vs_all.csv` (each condition minus `all`, paired
-Wilcoxon over participants). Figures C1 to C3.
+`--smoke`, `--overwrite`, `--summary-only`. Conditions: `all_frozen` (all 32 electrodes, the reference), `central` (C3, Cz,
+C4, CP1, CP2, CP5, CP6), `edge` (Fp1, Fp2, F7, F8, T7, T8, TP9, TP10, P7, P8, PO9, PO10, O1, Oz, O2), `eye_clean` (regress on
+Fp1, Fp2, F7, F8 and drop them). Every condition loads K and keeps it frozen, so `all_frozen` is the fair reference: `all`
+(the joint-trained horizon runs) differs from the subsets also in the training procedure.
+
+Before the first run, every needed K checkpoint is checked (it must exist and agree with the condition config in the
+model, tokens, history and loss blocks); if any is missing or different, all of them are listed and nothing trains. A run
+that fails is logged with its traceback to `{results}/failures.log`, the loop goes on, and the number of failed runs is
+printed at the end. After each fit the `kin.*` tensors are compared with the loaded checkpoint (an error names the first
+that differs). With `--smoke`, a `--results` or `--checkpoints` left at its default gets `_smoke` appended
+(`results/v2_controls_smoke`), and the folders written to are printed.
+
+Writes `summary.csv` and `vs_all.csv` (column `reference`: each subset minus `all_frozen` and minus `all`, `all_frozen`
+minus `all`; paired two-sided Wilcoxon over participants). Figures C1 to C3.
 
 Tests: `tests/test_eeg_controls_phase1_notebook.py` (cells, markers, generator match, module imports) and the tests of each
 module in `tests/`.

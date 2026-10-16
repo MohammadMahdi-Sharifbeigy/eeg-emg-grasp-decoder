@@ -15,7 +15,7 @@ Phase 1 checks the current preprocessing before anything is changed.
 |---|---|---|
 | **W. Weight check** | Does E already give different levels for light, medium and heavy lifts, and is it only too low or flat? | no (about 1 min per participant) |
 | **R. Ridge per phase and timing baseline** | Does the EEG add anything beyond knowing the times of past task events, and does a ridge per task phase help? | no (about 3 min per participant and horizon) |
-| **C. Electrode subsets and eye control** | How much of E and of the EEG gain survives with only central electrodes, only edge electrodes, or the eyes regressed out? | yes (E and fusion only, K loaded and frozen; about 10-15 min per run, 108 runs) |
+| **C. Electrode subsets and eye control** | How much of E and of the EEG gain survives with only central electrodes, only edge electrodes, or the eyes regressed out? | yes (E and fusion only, K loaded and frozen; about 10-15 min per run, 144 runs) |
 
 Every section has a RUN cell (computes and saves tables) and a PLOT cell (reads the saved tables, so it can be re-run alone).
 Tables go to `eeg_controls/results/phase1/`, figures to `eeg_controls/results/phase1/figures/`, the condition runs to
@@ -59,8 +59,8 @@ W_MD = """## W. Weight check: does E give heavy lifts a higher level than light 
 For every test lift with a known weight (CurW 1, 2, 4 = light, medium, heavy), the **level** is the mean envelope of the
 target and of each output (K, E, F) per muscle in two windows: *hold* (lift-off + 0.5 s to replace - 0.2 s, the main window)
 and *load* (first touch to lift-off). The checkpoints are the non-causal v2 models in `outputs/checkpoints_v2`.
-**E_cal** is E multiplied by one gain per muscle, fitted on the validation lifts: it shows how much of the level error a
-single rescaling fixes, and whether a weight difference shows once the size is right.
+**E_cal** is E multiplied by one gain per muscle and window (hold, load), fitted on the validation lifts of that window: it
+shows how much of the level error a single rescaling fixes, and whether a weight difference shows once the size is right.
 
 **What the numbers mean.** `rho_weight` is the Spearman correlation of the lift level with the weight (the target's is the
 reference). `ratio_heavy_light` is the mean level of heavy over light lifts. `slope` is the slope of output level on target
@@ -134,8 +134,10 @@ R_MD = """## R. Ridge per phase and the causal timing baseline
 
 The residual of K (what the kinematics miss) is predicted by a ridge regression on the validation series and scored on the
 test series, at token rate, from the causal horizon checkpoints (`outputs/checkpoints_v2_horizon`, h = 0, 200, 500 ms).
-Three feature sets, all causal (nothing depends on a later token):
+Four feature sets, all causal (nothing depends on a later token):
 
+- **none** (intercept only): no features. Pooled, it predicts the mean residual; per phase, each phase's mean residual.
+  It measures what knowing the phase alone is worth.
 - **eeg**: the EEG tokens of the trained E stream.
 - **events** (the timing baseline): past-event bumps. For each of the 8 task events that has already happened at or before the
   token, Gaussian bumps at lags 0 to +3 s after it. It knows everything a timing model could know at that moment.
@@ -147,13 +149,24 @@ hold, release, other, fitted on the validation tokens of that phase only). Score
 `gain_both_minus_events` = skill(both) - skill(events): what the EEG adds **beyond timing**, with a Wilcoxon test over
 participants.
 
+**The per_phase skill is not a causal score.** The phase labels come from the recorded events at the *target* time, so a
+per-phase fit already knows which phase the target is in, something a causal model does not know at the input token. Even
+`none` gets a positive per_phase skill from that alone. So never read a per_phase skill against 0: the fair comparisons are
+`both - events` (within one fit) and `X - none` (`gain_vs_none` in the summary, per_phase only, with its Wilcoxon p
+`p_gt_none`: what the feature set adds to knowing the phase).
+
+Runs saved before the `none` feature set existed are reused from `eeg_controls/results/phase1/phase_ridge/runs/` and lack it:
+delete that folder to recompute (the RUN cell warns when it finds such a run).
+
 **How to read the figures.**
 
-- **R1** (heat maps phase by horizon, one panel per feature set and fit): look at the `events` panels first. Where they are
-  already warm, timing explains the gain. A *good for EEG* result is `both` clearly warmer than `events` in pre_move and
+- **R1** (heat maps phase by horizon, one panel per feature set and fit; skill relative to MSE(K)): look at the `events`
+  panels first. Where they are already warm, timing explains the gain. In the per-phase row compare with `intercept only`,
+  not with 0. A *good for EEG* result is `both` clearly warmer than `events` in pre_move and
   reach, increasing with the horizon. *Only timing* looks like `eeg`, `events` and `both` all alike.
-- **R2** (skill against horizon for pre_move and reach, lines for eeg, events, both): the gap between `both` and `events` is
-  the EEG gain beyond timing. Lines on top of each other mean the EEG adds nothing the event times do not.
+- **R2** (skill against horizon for pre_move and reach, one colour per feature set, solid pooled, dashed per phase, band =
+  SEM over participants): the gap between `both` and `events` is the EEG gain beyond timing. Lines on top of each other
+  mean the EEG adds nothing the event times do not; overlapping bands mean the gap is within the spread over participants.
 - **R3** (per-participant gain beyond timing, per phase): good is most dots above 0 in pre_move and reach. A cloud around 0 or
   one participant carrying the mean means the result rests on few participants.
 
@@ -171,6 +184,8 @@ for h in R_HORIZONS:
         f = OUT / "phase_ridge" / "runs" / f"h{h}ms_P{p}.csv"       # finished runs are reused
         if f.exists():
             df = pd.read_csv(f)
+            if "none" not in set(df.features):
+                print(f"WARNING: {f} predates the `none` feature set; delete {f.parent} to recompute")
         else:
             t0 = time.time()
             df = PR.run_participant(p, h, R_CKPT, n_null=R_NULL)
@@ -182,7 +197,8 @@ phase_ridge.to_csv(OUT / "phase_ridge" / "phase_ridge.csv", index=False)
 summary = PR.summarise(phase_ridge)
 summary.to_csv(OUT / "phase_ridge" / "summary.csv", index=False)
 k = summary[summary.segment.isin(["pre_move", "reach", "all"]) & (summary.features == "both")]
-print(k[["horizon_ms", "segment", "fit", "n", "gain_both_minus_events", "p_both_gt_events"]].round(4).to_string(index=False))
+print(k[["horizon_ms", "segment", "fit", "n", "gain_both_minus_events", "p_both_gt_events", "gain_vs_none", "p_gt_none"]]
+      .round(4).to_string(index=False))
 """
 
 R_PLOT = """# P1-R-PLOT
@@ -199,18 +215,25 @@ for fit in ("pooled", "per_phase"):
                                         values=["gain_both_minus_events", "p_both_gt_events"])
     print(f"\\nfit: {fit}")
     print(t.round(4).to_string())
+if "gain_vs_none" in summary:
+    vn = summary[(summary.fit == "per_phase") & (summary.features != "none")
+                 & summary.segment.isin(["pre_move", "reach", "all"])]
+    print("\\nper_phase: what each feature set adds to knowing the phase, skill(X) - skill(none), Wilcoxon p (one-sided):")
+    print(vn.pivot_table(index=["horizon_ms", "segment"], columns="features", values=["gain_vs_none", "p_gt_none"])
+          .round(4).to_string())
 sk = summary[summary.segment.isin(["pre_move", "reach"])].pivot_table(index=["horizon_ms", "segment"],
                                                                       columns=["features", "fit"], values="skill_mean")
-print("\\nmean skill per phase, feature set and fit (per_phase against pooled):")
+print("\\nmean skill per phase, feature set and fit (per_phase includes phase knowledge: compare, do not read against 0):")
 print(sk.round(4).to_string())
 print("R1: skill per phase and horizon. R2: the gap between both and events is the gain beyond timing. R3: per participant.")
+print("per_phase skill includes phase knowledge: the fair numbers are both - events and X - none.")
 """
 
 C_MD = """## C. Electrode subsets and eye control: what survives in E and in the EEG gain?
 
-Three conditions, each at h = 0, 200, 500 ms and for every participant, compared with the existing all-electrode horizon runs
-(`all`, from `results/v2_horizon`):
+Four conditions, each at h = 0, 200, 500 ms and for every participant:
 
+- **all_frozen** (all 32 electrodes): the reference, trained exactly like the three below.
 - **central** (7 electrodes: C3, Cz, C4, CP1, CP2, CP5, CP6): the sensorimotor strip.
 - **edge** (15 electrodes: Fp1, Fp2, F7, F8, T7, T8, TP9, TP10, P7, P8, PO9, PO10, O1, Oz, O2): the rim, where eyes, neck and
   muscles show up. It has more channels than central, so a gain of edge over central is not only about size.
@@ -218,36 +241,48 @@ Three conditions, each at h = 0, 200, 500 ms and for every participant, compared
   squares) and the references are dropped, leaving 28 channels. The weights are a fixed spatial filter, so no future value
   enters a token.
 
-**K is loaded from the matching horizon checkpoint and frozen from the first epoch; only E and the fusion train.** So every
-difference to `all` comes from the EEG input alone. Train this cell yourself: it needs the horizon checkpoints in
-`outputs/checkpoints_v2_horizon` and takes about 10-15 min per run (3 conditions x 3 horizons x 12 participants = 108 runs, about
-18-27 h). Finished runs are skipped, an interrupted run resumes. Start with `C_PARTICIPANTS = [1, 2]`.
+**K is loaded from the matching horizon checkpoint and frozen from the first epoch; only E and the fusion train.**
+
+**Why all_frozen is the fair reference.** The existing all-electrode horizon runs (`all`, from `results/v2_horizon`) trained K
+and E together, for as long as K needed. The subsets train only E and the fusion on top of a fixed K, so a difference to `all`
+mixes two things: the electrodes and the training procedure. `all_frozen` uses the same procedure with all 32 electrodes, so
+`central - all_frozen`, `edge - all_frozen` and `eye_clean - all_frozen` come from the EEG input alone. `all_frozen - all`
+shows what the procedure itself changes. `vs_all.csv` has both comparisons (column `reference`).
+
+Train this cell yourself: it needs the horizon checkpoints in `outputs/checkpoints_v2_horizon` and takes about 10-15 min per
+run (4 conditions x 3 horizons x 12 participants = 144 runs, about 24-36 h). Before the first run it checks that every
+needed K checkpoint exists and was trained with the same K settings, and stops before training anything if not (listing every
+missing or mismatched file). A run that fails is written to `results/v2_controls/failures.log` and the loop goes on; the
+cell prints how many failed. Finished runs are skipped, an interrupted run resumes, and after each run K is checked to be
+exactly the loaded one. Start with `C_PARTICIPANTS = [1, 2]`.
 
 **How to read the figures.** Measures: `E_r` (accuracy of E), `F_minus_K_vaf` (what fusion adds to K), `res_r_tokens` (correlation
 of the prediction with the residual of K), `pre_move_*` and `reach_*` r and skill.
 
-- **C1** (E r and F - K per condition and horizon): if `central` keeps E r close to `all` while `edge` falls, E lives in
+- **C1** (E r and F - K per condition and horizon, `all_frozen` next to `all`): first check how far `all_frozen` is from
+  `all` (the cost of the procedure). Then, if `central` keeps E r close to `all_frozen` while `edge` falls, E lives in
   sensorimotor channels. If `edge` keeps most of it, E uses eyes, neck or timing artifacts. A fall of `eye_clean` shows how
   much of E was eye movement.
 - **C2** (per-phase residual r per condition): the EEG gain should survive in `central` and `eye_clean` at pre_move and reach and
   grow with the horizon. If it only survives in `edge`, or disappears with `eye_clean`, treat it as an artifact.
-- **C3** (per participant, condition against `all`): dots on the diagonal mean the condition changes nothing; below it, the
-  condition removes information. A few outliers carrying the mean mean it is not a group result.
+- **C3** (per participant, condition against `all_frozen`; the title names the reference actually used, `all` while no
+  `all_frozen` run has finished): dots on the diagonal mean the condition changes nothing; below it, the condition removes
+  information. A few outliers carrying the mean mean it is not a group result.
 
-The printout lists condition minus `all` per measure with the two-sided paired Wilcoxon p over participants.
+The printout lists condition minus reference per measure with the two-sided paired Wilcoxon p over participants, first
+against `all_frozen` (the fair reference), then against `all`.
 """
 
-C_RUN = """# P1-C-RUN   (TRAINS: about 10-15 min per run, 108 runs for 12 participants; needs outputs/checkpoints_v2_horizon)
+C_RUN = """# P1-C-RUN   (TRAINS: about 10-15 min per run, 144 runs for 12 participants; needs outputs/checkpoints_v2_horizon)
 C_PARTICIPANTS = PARTICIPANTS            # e.g. [1, 2] first
-CONDITIONS = ["central", "edge", "eye_clean"]
+CONDITIONS = ["all_frozen", "central", "edge", "eye_clean"]
 HORIZONS_MS = [0, 200, 500]
 args = SimpleNamespace(results="results/v2_controls", checkpoints="outputs/checkpoints_v2_controls",
                        kin_checkpoints="outputs/checkpoints_v2_horizon", baseline="results/v2_horizon",
                        smoke=False, amp=False, overwrite=False)
-for h in HORIZONS_MS:
-    for name in CONDITIONS:
-        for p in C_PARTICIPANTS:
-            RC.run_one(p, name, h, args, device)
+# checks every K checkpoint first (stops before training if one is missing or has other K settings), then runs all;
+# a failing run is logged to results/v2_controls/failures.log and skipped
+n_failed = RC.run_all(CONDITIONS, HORIZONS_MS, C_PARTICIPANTS, args, device)
 summary = RC.summarise(Path(args.results), Path(args.baseline))
 """
 
@@ -255,18 +290,25 @@ C_PLOT = """# P1-C-PLOT
 C_RESULTS = Path("results/v2_controls")
 C_BASELINE = Path("results/v2_horizon")
 summary = RC.summarise(C_RESULTS, C_BASELINE)
-if summary.empty:
-    print("no finished runs yet: run the P1-C-RUN cell first")
+if summary.empty or set(summary.condition) <= {"all"}:
+    print("no condition runs yet: run the P1-C-RUN cell first")
 else:
     show(PP.conditions_overview(summary), "C1_E_and_fusion_per_condition")
     show(PP.conditions_phases(summary), "C2_per_phase_per_condition")
-    show(PP.conditions_participants(summary), "C3_per_participant_vs_all")
+    show(PP.conditions_participants(summary), "C3_per_participant_vs_all_frozen")
     vs = pd.read_csv(C_RESULTS / "vs_all.csv")
     key = vs[vs.metric.isin(["E_r", "F_minus_K_vaf", "res_r_tokens", "pre_move_skill"])]
-    print("\\ncondition minus all, mean over participants, and two-sided Wilcoxon p:")
-    print(key.pivot_table(index=["condition", "horizon_ms"], columns="metric", values=["mean_diff", "p"], sort=False)
-          .round(4).to_string())
-    print("\\nC1: E r and F - K per condition. C2: per-phase residual r. C3: each participant, condition against all.")
+    for ref in ("all_frozen", "all"):
+        k = key[key.reference == ref]
+        if k.empty:
+            print(f"\\nno condition paired with {ref} yet")
+            continue
+        print(f"\\ncondition minus {ref}, mean over participants, and two-sided Wilcoxon p"
+              + (" (the fair reference: same training procedure):" if ref == "all_frozen" else ":"))
+        print(k.pivot_table(index=["condition", "horizon_ms"], columns="metric", values=["mean_diff", "p"], sort=False)
+              .round(4).to_string())
+    print("\\nC1: E r and F - K per condition, all_frozen next to all. C2: per-phase residual r.",
+          "C3: each participant, condition against all_frozen.")
 """
 
 

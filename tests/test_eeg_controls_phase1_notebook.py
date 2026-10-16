@@ -28,7 +28,9 @@ def test_every_code_cell_parses_and_has_a_marker():
 def test_training_cell_has_the_agreed_settings():
     code = {"".join(c["source"]).split("\n")[0].split()[1]: "".join(c["source"])
             for c in _builder().build()["cells"] if c["cell_type"] == "code"}
-    assert 'CONDITIONS = ["central", "edge", "eye_clean"]' in code["P1-C-RUN"]
+    assert 'CONDITIONS = ["all_frozen", "central", "edge", "eye_clean"]' in code["P1-C-RUN"]
+    assert "RC.run_all(CONDITIONS, HORIZONS_MS, C_PARTICIPANTS" in code["P1-C-RUN"]
+    assert "reference" in code["P1-C-PLOT"]
     assert "HORIZONS_MS = [0, 200, 500]" in code["P1-C-RUN"]
     assert "C_PARTICIPANTS = PARTICIPANTS" in code["P1-C-RUN"]
 
