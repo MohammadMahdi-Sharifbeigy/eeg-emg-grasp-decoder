@@ -68,3 +68,17 @@ def segment_labels(lift_list, n: int, fs: float, offset: int = 0) -> np.ndarray:
             if b > a:
                 lab[a:b] = name
     return lab
+
+
+def wilcoxon_p(x, alternative: str = "greater") -> float:
+    """One-sample Wilcoxon signed-rank p of `x` (e.g. paired differences over participants) against 0.
+
+    Non-finite values and exact zeros are dropped; with fewer than 2 values left the result is nan
+    (a smoke run with one participant must not raise).
+    """
+    from scipy.stats import wilcoxon
+    v = np.asarray(x, dtype=float).ravel()
+    v = v[np.isfinite(v) & (v != 0.0)]
+    if len(v) < 2:
+        return float("nan")
+    return float(wilcoxon(v, alternative=alternative).pvalue)

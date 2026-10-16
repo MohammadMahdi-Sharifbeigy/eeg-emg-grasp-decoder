@@ -93,34 +93,52 @@ def standard(model, sd, cfg, device) -> pd.DataFrame:
                       for o in ("K", "E", "F")], ignore_index=True)
 
 
-def segments(model, sd, cfg, device, p: int, n_null: int, seed: int) -> pd.DataFrame:
-    """Per task phase: does F, or a ridge from EEG tokens to the residual of K, beat K (model domain, token rate)?"""
-    tc, norm = cfg["tokens"], sd["norm"]
+def collect(model, toks, norm, cfg, device, p: int = None) -> dict:
+    """K, F, target (model domain) and EEG tokens of a list of series at the token rate, concatenated.
+
+    With a participant `p`, also the phase label of every token (target time, so shifted by the horizon),
+    and per series the lifts (events in samples at 500 Hz of the series) and the number of tokens.
+    """
+    tc = cfg["tokens"]
     kw = dict(window=tc["window"], hop=tc["hop"], clip=cfg["eeg"]["clip"])
     h = int(tc.get("horizon", 0))
+    k, f, y, x, lab, lift_lists, n_tok = [], [], [], [], [], [], []
+    for t in toks:
+        pt = predict_tokens(model, t, norm, device, **kw)
+        k.append(pt["K"]); f.append(pt["F"])
+        y.append(to_model_domain(np.asarray(t["emg"], np.float32), norm["emg_scale"]))
+        x.append(eeg_features(model, t, norm, device, **kw)["tokens"])
+        if p is not None:
+            n_orig = t["n_samples"] + h * Q
+            lift_list = lifts(p, t["series"], n_orig)
+            lab.append(segment_labels(lift_list, len(t["emg"]), FS_IN / Q, offset=h))
+            lift_lists.append(lift_list); n_tok.append(len(t["emg"]))
+    cat = np.concatenate
+    out = {"K": cat(k), "F": cat(f), "y": cat(y), "x": cat(x)}
+    if p is not None:
+        out.update(labels=cat(lab), lifts=lift_lists, n_tok=n_tok)
+    return out
 
-    def collect(toks, with_labels):
-        k, f, y, x, lab = [], [], [], [], []
-        for t in toks:
-            pt = predict_tokens(model, t, norm, device, **kw)
-            k.append(pt["K"]); f.append(pt["F"])
-            y.append(to_model_domain(np.asarray(t["emg"], np.float32), norm["emg_scale"]))
-            x.append(eeg_features(model, t, norm, device, **kw)["tokens"])
-            if with_labels:
-                n_orig = t["n_samples"] + h * Q
-                lab.append(segment_labels(lifts(p, t["series"], n_orig), len(t["emg"]), FS_IN / Q, offset=h))
-        cat = np.concatenate
-        return cat(k), cat(f), cat(y), cat(x), (cat(lab) if with_labels else None)
 
-    k_v, _, y_v, x_v, _ = collect(sd["tokens"]["val"], False)
-    k_t, f_t, y_t, x_t, lab = collect(sd["tokens"]["test"], True)
+def null_shifts(n: int, window: int, hop: int) -> np.ndarray:
+    """Circular shifts (tokens) for the time-shift null: whole hops, at least one window from either end."""
+    w = max(int(window) // int(hop), 1)
+    return np.arange(w, n // int(hop) - w + 1) * int(hop)
+
+
+def segments(model, sd, cfg, device, p: int, n_null: int, seed: int) -> pd.DataFrame:
+    """Per task phase: does F, or a ridge from EEG tokens to the residual of K, beat K (model domain, token rate)?"""
+    tc = cfg["tokens"]
+    v = collect(model, sd["tokens"]["val"], sd["norm"], cfg, device)
+    te = collect(model, sd["tokens"]["test"], sd["norm"], cfg, device, p)
+    k_v, y_v, x_v = v["K"], v["y"], v["x"]
+    k_t, f_t, y_t, x_t, lab = te["K"], te["F"], te["y"], te["x"], te["labels"]
     ridge, _ = fit_ridge(x_v, y_v - k_v)
     r_pred = _apply(ridge, x_t.astype(np.float64))
     res = y_t - k_t
     mse = lambda pred: ((pred - y_t) ** 2).mean(1)                      # per token, mean over muscles
     e_k, e_f, e_r = mse(k_t), mse(f_t), mse(np.maximum(k_t + r_pred, 0.0))
-    hop = int(tc["hop"])
-    shifts = np.arange(max(tc["window"] // hop, 1), len(res) // hop - max(tc["window"] // hop, 1) + 1) * hop
+    shifts = null_shifts(len(res), tc["window"], tc["hop"])
     rng = np.random.default_rng(seed)
     null_preds = [np.roll(r_pred, int(rng.choice(shifts)), axis=0) for _ in range(n_null)] if len(shifts) else []
     rows = []
