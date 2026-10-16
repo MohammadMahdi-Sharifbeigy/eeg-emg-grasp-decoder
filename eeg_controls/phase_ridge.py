@@ -5,6 +5,8 @@ stream K misses, beyond what the timing of the task alone predicts, and does tha
 
 Residual of K in the model domain at the token rate, fitted on the validation series and scored on the
 test series, as eeg_controls.run_horizon.segments. Feature sets at input token t (all causal):
+  none    no columns (intercept only): the pooled fit predicts the mean residual, the per-phase fit each phase's
+          mean residual, so `none` measures what knowing the phase alone is worth
   eeg     the EEG tokens of the trained E stream
   events  past-event bumps: for each of the 8 task events that has happened at or before t, Gaussian bumps
           at lags 0 .. +3 s after it (step 0.25 s, width 0.25 s); a bump is exactly 0 before its event, so
@@ -14,16 +16,21 @@ Fits:
   pooled     one ridge over all phases
   per_phase  one ridge per task phase (pre_move, reach, load, hold, release, other) on the validation tokens
              of that phase only (a phase with fewer than 10 of them gives a NaN row). Phase labels come from
-             the recorded events at the target time; they are an analysis split, not a model input.
+             the recorded events at the TARGET time, so the per-phase intercept already carries phase knowledge
+             that a causal model would not have at the input token: per_phase skill is NOT a causal score. The
+             fair comparisons are `both - events` (within one fit) and `X - none` (per_phase: what X adds to
+             knowing the phase).
 Scores per phase: r with the residual (mean over muscles), skill = 1 - MSE(K + pred) / MSE(K) (prediction
 applied as max(K + pred, 0)), and a time-shift null (the prediction shifted circularly by whole hops).
 The ridge does not extrapolate: features nearly constant on the fit tokens are dropped and new features are
 clipped to the fit range (see _fit).
 
 Output (default eeg_controls/results/phase1/phase_ridge/): phase_ridge.csv (one row per participant,
-horizon, feature set, fit and phase) and summary.csv (per horizon, phase, feature set and fit: mean skill,
-number of participants with p <= 0.05 and skill > 0, and the Wilcoxon p of skill(both) - skill(events) > 0).
-Each participant and horizon is also kept in runs/ and reused unless --overwrite.
+horizon, feature set, fit and phase) and summary.csv (per horizon, phase, feature set and fit: mean skill and
+its SEM over participants, number of participants with p <= 0.05 and skill > 0, the Wilcoxon p of
+skill(both) - skill(events) > 0, and for per_phase gain_vs_none = skill(features) - skill(none) with its
+Wilcoxon p, paired by participant). Each participant and horizon is also kept in runs/ and reused unless
+--overwrite; runs saved before the `none` feature set existed lack it, so delete runs/ to recompute.
 
 Run from the repository root (no training, about 3 min per participant and horizon):
     env/Scripts/python.exe -m eeg_controls.phase_ridge --participants all --horizons-ms 0,200,500 \
@@ -50,7 +57,7 @@ FS_TOK = FS_IN / Q                                                   # 50 tokens
 LAGS = np.arange(0.0, 3.0 + 1e-9, 0.25)                              # s after the event
 WIDTH = 0.25                                                         # s
 PHASES = tuple(s[0] for s in SEGMENTS) + ("other",)
-FEATURES = ("eeg", "events", "both")
+FEATURES = ("none", "eeg", "events", "both")
 FITS = ("pooled", "per_phase")
 MIN_TOKENS = 10
 MIN_STD = 1e-3                                                       # feature SD below this on the fit tokens: dropped
@@ -161,7 +168,8 @@ def score_model(model, sd, cfg, device, p: int, h_ms: int, n_null: int = 99) -> 
     v = collect(model, sd["tokens"]["val"], sd["norm"], cfg, device, p)
     t = collect(model, sd["tokens"]["test"], sd["norm"], cfg, device, p)
     ev_v, ev_t = _events(v), _events(t)
-    feats = {"eeg": (v["x"], t["x"]), "events": (ev_v, ev_t),
+    feats = {"none": (np.zeros((len(v["x"]), 0)), np.zeros((len(t["x"]), 0))),
+             "eeg": (v["x"], t["x"]), "events": (ev_v, ev_t),
              "both": (np.concatenate([v["x"], ev_v], 1), np.concatenate([t["x"], ev_t], 1))}
     tc, seed = cfg["tokens"], int(cfg["evaluation"]["seed"])
     out = []
@@ -176,10 +184,16 @@ def score_model(model, sd, cfg, device, p: int, h_ms: int, n_null: int = 99) -> 
 
 
 def summarise(df: pd.DataFrame) -> pd.DataFrame:
-    """Per horizon, phase, feature set and fit: mean skill, n significant, Wilcoxon p of both - events > 0."""
+    """Per horizon, phase, feature set and fit: mean skill (+ SEM over participants), n significant, the Wilcoxon p
+    of both - events > 0, and for per_phase gain_vs_none = skill(features) - skill(none) with its Wilcoxon p (> 0).
+
+    per_phase skill includes phase knowledge (labels at the target time), so on its own it is not a causal score;
+    `both - events` and `X - none` are the fair comparisons.
+    """
     keys = ["horizon_ms", "segment", "features", "fit"]
     g = df.groupby(keys, sort=False)
-    out = g.agg(n=("subject", "nunique"), skill_mean=("skill", "mean"), r_mean=("r", "mean")).reset_index()
+    out = g.agg(n=("subject", "nunique"), skill_mean=("skill", "mean"), skill_sem=("skill", "sem"),
+                r_mean=("r", "mean")).reset_index()
     out["n_sig"] = g.apply(lambda d: int(((d.p <= 0.05) & (d.skill > 0)).sum()), include_groups=False).to_numpy()
     wide = df.pivot_table(index=["horizon_ms", "segment", "fit", "subject"], columns="features", values="skill",
                           dropna=False)
@@ -187,6 +201,14 @@ def summarise(df: pd.DataFrame) -> pd.DataFrame:
         gain = (wide["both"] - wide["events"]).groupby(level=["horizon_ms", "segment", "fit"])
         test = pd.DataFrame({"gain_both_minus_events": gain.mean(), "p_both_gt_events": gain.apply(wilcoxon_p)})
         out = out.merge(test.reset_index(), on=["horizon_ms", "segment", "fit"], how="left")
+    if "none" in wide.columns:
+        per = wide.xs("per_phase", level="fit", drop_level=False) if "per_phase" in wide.index.get_level_values("fit")             else wide.iloc[:0]
+        gains = per.sub(per["none"], axis=0).stack(future_stack=True).rename("gain").reset_index()
+        g2 = gains.groupby(["horizon_ms", "segment", "fit", "features"])["gain"]
+        test = pd.DataFrame({"gain_vs_none": g2.mean(), "p_gt_none": g2.apply(wilcoxon_p)}).reset_index()
+        out = out.merge(test, on=["horizon_ms", "segment", "fit", "features"], how="left")
+    else:
+        out = out.assign(gain_vs_none=np.nan, p_gt_none=np.nan)
     return out.sort_values(keys, kind="stable").reset_index(drop=True)
 
 
@@ -207,6 +229,8 @@ def main(argv=None):
             f = out / "runs" / f"h{h}ms_P{p}.csv"
             if f.exists() and not a.overwrite:
                 df = pd.read_csv(f)
+                if "none" not in set(df.features):
+                    print(f"WARNING: {f} predates the `none` feature set; delete {f.parent} (or --overwrite) to recompute")
             else:
                 df = run_participant(p, h, Path(a.checkpoints), n_null=a.n_null)
                 df.to_csv(f, index=False)

@@ -16,13 +16,17 @@ from v2.interp import plots as P
 E_COLOR, K_COLOR, ECAL_COLOR, TARGET_COLOR = "#2a78d6", "#eb6834", "#86b6ef", "#0b0b0b"
 WEIGHT_COLORS = {1: "#b4c7dc", 2: "#5f86b3", 4: "#16365c"}
 WEIGHT_NAMES = {1: "light", 2: "medium", 4: "heavy"}
-FEATURE_COLORS = {"eeg": E_COLOR, "events": "#5f5d57", "both": "#7b4fb5"}
-FEATURE_LABELS = {"eeg": "EEG", "events": "past events", "both": "EEG + past events"}
+FEATURE_COLORS = {"none": "#b9b6ab", "eeg": E_COLOR, "events": "#5f5d57", "both": "#7b4fb5"}
+FEATURE_LABELS = {"none": "intercept only", "eeg": "EEG", "events": "past events", "both": "EEG + past events"}
+PHASE_CAVEAT = ("one fit per phase knows the phase (labels at the target time), so its skill includes phase knowledge: "
+                "compare EEG + events with events, and each set with intercept only, not with 0")
 FIT_STYLES = {"pooled": "-", "per_phase": "--"}
 FIT_LABELS = {"pooled": "one fit for all phases", "per_phase": "one fit per phase"}
 PHASES = ["pre_move", "reach", "load", "hold", "release", "other", "all"]
-CONDITION_COLORS = {"all": "#0b0b0b", "central": "#1baf7a", "edge": "#eda100", "eye_clean": "#7b4fb5"}
-CONDITION_LABELS = {"all": "all 32", "central": "central 7", "edge": "edge 15", "eye_clean": "eye-clean"}
+CONDITION_COLORS = {"all": "#0b0b0b", "all_frozen": "#8a877f", "central": "#1baf7a", "edge": "#eda100",
+                    "eye_clean": "#7b4fb5"}
+CONDITION_LABELS = {"all": "all 32, joint K", "all_frozen": "all 32, K frozen", "central": "central 7",
+                    "edge": "edge 15", "eye_clean": "eye-clean"}
 HORIZON_COLORS = {0: "#9a9890", 200: "#5f86b3", 500: "#16365c"}
 
 
@@ -30,6 +34,23 @@ def _sem(x):
     x = np.asarray(x, float)
     x = x[np.isfinite(x)]
     return x.std(ddof=1) / np.sqrt(len(x)) if len(x) > 1 else 0.0
+
+
+def _finite_top(values, default=1.0):
+    """Largest finite |value|, or `default` when there is none (all NaN) or it is 0."""
+    v = np.abs(np.asarray(values, float))
+    v = v[np.isfinite(v)]
+    top = float(v.max()) if v.size else 0.0
+    return top if top > 0 else default
+
+
+def _note(title, text):
+    """A one-panel figure that only says why there is nothing to plot."""
+    with P.style():
+        fig, ax = plt.subplots(figsize=(7.5, 2.0), layout="constrained")
+        ax.axis("off")
+        ax.text(0.5, 0.5, text, ha="center", va="center", fontsize=9, color=P.MUTED, transform=ax.transAxes)
+    return P._title(fig, title)
 
 
 def _has_participant(df):
@@ -48,7 +69,7 @@ def _weight_legend(fig, weights):
 
 # =============================================================================== part W: weight check
 _W1_STYLE = {"target": ("target (EMG)", TARGET_COLOR, "-", "s"), "E": ("E", E_COLOR, "-", "o"),
-             "E_cal": ("E, one gain per muscle", ECAL_COLOR, "--", "o"), "K": ("K", K_COLOR, "-", "^")}
+             "E_cal": ("E, one gain per muscle and window", ECAL_COLOR, "--", "o"), "K": ("K", K_COLOR, "-", "^")}
 
 
 def weight_levels(stats: pd.DataFrame, window: str = "hold"):
@@ -107,9 +128,11 @@ def weight_scatter(levels: pd.DataFrame, window: str = "hold"):
     return P._title(fig, f"Lift by lift: is the level of E on the line of the target? ({window}, line: identity)")
 
 
-def gain_from_levels(levels: pd.DataFrame) -> dict:
-    """Per-muscle gain that `weight_check.calibrate` applied, read back from a levels frame (E_cal / E)."""
+def gain_from_levels(levels: pd.DataFrame, window: str = "hold") -> dict:
+    """Per-muscle gain that `weight_check.calibrate` applied in `window`, read back from a levels frame (E_cal / E)."""
     d = levels[levels.E.abs() > 0]
+    if "window" in d:
+        d = d[d.window == window]
     return (d.E_cal / d.E).groupby(d.muscle).median().to_dict()
 
 
@@ -155,7 +178,7 @@ def weight_example(example: dict, names=None, start_s=None, length_s: float = 60
             ax.plot(t, E[a:b, c], color=E_COLOR, linewidth=1.1, label="E")
             if E_cal is not None:
                 ax.plot(t, np.asarray(E_cal)[a:b, c], color=ECAL_COLOR, linewidth=1.1, linestyle="--",
-                        label="E, one gain per muscle")
+                        label="E, one gain per muscle (hold)")
             ax.set_ylabel(name, rotation=0, ha="right", va="center")
             ax.tick_params(labelleft=False)
             ax.set_ylim(bottom=0)
@@ -197,7 +220,7 @@ def weight_participants(stats: pd.DataFrame, window: str = "hold"):
             ax.axhline(0, color=P.INK, linewidth=0.8)
             if col == "slope":
                 ax.axhline(1, color=P.MUTED, linewidth=0.8, linestyle=":")
-            ax.set_xticks(range(len(outs)), [_W1_STYLE[o][0].replace(", one gain per muscle", "\n(1 gain)") for o in outs])
+            ax.set_xticks(range(len(outs)), [_W1_STYLE[o][0].replace(", one gain per muscle and window", "\n(1 gain)") for o in outs])
             ax.set_xlim(-0.5, len(outs) - 0.5)
             ax.set_title(lbl, loc="left")
     return P._title(fig, f"Per participant: does E follow the weight? ({window}; big marker: mean +- SEM)")
@@ -210,14 +233,18 @@ def _phases(df, col="segment", drop_all=False):
 
 
 def ridge_heatmaps(summary: pd.DataFrame):
-    """R1: phase x horizon mean skill, one panel per feature set (columns) and fit (rows); x/n significant in each cell."""
+    """R1: phase x horizon mean skill, one panel per feature set (columns) and fit (rows); x/n significant in each cell.
+
+    The per-phase row knows the phase (labels at the target time): read it against `intercept only` (none) and
+    `past events`, not against 0 (PHASE_CAVEAT, printed under the panels).
+    """
     feats = [f for f in FEATURE_COLORS if f in set(summary.features)]
     fits = [f for f in FIT_STYLES if f in set(summary.fit)]
     phases = _phases(summary)
     hs = sorted(summary.horizon_ms.unique())
-    top = float(np.nanmax(np.abs(summary.skill_mean))) or 1.0
+    top = _finite_top(summary.skill_mean)
     with P.style(axes_grid=False):
-        fig, axes = plt.subplots(len(fits), len(feats), figsize=(3.0 * len(feats) + 0.6, 1.0 + 0.45 * len(phases) * len(fits)),
+        fig, axes = plt.subplots(len(fits), len(feats), figsize=(3.0 * len(feats) + 0.6, 1.3 + 0.5 * len(phases) * len(fits)),
                                  sharex=True, sharey=True, layout="constrained", squeeze=False)
         im = None
         for i, fit in enumerate(fits):
@@ -232,19 +259,22 @@ def ridge_heatmaps(summary: pd.DataFrame):
                     for c in range(len(hs)):
                         v = mean.iat[r, c]
                         if np.isfinite(v):
+                            dark = abs(v) / top > 0.55                       # saturated cell: white text
                             ax.text(c, r, f"{v:+.2f}\n{int(nsig.iat[r, c])}/{int(n.iat[r, c])} sig.", ha="center",
-                                    va="center", fontsize=5.5, color=P.INK)
+                                    va="center", fontsize=7, color="white" if dark else P.INK)
                 ax.set_xticks(range(len(hs)), [f"{int(h)}" for h in hs])
                 ax.set_yticks(range(len(phases)), phases)
                 ax.grid(False)
                 ax.set_title(f"{FEATURE_LABELS[f]}, {FIT_LABELS[fit]}", loc="left", fontsize=7.5)
-        fig.supxlabel("forecast horizon (ms)", fontsize=8)
-        fig.colorbar(im, ax=axes, label="skill, 1 - MSE / MSE of the mean", shrink=0.6)
-    return P._title(fig, "Ridge on EEG, past events or both: skill per task phase (red: better than the mean)")
+        fig.supxlabel("forecast horizon (ms)\n" + PHASE_CAVEAT, fontsize=8)
+        fig.colorbar(im, ax=axes, label="skill = 1 - MSE(K + ridge) / MSE(K)", shrink=0.6)
+    return P._title(fig, "Ridge on EEG, past events or both: skill per task phase (red: better than K alone)")
 
 
 def ridge_lines(summary: pd.DataFrame, phases=("pre_move", "reach")):
-    """R2: skill against the horizon in pre_move and reach; one line per feature set, solid pooled, dashed per phase."""
+    """R2: skill against the horizon in pre_move and reach; one line per feature set, solid pooled, dashed per phase,
+    band = SEM over participants (column skill_sem of phase_ridge.summarise, if present). The per-phase lines include
+    phase knowledge (PHASE_CAVEAT): compare them with each other, not with 0."""
     feats = [f for f in FEATURE_COLORS if f in set(summary.features)]
     fits = [f for f in FIT_STYLES if f in set(summary.fit)]
     with P.style():
@@ -255,14 +285,21 @@ def ridge_lines(summary: pd.DataFrame, phases=("pre_move", "reach")):
                 for fit in fits:
                     d = summary[(summary.segment == ph) & (summary.features == f) & (summary.fit == fit)].sort_values("horizon_ms")
                     ax.plot(d.horizon_ms, d.skill_mean, color=FEATURE_COLORS[f], linestyle=FIT_STYLES[fit], marker="o", ms=4)
+                    if "skill_sem" in d:
+                        sem = d.skill_sem.to_numpy(float)
+                        ax.fill_between(d.horizon_ms, d.skill_mean - sem, d.skill_mean + sem, color=FEATURE_COLORS[f],
+                                        alpha=0.12, linewidth=0)
             ax.axhline(0, color=P.INK, linewidth=0.8)
             ax.set_xticks(sorted(summary.horizon_ms.unique()))
             ax.set_xlabel("forecast horizon (ms)")
             ax.set_title(ph, loc="left")
         axes[0].set_ylabel("mean skill over participants")
         handles = [Line2D([], [], color=FEATURE_COLORS[f], label=FEATURE_LABELS[f]) for f in feats]
-        handles += [Line2D([], [], color=P.MUTED, linestyle=FIT_STYLES[f], label=FIT_LABELS[f]) for f in fits]
-        fig.legend(handles=handles, loc="outside lower center", ncol=3, frameon=False)
+        handles += [Line2D([], [], color="black", linestyle=FIT_STYLES[f], label=FIT_LABELS[f]) for f in fits]
+        caption = ("band: SEM over participants. One fit per phase knows the phase (labels at the target time), so its\n"
+                   "skill includes phase knowledge: compare EEG + events with events, and each set with intercept only.")
+        fig.legend(handles=handles, loc="outside lower center", ncol=3, frameon=False, title=caption,
+                   title_fontsize=7)
     return P._title(fig, "Does the EEG add to the past events? Skill against the forecast horizon")
 
 
@@ -294,6 +331,8 @@ def ridge_gain(phase_ridge: pd.DataFrame, fit: str = "per_phase"):
 # =============================================================================== conditions: electrode subsets, eye
 def _condition_lines(summary, panels, title):
     conds = [c for c in CONDITION_COLORS if c in set(summary.condition)]
+    if not conds:
+        return _note(title, "no condition runs yet")
     hs = sorted(summary.horizon_ms.unique())
     with P.style():
         fig, axes = plt.subplots(1, len(panels), figsize=(7.5, 3.2), layout="constrained", squeeze=False)
@@ -314,7 +353,7 @@ def _condition_lines(summary, panels, title):
 
 
 def conditions_overview(summary: pd.DataFrame):
-    """C1: E r and F - K per condition and horizon (mean +- SEM over participants)."""
+    """C1: E r and F - K per condition and horizon (mean +- SEM over participants), all_frozen next to all."""
     return _condition_lines(summary, [("E_r", "E: r with the EMG"), ("F_minus_K_vaf", "F - K (VAF points)")],
                             "Fewer electrodes, or no eye channels: E and the gain of F over K (mean +- SEM)")
 
@@ -326,9 +365,23 @@ def conditions_phases(summary: pd.DataFrame):
                             "Residual r of the EEG in two phases, per electrode condition (mean +- SEM)")
 
 
-def conditions_participants(summary: pd.DataFrame, reference: str = "all", column: str = "E_r"):
-    """C3: E r of each condition against the reference condition, one dot per participant and horizon."""
-    conds = [c for c in CONDITION_COLORS if c in set(summary.condition) and c != reference]
+def conditions_participants(summary: pd.DataFrame, reference: str = "all_frozen", column: str = "E_r"):
+    """C3: E r of each condition against the reference condition, one dot per participant and horizon.
+
+    The default reference is `all_frozen` (all 32 electrodes trained like the subsets, K frozen); `all` is then not
+    drawn. With reference="all" every other condition, all_frozen included, is drawn against the joint-trained runs.
+    If no `all_frozen` run has finished yet, `all` is used instead; the title always names the reference used.
+    Without the reference or any other condition the figure only carries a note.
+    """
+    have = set(summary.condition) if "condition" in summary else set()
+    if reference == "all_frozen" and reference not in have and "all" in have:
+        reference = "all"
+    ref_label = CONDITION_LABELS.get(reference, reference)
+    title = f"E r of each condition against {ref_label} (above the line: the condition is better)"
+    skip = {reference, "all"} if reference == "all_frozen" else {reference}
+    conds = [c for c in CONDITION_COLORS if c in have and c not in skip]
+    if not conds or reference not in have:
+        return _note(title, "no condition runs yet" if not conds else f"no {ref_label} runs yet")
     ref = summary[summary.condition == reference].set_index(["subject", "horizon_ms"])[column]
     hs = sorted(summary.horizon_ms.unique())
     allv = summary[column].to_numpy(float)
@@ -348,11 +401,11 @@ def conditions_participants(summary: pd.DataFrame, reference: str = "all", colum
             ax.set_xlim(lo - pad, hi + pad)
             ax.set_ylim(lo - pad, hi + pad)
             ax.set_aspect("equal")
-            ax.set_xlabel(f"E r, {CONDITION_LABELS.get(reference, reference)}")
+            ax.set_xlabel(f"E r, {ref_label}")
             ax.set_title(CONDITION_LABELS[c], loc="left")
         axes[0].set_ylabel("E r, the condition")
         handles = [Line2D([], [], marker="o", linestyle="", color=HORIZON_COLORS.get(int(h), P.MUTED), label=f"{int(h)} ms")
                    for h in hs]
         fig.legend(handles=handles, loc="outside lower center", ncol=len(hs), frameon=False, title="horizon",
                    title_fontsize=7.5)
-    return P._title(fig, "E r with fewer electrodes against all 32 (above the line: the subset is better)")
+    return P._title(fig, title)

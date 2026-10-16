@@ -106,3 +106,18 @@ def test_group_tests_output():
     assert 0.0 < r.loc[("hold", "rho_E_gt_0"), "p"] < 0.05
     assert r.loc[("hold", "ratio_E_lt_target"), "p"] < 0.05
     assert group_tests(pd.DataFrame(rows[:2])).p.isna().all()          # one participant: nan, no raise
+
+
+def test_calibration_gain_is_per_muscle_and_window():
+    """hold and load get their own gain: E is 1/2 of the target in hold and 1/4 in load."""
+    rows = []
+    for win, f in (("hold", 0.5), ("load", 0.25)):
+        for m in (0, 1):
+            for i, t in enumerate((1.0, 2.0, 3.0)):
+                rows.append(dict(lift=i, weight=1, window=win, muscle=m, target=t * (m + 1), K=0.0,
+                                 E=t * (m + 1) * f, F=0.0))
+    v = pd.DataFrame(rows)
+    out = calibrate(v, v)
+    np.testing.assert_allclose(out.E_cal, out.target)
+    test = v[v.window == "load"].iloc[:1].assign(window="other")     # a window without validation lifts: nan
+    assert np.isnan(calibrate(v, test).E_cal).all()

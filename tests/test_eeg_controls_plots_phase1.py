@@ -158,4 +158,85 @@ def test_conditions_phases():
 
 
 def test_conditions_participants():
-    _check(F.conditions_participants(_conditions()), 3)
+    fig = F.conditions_participants(_conditions())                  # no all_frozen yet: falls back to all, says so
+    assert F.CONDITION_LABELS["all"] in fig._suptitle.get_text()
+    _check(fig, 3)
+
+
+def _ridge_summary_with_none():
+    d = _ridge_summary()
+    none = d[d.features == "eeg"].assign(features="none", skill_mean=0.02)
+    d = pd.concat([none, d], ignore_index=True)
+    return d.assign(skill_sem=0.01)
+
+
+def _all_texts(fig):
+    return [t for a in fig.axes for t in a.texts] + list(fig.texts)
+
+
+def test_ridge_heatmaps_readable_and_labelled():
+    s = _ridge_summary_with_none()
+    s.loc[(s.features == "both") & (s.segment == "reach"), "skill_mean"] = 0.9      # a dark cell
+    fig = F.ridge_heatmaps(s)
+    axes = [a for a in fig.axes if a.get_label() != "<colorbar>"]
+    assert len(axes) == 8
+    cells = [t for a in axes for t in a.texts]
+    assert cells and min(t.get_fontsize() for t in cells) >= 7
+    colours = {matplotlib.colors.to_hex(t.get_color()) for t in cells if t.get_text().startswith("+0.90")}
+    assert colours == {"#ffffff"}
+    cbar = [a for a in fig.axes if a.get_label() == "<colorbar>"]
+    label = cbar[0].get_ylabel() + cbar[0].get_xlabel()
+    assert "MSE(K)" in label and "of the mean" not in label
+    text = " ".join([fig._suptitle.get_text()] + [t.get_text() for t in _all_texts(fig)]
+                    + [a.get_title(loc="left") for a in axes])
+    assert "phase knowledge" in text
+    _check(fig, 8)
+
+
+def test_ridge_heatmaps_all_nan():
+    s = _ridge_summary().assign(skill_mean=np.nan)
+    _check(F.ridge_heatmaps(s), 6)
+
+
+def test_ridge_lines_sem_and_black_fit_legend():
+    fig = F.ridge_lines(_ridge_summary_with_none())
+    leg = fig.legends[0]
+    fit_lines = [h for h, t in zip(leg.legend_handles, leg.get_texts()) if t.get_text() in F.FIT_LABELS.values()]
+    assert fit_lines and all(matplotlib.colors.to_hex(h.get_color()) == "#000000" for h in fit_lines)
+    events = matplotlib.colors.to_hex(F.FEATURE_COLORS["events"])
+    assert all(matplotlib.colors.to_hex(h.get_color()) != events for h in fit_lines)
+    assert all(len(a.collections) > 0 for a in fig.axes)                  # SEM bands
+    text = " ".join([fig._suptitle.get_text(), leg.get_title().get_text()] + [t.get_text() for t in _all_texts(fig)])
+    assert "phase knowledge" in text
+    _check(fig, 2)
+
+
+def test_conditions_overview_shows_all_frozen():
+    fig = F.conditions_overview(_conditions_with_frozen())
+    labels = fig.axes[0].get_legend_handles_labels()[1]
+    assert F.CONDITION_LABELS["all_frozen"] in labels and F.CONDITION_LABELS["all"] in labels
+    _check(fig, 2)
+
+
+def _conditions_with_frozen():
+    d = _conditions()
+    return pd.concat([d, d[d.condition == "all"].assign(condition="all_frozen")], ignore_index=True)
+
+
+def test_conditions_participants_against_all_frozen():
+    fig = F.conditions_participants(_conditions_with_frozen())
+    assert F.CONDITION_LABELS["all_frozen"] in fig._suptitle.get_text()
+    assert "all 32 (" not in fig._suptitle.get_text() or "frozen" in fig._suptitle.get_text()
+    assert fig.axes[0].get_xlabel().endswith(F.CONDITION_LABELS["all_frozen"])
+    _check(fig, 3)
+    fig = F.conditions_participants(_conditions_with_frozen(), reference="all")
+    assert F.CONDITION_LABELS["all"] in fig._suptitle.get_text()
+    _check(fig, 4)                                                   # all_frozen is compared with all too
+
+
+def test_conditions_figures_without_condition_runs():
+    only_all = _conditions()
+    only_all = only_all[only_all.condition == "all"]
+    for fig in (F.conditions_participants(only_all), F.conditions_participants(only_all.iloc[:0])):
+        assert any("no condition runs yet" in t.get_text() for t in _all_texts(fig))
+        _check(fig, 1)

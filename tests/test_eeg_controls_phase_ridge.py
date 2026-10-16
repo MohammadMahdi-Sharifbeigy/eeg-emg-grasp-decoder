@@ -121,3 +121,41 @@ def test_per_phase_fit_does_not_extrapolate():
     df = fit_and_score(xv, rv, lv, xt, rt, lt, kt, yt, fit="per_phase", n_null=5, seed=1).set_index("segment")
     assert df.loc["other", "skill"] > -1.0
     assert df.loc["all", "skill"] > -1.0 and df.loc["reach", "skill_null_mean"] > -1.0
+
+
+def test_none_feature_set_learns_each_phase_mean():
+    """`none` has no columns: per phase it predicts the phase's mean residual (phase knowledge only)."""
+    import eeg_controls.phase_ridge as PRm
+    assert PRm.FEATURES[0] == "none"
+    rng = np.random.default_rng(3)
+    n = 600
+    lab = np.array(["reach"] * 300 + ["hold"] * 300, dtype=object)
+    res = np.where((lab == "reach")[:, None], 0.5, -0.2) + rng.normal(0, 0.05, (n, 2))
+    k = np.full((n, 2), 1.0)
+    y = k + res
+    empty = np.zeros((n, 0))
+    per = fit_and_score(empty, res, lab, empty, res, lab, k, y, fit="per_phase", n_null=3, seed=0,
+                        window=4, hop=2).set_index("segment")
+    pooled = fit_and_score(empty, res, lab, empty, res, lab, k, y, fit="pooled", n_null=3, seed=0,
+                           window=4, hop=2).set_index("segment")
+    assert per.loc["reach", "skill"] > 0.9 and per.loc["hold", "skill"] > 0.9    # the phase mean alone
+    assert pooled.loc["all", "skill"] < per.loc["all", "skill"]
+
+
+def test_summarise_gain_vs_none_for_per_phase():
+    import pandas as pd
+    from eeg_controls.phase_ridge import summarise
+    rows = []
+    for s in range(1, 6):
+        for f, sk in (("none", 0.10), ("eeg", 0.15), ("events", 0.12), ("both", 0.20)):
+            for fit in ("pooled", "per_phase"):
+                rows.append(dict(subject=f"P{s}", horizon_ms=0, features=f, fit=fit, segment="reach",
+                                 n_fit=50, n_test=50, r=0.1, skill=sk + 0.01 * s * (f != "none"),
+                                 skill_null_mean=0.0, p=0.5))
+    out = summarise(pd.DataFrame(rows)).set_index(["fit", "features"])
+    assert out.loc[("per_phase", "eeg"), "gain_vs_none"] == pytest.approx(0.05 + 0.03)
+    assert out.loc[("per_phase", "both"), "gain_vs_none"] == pytest.approx(0.10 + 0.03)
+    assert 0 < out.loc[("per_phase", "both"), "p_gt_none"] < 0.1
+    assert np.isnan(out.loc[("pooled", "both"), "gain_vs_none"])        # only for per_phase
+    assert "skill_sem" in out.columns and out.loc[("per_phase", "eeg"), "skill_sem"] > 0
+    assert out.loc[("per_phase", "both"), "gain_both_minus_events"] == pytest.approx(0.08)

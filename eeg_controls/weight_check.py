@@ -8,8 +8,9 @@ and of the outputs K, E, F (500 Hz, muscle units) is taken in two windows:
   hold  lift_off + 0.5 s to replace - 0.2 s (main window: the object is carried, no onset transient)
   load  first_touch to lift_off (the force builds up)
 A lift whose window events or weight are missing, or whose window is empty, is skipped for that window.
-One least-squares gain per muscle, through the origin, is fitted on the validation lifts and applied to the
-test lifts (E_cal), so that the size of E is taken out and only its dependence on the weight is left.
+One least-squares gain per muscle and window (hold, load), through the origin, is fitted on the validation lifts
+and applied to the test lifts of the same window (E_cal), so that the size of E is taken out and only its
+dependence on the weight is left.
 Per muscle, window and output (target, K, E, E_cal, F) the statistics are: level_w1, level_w2, level_w4 (mean
 level per weight), ratio_heavy_light, rho_weight (Spearman of the lift level with the weight, over lifts),
 slope (of the output level on the target level over lifts) and size_ratio (mean output / mean target).
@@ -20,7 +21,7 @@ Group tests over participants (one-sided Wilcoxon, per window, muscles averaged 
 Output (default eeg_controls/results/phase1/weight/): levels.csv (one row per lift, muscle and window),
 stats.csv, group.csv. No training: it only loads the checkpoint of the non-causal model.
 
-Run from the repository root:
+Run from the repository root (no --smoke: this CLI trains nothing; pass --out to a scratch folder for a check):
     env/Scripts/python.exe -m eeg_controls.weight_check --participants all --checkpoints outputs/checkpoints_v2 \
         --out eeg_controls/results/phase1/weight
 """
@@ -87,13 +88,15 @@ def lift_levels(pred: dict, target: np.ndarray, lift_list, fs: float = 500.0, na
 
 
 def calibrate(levels_val: pd.DataFrame, levels_test: pd.DataFrame) -> pd.DataFrame:
-    """Add E_cal = gain * E to the test levels; gain per muscle = sum(E * target) / sum(E ** 2) on the validation lifts."""
+    """Add E_cal = gain * E to the test levels; one gain per muscle and window = sum(E * target) / sum(E ** 2) on the
+    validation lifts of that muscle and window (nan where the validation has none)."""
     gain = {}
-    for m, d in levels_val.groupby("muscle"):
+    for key, d in levels_val.groupby(["window", "muscle"], sort=False):
         den = float((d.E ** 2).sum())
-        gain[m] = float((d.E * d.target).sum()) / den if den > 0 else np.nan
+        gain[key] = float((d.E * d.target).sum()) / den if den > 0 else np.nan
     out = levels_test.copy()
-    out["E_cal"] = out.E * out.muscle.map(gain).astype(float)
+    g = [gain.get((w, m), np.nan) for w, m in zip(out.window, out.muscle)]
+    out["E_cal"] = out.E.to_numpy(float) * np.asarray(g, float)
     return out
 
 
