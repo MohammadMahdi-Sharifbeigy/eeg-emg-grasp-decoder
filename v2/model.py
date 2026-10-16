@@ -6,13 +6,15 @@ Structure rules, each pinned by a test in tests/test_v2_model.py:
 - Information moves between positions only through v2.attention modules (all recorded, all listed
   by attention_layers()) and the 5-tap stem convolution (fixed footprint: KinStream.stem_matrix).
 - The outputs split exactly: K = K_base * gain and F = relu(K + F_eeg).
+- With cfg["model"]["causal"] = True every output at token t depends on inputs at tokens <= t only
+  (masked attention over time, a left-padded stem, a masked fusion); tests/test_v2_causal.py checks it.
 """
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
 from .attention import Attention, AttentionPool
-from .blocks import GraphEncoder, MuscleHead, TemporalEncoder
+from .blocks import GraphEncoder, MuscleHead, TemporalEncoder, causal_mask
 from .electrodes import electrode_prior as _electrode_prior
 
 
@@ -22,8 +24,10 @@ class KinStream(nn.Module):
     def __init__(self, c, n_kin, n_hist, n_muscles, muscle_prior):
         super().__init__()
         d = c["d_model"]
-        self.stem = nn.Conv1d(n_kin + n_hist, d, kernel_size=5, padding=2)
-        self.enc = TemporalEncoder(d, c["kin_layers"], c["n_heads"], c["ffn_dim"], c["dropout"])
+        self.causal = bool(c.get("causal", False))
+        # causal: the 5 taps cover the token and the 4 before it (left padding only), else 2 before and 2 after
+        self.stem = nn.Conv1d(n_kin + n_hist, d, kernel_size=5, padding=0 if self.causal else 2)
+        self.enc = TemporalEncoder(d, c["kin_layers"], c["n_heads"], c["ffn_dim"], c["dropout"], causal=self.causal)
         self.head = MuscleHead(d, n_muscles, c["node_dim"], c["muscle_gat_layers"], c["n_heads"], muscle_prior,
                                c["muscle_dropout"])
         self.gain = nn.Sequential(nn.Linear(n_hist, 16), nn.GELU(), nn.Linear(16, n_muscles))
@@ -31,7 +35,10 @@ class KinStream(nn.Module):
         nn.init.zeros_(self.gain[-1].bias)
 
     def forward(self, kin, hist):
-        tokens = self.enc(self.stem(torch.cat([kin, hist], dim=-1).transpose(1, 2)).transpose(1, 2))
+        x = torch.cat([kin, hist], dim=-1).transpose(1, 2)
+        if self.causal:
+            x = F.pad(x, (self.stem.kernel_size[0] - 1, 0))
+        tokens = self.enc(self.stem(x).transpose(1, 2))
         base = self.head(tokens)
         gain = torch.pow(2.0, torch.tanh(self.gain(hist)))            # bounded in [0.5, 2], exactly 1 at init
         return base * gain, tokens, base, gain
@@ -39,10 +46,11 @@ class KinStream(nn.Module):
     def stem_matrix(self, t: int) -> torch.Tensor:
         """(t, t), rows sum to 1: share of each input token in each stem token (kernel energy per offset)."""
         w = self.stem.weight.detach().float().cpu().pow(2).sum(dim=(0, 1)).sqrt()      # (kernel,)
-        half = w.numel() // 2
+        half = w.numel() - 1 if self.causal else w.numel() // 2      # tap of the token itself
         m = torch.zeros(t, t)
         for o in range(w.numel()):
-            m += torch.diag(w[o].expand(t - abs(o - half)), o - half)
+            if abs(o - half) < t:
+                m += torch.diag(w[o].expand(t - abs(o - half)), o - half)
         return m / m.sum(-1, keepdim=True)
 
 
@@ -58,7 +66,8 @@ class EEGStream(nn.Module):
         self.graph = GraphEncoder(n_electrodes, de, c["electrode_gat_layers"], c["n_heads"], elec_prior, c["dropout"])
         self.pool = AttentionPool(de)
         self.up = nn.Linear(de, d)
-        self.enc = TemporalEncoder(d, c["eeg_layers"], c["n_heads"], c["ffn_dim"], c["dropout"])
+        self.enc = TemporalEncoder(d, c["eeg_layers"], c["n_heads"], c["ffn_dim"], c["dropout"],
+                                   causal=bool(c.get("causal", False)))
         self.head = MuscleHead(d, n_muscles, c["node_dim"], c["muscle_gat_layers"], c["n_heads"], muscle_prior,
                                c["muscle_dropout"])
 
@@ -76,12 +85,14 @@ class Fusion(nn.Module):
 
     def __init__(self, c, n_muscles):
         super().__init__()
+        self.causal = bool(c.get("causal", False))
         self.cross = Attention(c["d_model"], c["n_heads"], c["dropout"])
         self.out = nn.Linear(c["d_model"], n_muscles)
         self.gate = nn.Parameter(torch.zeros(n_muscles))
 
     def forward(self, kin_tokens, eeg_tokens, k_out):
-        eeg_part = self.gate * self.out(self.cross(kin_tokens.detach(), eeg_tokens))
+        mask = causal_mask(kin_tokens.shape[1], kin_tokens.device) if self.causal else None
+        eeg_part = self.gate * self.out(self.cross(kin_tokens.detach(), eeg_tokens, bias=mask))
         return F.relu(k_out.detach() + eeg_part), eeg_part
 
 
@@ -89,6 +100,7 @@ class KGGTv2(nn.Module):
     def __init__(self, cfg_model, n_kin=24, n_hist=8, n_electrodes=32, n_bands=4, n_muscles=5,
                  muscle_prior=None, electrode_prior=None):
         super().__init__()
+        self.causal = bool(cfg_model.get("causal", False))       # every output at token t uses inputs up to t only
         self.kin = KinStream(cfg_model, n_kin, n_hist, n_muscles, muscle_prior)
         self.eeg = EEGStream(cfg_model, n_electrodes, n_bands, n_muscles, muscle_prior, electrode_prior)
         self.fusion = Fusion(cfg_model, n_muscles)

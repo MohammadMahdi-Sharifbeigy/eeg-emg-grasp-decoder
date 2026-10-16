@@ -56,3 +56,5 @@ wandb/
 
 #Claude
 .claude/
+# EEG control experiments: run outputs (the report keeps copies of the figures)
+/eeg_controls/results/

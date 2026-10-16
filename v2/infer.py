@@ -6,14 +6,26 @@ from .data import from_model_domain, normalise
 from .tokens import to_samples
 
 
-def window_plan(n_tok: int, window: int = 400, hop: int = 200) -> list[tuple[int, int, int]]:
+def window_plan(n_tok: int, window: int = 400, hop: int = 200, causal: bool = False) -> list[tuple[int, int, int]]:
+    """(start, lo, hi) per window: the model runs on [start, start + window) and tokens [lo, hi) are kept.
+
+    Non-causal: the centre of each window is kept, so every kept token has context on both sides.
+    Causal: the END of each window is kept (the first window keeps everything up to its end), so every kept
+    token after the first window sees at least window - hop earlier tokens.
+    """
     if n_tok <= window:
         return [(0, 0, n_tok)]
     starts = list(range(0, n_tok - window + 1, hop))
     if starts[-1] != n_tok - window:
         starts.append(n_tok - window)
-    margin = (window - hop) // 2
     plan, prev_hi = [], 0
+    if causal:
+        for s in starts:
+            hi = s + window
+            plan.append((s, prev_hi, hi))
+            prev_hi = hi
+        return plan
+    margin = (window - hop) // 2
     for i, s in enumerate(starts):
         hi = n_tok if i == len(starts) - 1 else s + window - margin
         plan.append((s, prev_hi, hi))
@@ -43,7 +55,7 @@ def predict_tokens(model, tok, norm, device, window=400, hop=200, use_amp=False,
     n = kin_z.shape[0]
     out = {k: np.zeros((n, 5), dtype=np.float32) for k in ("K", "E", "F")}
     model.eval()
-    for start, lo, hi in window_plan(n, window, hop):
+    for start, lo, hi in window_plan(n, window, hop, causal=getattr(model, "causal", False)):
         sl = slice(start, min(start + window, n))
         with torch.autocast(device.type, enabled=use_amp and device.type == "cuda"):
             res = model(torch.from_numpy(kin_z[sl])[None].to(device), torch.from_numpy(hist_a[sl])[None].to(device),

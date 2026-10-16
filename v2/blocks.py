@@ -35,20 +35,31 @@ class AttentionBlock(nn.Module):
                     raise ValueError(f"prior has shape {tuple(p.shape)}, expected ({n_nodes}, {n_nodes})")
             self.register_buffer("prior", p)
 
-    def forward(self, x):
+    def forward(self, x, mask=None):
+        """mask: optional additive (n, n) logit mask (0 = allowed, -inf = blocked), e.g. causal_mask(t)."""
         bias = None if self.edge is None else self.edge + self.prior_scale * self.prior
+        if mask is not None:
+            bias = mask if bias is None else bias + mask
         x = x + self.drop(self.attn(self.n1(x), bias=bias))
         if self.ffn is not None:
             x = x + self.drop(self.ffn(self.n2(x)))
         return x
 
 
-class TemporalEncoder(nn.Module):
-    """Self-attention over time with sinusoidal positions: (B, T, d) -> (B, T, d)."""
+def causal_mask(t: int, device=None, dtype=torch.float32) -> torch.Tensor:
+    """(t, t) additive attention mask: 0 where the source is not later than the query, -inf above the diagonal."""
+    return torch.full((t, t), float("-inf"), device=device, dtype=dtype).triu(1)
 
-    def __init__(self, d, n_layers, n_heads, ffn_dim, dropout):
+
+class TemporalEncoder(nn.Module):
+    """Self-attention over time with sinusoidal positions: (B, T, d) -> (B, T, d).
+
+    With causal=True every token attends only to itself and earlier tokens.
+    """
+
+    def __init__(self, d, n_layers, n_heads, ffn_dim, dropout, causal=False):
         super().__init__()
-        self.d = d
+        self.d, self.causal = d, bool(causal)
         self.layers = nn.ModuleList([AttentionBlock(d, n_heads, dropout, ffn_dim) for _ in range(n_layers)])
         self.norm = nn.LayerNorm(d)
 
@@ -61,8 +72,9 @@ class TemporalEncoder(nn.Module):
 
     def forward(self, x):
         x = x + self._positions(x.shape[1], x.device, x.dtype)
+        mask = causal_mask(x.shape[1], x.device) if self.causal else None
         for layer in self.layers:
-            x = layer(x)
+            x = layer(x, mask)
         return self.norm(x)
 
 

@@ -23,14 +23,16 @@ def eeg_features(model, tok, norm, device, window=400, hop=200, clip=5.0, smooth
     """EEG features of one series at the token rate.
 
       tokens    (Tk, d_model)  output of the EEG stream's temporal encoder (what the fusion reads), stitched
-                               like v2.infer (centre of each window kept)
-      bandpower (Tk, E * B)    the normalised band power the model gets, mean over `smooth` tokens (1 s)
+                               like v2.infer (centre of each window kept; end of each window for a causal model)
+      bandpower (Tk, E * B)    the normalised band power the model gets, mean over `smooth` tokens (1 s), centred,
+                               or trailing for a causal model
     """
     _, eeg_z = normalise(tok, norm, clip)
     n = eeg_z.shape[0]
     tokens = None
+    causal = getattr(model, "causal", False)
     model.eval()
-    for start, lo, hi in window_plan(n, window, hop):
+    for start, lo, hi in window_plan(n, window, hop, causal=causal):
         x = torch.from_numpy(np.ascontiguousarray(eeg_z[start:min(start + window, n)]))[None].to(device)
         t = model.eeg(x)[1][0].float().cpu().numpy()
         if tokens is None:
@@ -38,7 +40,10 @@ def eeg_features(model, tok, norm, device, window=400, hop=200, clip=5.0, smooth
         tokens[lo:hi] = t[lo - start:hi - start]
     flat = eeg_z.reshape(n, -1).astype(np.float64)
     csum = np.concatenate([np.zeros((1, flat.shape[1])), np.cumsum(flat, axis=0)])
-    a, b = np.clip(np.arange(n) - smooth // 2, 0, n), np.clip(np.arange(n) + (smooth + 1) // 2, 0, n)
+    if causal:                                                     # trailing mean: the past `smooth` tokens only
+        a, b = np.clip(np.arange(n) - smooth + 1, 0, n), np.arange(n) + 1
+    else:
+        a, b = np.clip(np.arange(n) - smooth // 2, 0, n), np.clip(np.arange(n) + (smooth + 1) // 2, 0, n)
     return {"tokens": tokens, "bandpower": ((csum[b] - csum[a]) / (b - a)[:, None]).astype(np.float32)}
 
 

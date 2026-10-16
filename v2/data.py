@@ -35,7 +35,14 @@ def load_split(cache_dir, participant: int, split: str, data_dir=None) -> list[d
 
 
 def build_tokens(raw: dict, cfg: dict) -> dict:
+    """One cached 500 Hz series -> token arrays.
+
+    cfg["tokens"]["causal"] (default False) builds every input from past samples only (v2.causal);
+    cfg["tokens"]["horizon"] (default 0 tokens) pairs the inputs at token t with the target at t + horizon.
+    """
     fs = float(cfg["data"]["fs"])
+    tc = cfg.get("tokens", {})
+    causal, horizon = bool(tc.get("causal", False)), int(tc.get("horizon", 0))
     kin26, eeg, emg = raw["kin"], raw["eeg"], raw["emg"]
     if kin26.shape[1] != 26:
         raise ValueError(f"expected the 26-column cached kinematics, got {kin26.shape[1]} columns")
@@ -44,13 +51,19 @@ def build_tokens(raw: dict, cfg: dict) -> dict:
     h = cfg["history"]
     hist, holds = history_features(kin26[:, _F_L], kin26[:, _F_G], fs, h["force_threshold"], h["min_hold_s"])
     bands = cfg["eeg"]["bands"]
-    bp = eeg_bandpower(eeg, fs, bands=bands, smooth_hz=cfg["eeg"]["smooth_hz"])        # (T, n_bands * C), band-major
+    if causal:
+        from .causal import bandpower_causal, causal_kinematics, to_tokens_causal
+        bp = bandpower_causal(eeg, fs, bands, smooth_hz=cfg["eeg"]["smooth_hz"])
+        kin26, in_tokens = causal_kinematics(kin26, fs), to_tokens_causal
+    else:
+        bp = eeg_bandpower(eeg, fs, bands=bands, smooth_hz=cfg["eeg"]["smooth_hz"])    # (T, n_bands * C), band-major
+        in_tokens = to_tokens
     C = eeg.shape[1]
     grid = np.asarray(bp).reshape(T, len(bands), C).transpose(0, 2, 1)                 # (T, C, n_bands)
-    eeg_tok = to_tokens(grid.reshape(T, -1)).reshape(-1, C, len(bands))
-    return {
+    eeg_tok = in_tokens(grid.reshape(T, -1)).reshape(-1, C, len(bands))
+    tok = {
         "series": raw.get("series"),
-        "kin": to_tokens(np.delete(kin26, _KIN_DROP, axis=1)),
+        "kin": in_tokens(np.delete(kin26, _KIN_DROP, axis=1)),
         "hist": hold_to_tokens(hist).astype(np.float32),
         "eeg": eeg_tok,
         "emg": np.maximum(to_tokens(emg), 0.0),
@@ -58,6 +71,10 @@ def build_tokens(raw: dict, cfg: dict) -> dict:
         "emg_full": np.ascontiguousarray(emg, dtype=np.float32),
         "n_samples": int(T),
     }
+    if horizon:
+        from .causal import shift_horizon
+        tok = shift_horizon(tok, horizon)
+    return tok
 
 
 def fit_norm(train_tokens: list[dict]) -> dict:
