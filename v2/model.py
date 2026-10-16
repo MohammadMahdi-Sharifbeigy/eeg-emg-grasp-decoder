@@ -15,6 +15,7 @@ import torch.nn.functional as F
 
 from .attention import Attention, AttentionPool
 from .blocks import GraphEncoder, MuscleHead, TemporalEncoder, causal_mask
+from .electrodes import channel_names
 from .electrodes import electrode_prior as _electrode_prior
 
 
@@ -126,8 +127,9 @@ class KGGTv2(nn.Module):
 
 def build_model(cfg, muscle_prior=None) -> KGGTv2:
     mp = None if muscle_prior is None else torch.as_tensor(muscle_prior, dtype=torch.float32)
-    return KGGTv2(cfg["model"], n_bands=len(cfg["eeg"]["bands"]), muscle_prior=mp,
-                  electrode_prior=torch.from_numpy(_electrode_prior()))
+    names = channel_names(cfg)
+    return KGGTv2(cfg["model"], n_electrodes=len(names), n_bands=len(cfg["eeg"]["bands"]), muscle_prior=mp,
+                  electrode_prior=torch.from_numpy(_electrode_prior(names)))
 
 
 def count_parameters(model) -> int:

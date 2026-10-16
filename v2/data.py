@@ -34,6 +34,19 @@ def load_split(cache_dir, participant: int, split: str, data_dir=None) -> list[d
     return out
 
 
+def _select_eeg(eeg: np.ndarray, cfg: dict) -> np.ndarray:
+    """Optional eye-channel regression on the raw EEG, then the channel subset (before band power)."""
+    from .electrodes import EEG_NAMES, eye_regress, select_channels
+    names = list(EEG_NAMES)
+    refs = cfg["eeg"].get("eye_regress")
+    if refs:
+        eeg, names = eye_regress(eeg, refs, names)
+    chans = cfg["eeg"].get("channels")
+    if chans is not None:
+        eeg = eeg[:, select_channels(chans, names)]
+    return eeg
+
+
 def build_tokens(raw: dict, cfg: dict) -> dict:
     """One cached 500 Hz series -> token arrays.
 
@@ -48,6 +61,8 @@ def build_tokens(raw: dict, cfg: dict) -> dict:
         raise ValueError(f"expected the 26-column cached kinematics, got {kin26.shape[1]} columns")
     T = min(len(kin26), len(eeg), len(emg))
     kin26, eeg, emg = kin26[:T], eeg[:T], emg[:T]
+    if cfg["eeg"].get("eye_regress") or cfg["eeg"].get("channels") is not None:
+        eeg = _select_eeg(eeg, cfg)
     h = cfg["history"]
     hist, holds = history_features(kin26[:, _F_L], kin26[:, _F_G], fs, h["force_threshold"], h["min_hold_s"])
     bands = cfg["eeg"]["bands"]
