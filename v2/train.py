@@ -68,6 +68,7 @@ def weighted_stream_loss(components, stream, loss_cfg) -> float:
 
 
 IDENTITY_BLOCKS = ("model", "tokens", "eeg", "history", "loss")    # config blocks that define the model and its data
+KIN_LOADED = -1                                                        # frozen_epoch["kin"] of a K loaded frozen (freeze_kin)
 
 
 # ============================================================================
@@ -125,7 +126,8 @@ def _is_training_complete(ck, hist, bad, epoch, total_epochs, patience):
         return True
     frozen = hist.get("frozen_epoch") if isinstance(hist, dict) else None
     if frozen is not None:
-        return bool(frozen["kin"] and frozen["eeg"])                 # a run with freezing ends when both are frozen
+        # a run with freezing ends when both are frozen (non-zero; K loaded frozen by freeze_kin is KIN_LOADED = -1)
+        return frozen["kin"] != 0 and frozen["eeg"] != 0
     if isinstance(bad, dict) and "kin" in bad and "eeg" in bad:
         # Finished only when BOTH streams ran out of patience. The streams share no weights, so a stream that
         # is still improving must keep training after the other one has stopped improving. The stored
@@ -145,6 +147,34 @@ def load_best(model, ckpt_dir, device):
     if "val_combined" not in hist and "val_combined" in ck and ck["val_combined"] is not None:
         hist["val_combined"] = ck["val_combined"]
     return hist
+
+
+def load_kin(model, ckpt_path) -> int:
+    """Copy every `kin.*` tensor of a checkpoint's best state into `model`; returns how many were copied.
+
+    Only the kinematic stream is taken, so the checkpoint may come from a model with other EEG electrodes.
+    Raises FileNotFoundError naming the path if it is missing, ValueError if a `kin.*` tensor is missing or
+    has another shape.
+    """
+    path = Path(ckpt_path)
+    if not path.is_file():
+        raise FileNotFoundError(f"K checkpoint not found: {path}")
+    ck = torch.load(path, map_location="cpu", weights_only=False)
+    st = ck.get("best_state", ck.get("state", ck.get("model_state_dict")))
+    if st is None:
+        raise ValueError(f"{path} holds no model state (no 'best_state', 'state' or 'model_state_dict')")
+    own = model.state_dict()
+    kin = {k: v for k, v in st.items() if stream_of(k) == "kin"}
+    missing = sorted(k for k in own if stream_of(k) == "kin" and k not in kin)
+    extra = sorted(k for k in kin if k not in own)
+    if missing or extra:
+        raise ValueError(f"{path}: kin.* tensors do not match the model (missing {missing[:5]}, unexpected {extra[:5]})")
+    for k, v in kin.items():
+        if v.shape != own[k].shape:
+            raise ValueError(f"{path}: {k} has shape {tuple(v.shape)}, the model expects {tuple(own[k].shape)}")
+    own.update({k: v.to(own[k].device, own[k].dtype) for k, v in kin.items()})
+    model.load_state_dict(own)
+    return len(kin)
 
 
 def _check_config(path, ck, cfg, log):
@@ -450,7 +480,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
                f"(no improvement for {patience} epochs)")
 
     def update_freezes(ep):
-        if not frozen["kin"] and bad["kin"] >= patience:
+        if frozen["kin"] == 0 and bad["kin"] >= patience:          # never for a K loaded frozen: E keeps its patience
             freeze("kin", ep)
             # F is built on K, so the EEG stream and the fusion are judged again from here, against the K that
             # will be saved: their best epoch must have been validated together with that K.
@@ -461,6 +491,16 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             _write(f"  epoch {ep:3d}: E + fusion now train against the frozen K (their patience starts again)")
         if not frozen["eeg"] and bad["eeg"] >= patience:
             freeze("eeg", ep)
+
+    # --- freeze_kin: K was loaded before fit (load_kin) and is never trained; frozen_epoch -1 marks it.
+    #     Its best state is the loaded weights and only E + fusion are judged, so training ends when they freeze.
+    if tc.get("freeze_kin") and start_ep == 0 and not frozen["kin"]:
+        frozen["kin"] = KIN_LOADED
+        hist["best_epoch_kin"] = 0
+        for k, v in model.state_dict().items():
+            if stream_of(k) == "kin":
+                best_state[k] = v.detach().cpu().clone()
+        _write("  K is loaded and frozen: only E + fusion are trained")
 
     for s in ("kin", "eeg"):                                             # a resumed run keeps what was frozen
         if frozen[s]:
@@ -577,7 +617,7 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             # --- best.pt whenever either stream improves; print every 10 saves ---
             if improved_any:
                 # Ensure val_combined is evaluated and included every single time best.pt is saved
-                if hist["best_epoch_kin"] == hist["best_epoch_eeg"]:
+                if hist["best_epoch_kin"] == hist["best_epoch_eeg"] or frozen["kin"] == KIN_LOADED:   # best_state is this epoch's model
                     hist["val_combined"] = {"kin": v_kin, "eeg": v_eeg, "components": comps}
                 else:
                     curr_state = {k: v.detach().clone() for k, v in model.state_dict().items()}
@@ -602,7 +642,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
             _save_metrics(ckpt_dir, hist, elapsed, cfg)
 
             if frozen["kin"] and frozen["eeg"]:
-                _write(f"  early stop: both streams are frozen (K at epoch {frozen['kin']}, E + fusion at epoch {frozen['eeg']})")
+                k_at = "loaded" if frozen["kin"] == KIN_LOADED else f"epoch {frozen['kin']}"
+                _write(f"  early stop: both streams are frozen (K {k_at}, E + fusion at epoch {frozen['eeg']})")
                 break
     finally:
         if _TQDM_AVAILABLE:
@@ -619,6 +660,8 @@ def fit(model, train_ds, val_ds, cfg, device, ckpt_dir, resume=True, log=print):
     a, b = hist["best_epoch_kin"], hist["best_epoch_eeg"]
     note = "" if a == b else (f"  (K from epoch {a}, E and fusion from epoch {b}: the fusion was not validated "
                               f"with this K during training)")
+    if frozen["kin"] == KIN_LOADED:
+        note = "  (K loaded and frozen)"
     log(f"  combined best model: val K {v_kin:.4f}  val E+F {v_eeg:.4f}{note}")
 
     # --- final authoritative best.pt + last.pt + full history with training_complete=True ---
