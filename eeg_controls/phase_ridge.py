@@ -153,6 +153,11 @@ def run_participant(p: int, h_ms: int, ckpt_root: Path, n_null: int = 99) -> pd.
     sd = subject_data(p, cfg)
     model = build_model(cfg, sd["prior"]).to(device)
     load_best(model, Path(ckpt_root) / f"h{int(h_ms)}ms" / f"P{p}", device)
+    return score_model(model, sd, cfg, device, p, h_ms, n_null=n_null)
+
+
+def score_model(model, sd, cfg, device, p: int, h_ms: int, n_null: int = 99) -> pd.DataFrame:
+    """All feature sets and fits for one trained model and its participant data (run_horizon.subject_data)."""
     v = collect(model, sd["tokens"]["val"], sd["norm"], cfg, device, p)
     t = collect(model, sd["tokens"]["test"], sd["norm"], cfg, device, p)
     ev_v, ev_t = _events(v), _events(t)
