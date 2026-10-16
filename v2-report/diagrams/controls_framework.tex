@@ -1,0 +1,43 @@
+% EEG control tests: the framework of the three experiments (A timing baseline, B reference maps, C forecast horizon).
+% Every column has six boxes of the same height, so the rows line up.
+\begin{latin}
+\begin{tikzpicture}[node distance=4mm and 6mm, font=\footnotesize,
+                    cbox/.style={box, text width=4.4cm, minimum height=17mm},
+                    cres/.style={result, text width=4.4cm, minimum height=17mm}]
+\node[io, text width=14.6cm] (data) {WAY-EEG-GAL, 12 participants, the same train / validation / test series as KG-GT v2:\\
+  EEG \quad kinematics and forces \quad EMG envelope (target) \quad task events of every lift};
+
+% column A: task-timing baseline
+\node[cbox, below=9mm of data, xshift=-5.1cm, fill=black!4] (a0) {\textbf{A. Task-timing baseline}\\ no EEG, no kinematics};
+\node[cbox, below=of a0] (a1) {event times of each lift\\ (LED on, hand start, first touch, \dots)};
+\node[cbox, below=of a1] (a2) {Gaussian bumps from $-2$ to $+3$ s around each event:\\ cue, coarse, phase, phase + weight};
+\node[cbox, below=of a2] (a3) {ridge regression per muscle on $u=\sqrt{y/s_c}$, $\alpha$ on validation};
+\node[cbox, below=of a3] (a4) {test series: $r$ and VAF,\\ the same scoring as E and K};
+\node[cres, below=of a4] (a5) {Is E more accurate than knowing the task timing?};
+
+% column B: reference maps
+\node[cbox, below=9mm of data, fill=eegc!8, draw=eegc!70!black] (b0) {\textbf{B. Reference maps}\\ no model involved};
+\node[cbox, below=of b0] (b1) {raw EEG and raw EMG (4000 Hz)\\ around the lift events};
+\node[cbox, below=of b1] (b2) {ERD\% alpha and beta (before first touch, before lift-off, hold);\\ CMC 15--30 Hz in the hold};
+\node[cbox, below=of b2] (b3) {Spearman $\rho$ over 32 electrodes against the rollout maps of E};
+\node[cbox, below=of b3] (b4) {sign-flip over participants;\\ electrode shuffle for group maps};
+\node[cres, below=of b4] (b5) {Does E read the electrodes where the cortex is active?};
+
+% column C: forecast horizon
+\node[cbox, below=9mm of data, xshift=5.1cm, fill=kinc!8, draw=kinc!70!black] (c0) {\textbf{C. Forecast horizon}\\ causal KG-GT v2};
+\node[cbox, below=of c0] (c1) {causal mask, left-padded stem, causal filters: inputs up to $t$};
+\node[cbox, below=of c1] (c2) {target EMG at $t+h$, $h$ = 0, 200, 500, 1000 ms (48 trained models)};
+\node[cbox, below=of c2] (c3) {$F-K$ and the residual test of EEG against K};
+\node[cbox, below=of c3] (c4) {skill per task phase: before movement, reach, load, hold, release};
+\node[cres, below=of c4] (c5) {Does EEG help where kinematics cannot see yet?};
+
+% conclusion
+\node[result, below=9mm of b5, text width=14.6cm, fill=black!4] (out) {What does scalp EEG know about the muscles beyond kinematics:\\
+  \textbf{when} the movement happens, or \textbf{how much} each muscle works?};
+
+\foreach \c in {a,b,c}{
+  \draw[arr] (data.south -| \c0.north) -- (\c0);
+  \draw[arr] (\c0)--(\c1); \draw[arr] (\c1)--(\c2); \draw[arr] (\c2)--(\c3); \draw[arr] (\c3)--(\c4); \draw[arr] (\c4)--(\c5);
+  \draw[arr] (\c5.south) -- (\c5.south |- out.north);}
+\end{tikzpicture}
+\end{latin}
