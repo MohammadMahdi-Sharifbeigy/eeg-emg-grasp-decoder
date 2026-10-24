@@ -140,3 +140,16 @@ def test_completed_run_is_skipped(tmp_path, monkeypatch):
     again = fit_guided(s, t, h, train, val, cfg, DEV, tmp_path, log=_quiet)
     assert again["epochs_run"] == first["epochs_run"]
     load_student(s, tmp_path, DEV)
+
+
+def test_run_dir_seeds_and_legacy_paths(tmp_path):
+    from v3.train import run_dir
+    assert run_dir(tmp_path, 0.1, 2, "P3") == tmp_path / "g0.1" / "s2" / "P3"
+    assert run_dir(tmp_path, 0.1, 0, "P3") == tmp_path / "g0.1" / "s0" / "P3"
+    legacy = tmp_path / "g0.1" / "P3"
+    legacy.mkdir(parents=True)
+    (legacy / "best.pt").write_bytes(b"x")
+    assert run_dir(tmp_path, 0.1, 0, "P3") == legacy                       # an old run is read as seed 0
+    assert run_dir(tmp_path, 0.1, 1, "P3") == tmp_path / "g0.1" / "s1" / "P3"
+    (tmp_path / "g0.1" / "s0" / "P3").mkdir(parents=True)
+    assert run_dir(tmp_path, 0.1, 0, "P3") == tmp_path / "g0.1" / "s0" / "P3"   # a new seed-0 run wins

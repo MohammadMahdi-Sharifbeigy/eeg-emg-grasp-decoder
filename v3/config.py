@@ -16,3 +16,35 @@ CONFIG_V3["guide"] = {
 }
 CONFIG_V3["teacher"] = {"checkpoint_dir": "outputs/checkpoints_v2"}
 CONFIG_V3["outputs"] = {"checkpoint_dir": "outputs/checkpoints_v3", "results_dir": "results/v3"}
+CONFIG_V3["training"]["seeds"] = [0, 1, 2]           # every scale is trained once per seed; tests average the seeds
+CONFIG_V3["evaluation"].update({
+    "n_swap": 10,                                   # cue-aligned trial swaps per run (v3.nulls)
+    "swap_match_condition": False,                  # True: donors only from trials with the same weight and surface
+    "residual_folds": 5,                            # trial groups of the cross-validated ridge in residual_over_timing
+})
+CONFIG_V3["timing"] = {
+    "variants": ["phase", "cue", "cue_causal", "events_causal"],
+    "horizons_ms": [0, 200, 500, 1000],             # the causal variants only; phase and cue read the future
+    "primary": "cue_causal",                        # the timing model of the beyond_timing criterion
+    "cache_dir": "results/v3/timing_preds",
+}
+
+# Artifact controls (configs only): which electrodes and bands carry the student's information?
+CENTRAL = ["C3", "C4", "Cz", "CP1", "CP2", "CP5", "CP6", "FC1", "FC2", "FC5", "FC6"]
+PERIPHERAL = ["Fp1", "Fp2", "T7", "T8", "TP9", "TP10", "O1", "Oz", "O2", "PO9", "PO10"]   # frontal pole, temporal, occipital
+EYE_REFS = ["Fp1", "Fp2", "F7", "F8"]                                                   # as eeg_controls.run_conditions
+PRESETS = {
+    "central": {"channels": CENTRAL},
+    "peripheral": {"channels": PERIPHERAL},
+    "eye_regressed": {"eye_regress": EYE_REFS},
+    "no_gamma": {"bands": [b for b in CONFIG_V2["eeg"]["bands"] if b != [30, 40]]},
+}
+
+
+def preset_config(name: str, base: dict = None) -> dict:
+    """A copy of `base` (default CONFIG_V3) with the eeg block of one artifact-control preset."""
+    if name not in PRESETS:
+        raise ValueError(f"unknown preset {name!r}; choose from {', '.join(PRESETS)}")
+    cfg = copy.deepcopy(CONFIG_V3 if base is None else base)
+    cfg["eeg"].update(copy.deepcopy(PRESETS[name]))
+    return cfg

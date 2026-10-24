@@ -1,8 +1,11 @@
 """Memory and time check of one guided step on RANDOM data. Trains nothing real and saves nothing.
 
 The measured step is the real one: student + frozen random teacher + guide heads, one AdamW, clipped, stepped.
-The guide is measured at full weight (at least scale 0.1), the most expensive case.
+A guided step is measured at full weight (at least scale 0.1), the most expensive case; a control step (scale 0)
+has no teacher. `run_budget` turns both into GPU hours for scales x seeds x participants. Run from the repo root:
+    env/Scripts/python.exe -m v3.smoke --scales 0.0,0.1 --seeds 3 --participants 12
 """
+import argparse
 import copy
 import time
 
@@ -16,9 +19,12 @@ from .model import build_student
 from .teacher import Teacher
 
 
-def _measure(cfg, device, batch, steps, use_amp):
+def _measure(cfg, device, batch, steps, use_amp, guided=True):
     cfg = copy.deepcopy(cfg)
-    cfg["guide"].update(schedule="constant", scale=max(float(cfg["guide"]["scale"]), 0.1))
+    if guided:
+        cfg["guide"].update(schedule="constant", scale=max(float(cfg["guide"]["scale"]), 0.1))
+    else:
+        cfg["guide"].update(schedule="off", scale=0.0)
     w = cfg["tokens"]["window"]
     student, heads = build_student(cfg).to(device).train(), build_heads(cfg).to(device).train()
     teacher = Teacher(cfg["model"], None).to(device).eval()
@@ -36,7 +42,8 @@ def _measure(cfg, device, batch, steps, use_amp):
         b["hold_id"][:, w // 4: w // 2] = 1
         t0 = time.perf_counter()
         with torch.autocast(device.type, enabled=use_amp):
-            loss, _ = guided_loss(student(b["eeg"]), teacher(b["kin"], b["hist"]), b, heads, crit, cfg, epoch=0)
+            loss, _ = guided_loss(student(b["eeg"]), teacher(b["kin"], b["hist"]) if guided else None, b, heads, crit, cfg,
+                                  epoch=0)
         scaler.scale(loss).backward()
         scaler.unscale_(opt)
         torch.nn.utils.clip_grad_norm_(params, cfg["training"]["grad_clip_norm"])
@@ -54,7 +61,7 @@ def _measure(cfg, device, batch, steps, use_amp):
     return peak, min(times[1:] or times), n_params
 
 
-def project_runtime(cfg, device, n_windows=1100, steps=4, mem_fraction=0.8) -> dict:
+def project_runtime(cfg, device, n_windows=1100, steps=4, mem_fraction=0.8, guided=True) -> dict:
     tc = cfg["training"]
     cuda = device.type == "cuda"
     eff = int(tc["batch_size"]) * int(tc["gradient_accumulation_steps"])
@@ -67,7 +74,7 @@ def project_runtime(cfg, device, n_windows=1100, steps=4, mem_fraction=0.8) -> d
                     "sec_per_step": None, "projected_minutes": None, "fits": False}
             candidates.append(cand)
             try:
-                peak, sec, n_params = _measure(cfg, device, batch, steps, use_amp)
+                peak, sec, n_params = _measure(cfg, device, batch, steps, use_amp, guided)
             except torch.OutOfMemoryError:
                 torch.cuda.empty_cache()
                 continue
@@ -81,3 +88,46 @@ def project_runtime(cfg, device, n_windows=1100, steps=4, mem_fraction=0.8) -> d
             "peak_gb": best["peak_gb"], "total_gb": round(total, 2), "sec_per_step": best["sec_per_step"],
             "parameters": n_params, "projected_minutes": best["projected_minutes"], "use_amp": best["use_amp"],
             "candidates": candidates}
+
+
+def run_budget(cfg, device, scales, seeds, n_participants: int, n_windows=1100, steps=4) -> dict:
+    """GPU time of scales x seeds x participants runs, each at the epoch limit (an upper bound: early stopping ends
+    most runs sooner, but a guided `fade` run lasts at least guide.off_at epochs)."""
+    kinds = {}
+    if any(float(s) == 0.0 for s in scales):
+        kinds["control"] = project_runtime(cfg, device, n_windows, steps, guided=False)
+    if any(float(s) > 0.0 for s in scales):
+        kinds["guided"] = project_runtime(cfg, device, n_windows, steps, guided=True)
+    n_seeds = len(seeds) if hasattr(seeds, "__len__") else int(seeds)
+    per_run = {float(s): kinds["control" if float(s) == 0.0 else "guided"]["projected_minutes"] for s in scales}
+    total_min = n_seeds * int(n_participants) * sum(per_run.values())
+    return {"per_run_minutes": per_run, "n_runs": n_seeds * int(n_participants) * len(per_run),
+            "total_gpu_hours": total_min / 60, "settings": kinds, "max_epochs": cfg["training"]["max_epochs"],
+            "min_epochs_guided": cfg["guide"]["off_at"] if cfg["guide"]["schedule"] == "fade" else 0}
+
+
+def main(argv=None):
+    import torch as _torch
+    from .config import CONFIG_V3
+    ap = argparse.ArgumentParser(description="v3 GPU budget on random data (trains nothing real)")
+    ap.add_argument("--scales", default="0.0,0.1")
+    ap.add_argument("--seeds", type=int, default=3)
+    ap.add_argument("--participants", type=int, default=12)
+    ap.add_argument("--device", default="cuda" if _torch.cuda.is_available() else "cpu")
+    a = ap.parse_args(argv)
+    scales = [float(x) for x in a.scales.split(",")]
+    b = run_budget(CONFIG_V3, _torch.device(a.device), scales, a.seeds, a.participants)
+    for kind, st in b["settings"].items():
+        print(f"{kind}: batch {st['batch_size']}, mixed precision {'on' if st['use_amp'] else 'off'}, "
+              f"{st['sec_per_step']:.3f} s per step, peak {st['peak_gb']} GB, {st['parameters']:,} student parameters")
+    for s, m in b["per_run_minutes"].items():
+        print(f"scale {s}: {m:.1f} min per run at {b['max_epochs']} epochs")
+    print(f"{len(scales)} scales x {a.seeds} seeds x {a.participants} participants = {b['n_runs']} runs, "
+          f"at most {b['total_gpu_hours']:.1f} hours on {a.device} (guided runs last at least {b['min_epochs_guided']} epochs)")
+    if a.device == "cpu":
+        print("measured on the CPU: these are CPU hours, not a GPU estimate; run with the GPU free for GPU hours")
+    return b
+
+
+if __name__ == "__main__":
+    main()

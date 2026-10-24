@@ -44,6 +44,18 @@ def evaluate_e_loss(student, loader, crit, device, use_amp) -> float:
     return total / max(n, 1)
 
 
+def run_dir(root, scale: float, seed: int, subject: str) -> Path:
+    """Checkpoint folder of one run: root/g{scale}/s{seed}/{subject}.
+
+    A run saved before seeds existed (root/g{scale}/{subject}) is read as seed 0 when the new folder does not exist.
+    """
+    new = Path(root) / f"g{scale}" / f"s{int(seed)}" / subject
+    old = Path(root) / f"g{scale}" / subject
+    if int(seed) == 0 and not new.exists() and any((old / f).exists() for f in ("best.pt", "last.pt")):
+        return old
+    return new
+
+
 def load_student(student, ckpt_dir, device) -> dict:
     ck = torch.load(Path(ckpt_dir) / "best.pt", map_location=device, weights_only=False)
     student.load_state_dict(ck["state"])
