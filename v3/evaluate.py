@@ -7,6 +7,9 @@ a model that knows only the task event times is the null result, not the goal. T
   survives_swap   the student loses accuracy when its EEG comes from another, cue-aligned trial (v3.nulls), and
                   the guide's gain shows in that loss too
   timing_level    information only: the student's mean r is within a margin of the `phase` timing model
+muscle_specificity asks a narrower question next to beyond_timing: does the student explain what is specific to each
+muscle, once the timing model and the activation shared by all five muscles are removed? (v3.contrast holds rows C and
+F of the paper's table: EEG history over a causal motion + cue model.)
 """
 import numpy as np
 import pandas as pd
@@ -147,6 +150,134 @@ def holm(pvals) -> np.ndarray:
     return out
 
 
+def _student_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cfg, device) -> dict:
+    """E, final tokens x, target y and timing t (model domain, token rate), phase labels and trial ids, concatenated."""
+    tc = cfg["tokens"]
+    kw = dict(window=tc["window"], hop=tc["hop"], use_amp=bool(cfg["training"]["use_amp"]), clip=cfg["eeg"]["clip"])
+    e, x, y, t, lab, trial = [], [], [], [], [], []
+    n_trials = 0
+    for tok, tu, lifts in zip(test_tokens, timing_u, lifts_by_series):
+        out = predict_eeg_outputs(model, tok, norm, device, **kw)
+        n = len(out["E"])
+        if len(tu) != n:
+            raise ValueError(f"timing prediction of series {tok.get('series')} has {len(tu)} tokens, the series {n}")
+        if out["fin"] is None:
+            raise ValueError("the student returns no final tokens ('fin')")
+        e.append(out["E"]); x.append(out["fin"]); t.append(np.asarray(tu, np.float64))
+        y.append(to_model_domain(np.asarray(tok["emg"], np.float32), norm["emg_scale"]).astype(np.float64))
+        lab.append(segment_labels(lifts, n, FS_TOK))
+        ids = np.full(n, n_trials)
+        for k, (a, b, _) in enumerate(trial_bounds(lifts, n)):
+            ids[a:b] = n_trials + k
+        n_trials = int(ids.max()) + 1
+        trial.append(ids)
+    e, x, y, t, lab, trial = (np.concatenate(v) for v in (e, x, y, t, lab, trial))
+    return {"E": e, "x": x, "y": y, "t": t, "labels": lab, "trial": trial, "n_trials": n_trials}
+
+
+def _trial_folds(trial, n_trials: int, folds: int) -> np.ndarray:
+    """Fold of every token: `folds` groups of consecutive trials."""
+    return (np.asarray(trial) * min(int(folds), n_trials)) // max(n_trials, 1)
+
+
+def _cv_ridge(x, target, fold) -> np.ndarray:
+    """Held-out ridge prediction of `target` from `x` (eeg_controls.phase_ridge._fit), one fit per fold."""
+    pred = np.zeros_like(target, dtype=np.float64)
+    for f in np.unique(fold):
+        held = fold == f
+        if (~held).sum() >= MIN_TOKENS:
+            pred[held] = _ridge_fit(x[~held], target[~held])(x[held])
+    return pred
+
+
+SHARED = ("pc1", "mean")
+
+
+def remove_shared(res, shared: str = "pc1"):
+    """The residual with the activation shared by all muscles regressed out of every muscle; and that shared signal.
+
+    shared = "pc1": the score on the first principal component of the (centred) five-muscle residual; "mean": the mean
+    over muscles. Every muscle loses its least-squares projection on the centred shared signal (its own gain), so the
+    output is uncorrelated with the shared signal. The muscle means are kept.
+    """
+    res = np.asarray(res, np.float64)
+    c = res - res.mean(0)
+    if shared == "pc1":
+        s = c @ np.linalg.svd(c, full_matrices=False)[2][0]
+    elif shared == "mean":
+        s = c.mean(1)
+    else:
+        raise ValueError(f"unknown shared component {shared!r}; choose from {SHARED}")
+    beta = (c.T @ s) / max(float(s @ s), 1e-12)
+    return res - s[:, None] * beta[None, :], s
+
+
+def muscle_specificity(model, test_tokens, timing_u, lifts_by_series, norm, cfg, device, names, shared: str = "pc1",
+                       n_null=None, folds=None) -> pd.DataFrame:
+    """Does the student explain muscle-specific activity, beyond the task clock and the activation all muscles share?
+
+    Model domain u at the token rate. The target is y - y_timing (as residual_over_timing) with the shared activation
+    regressed out of every muscle (remove_shared; the shared signal comes from the test residual itself, the student
+    never sees it). A ridge from the student's final tokens predicts the target, cross-validated over trials as
+    residual_over_timing. One row per muscle and a row "MEAN":
+      skill        1 - MSE(ridge) / MSE(fold mean), the baseline being each fold's training mean (intercept only)
+      r            correlation of the ridge prediction with the target
+      p            skill against the prediction shifted in time by whole hops (run_horizon.null_shifts); "MEAN" tests
+                   the mean skill over muscles
+      var_shared   share of the residual variance (summed over muscles) that the shared signal removed
+    """
+    ec, tc = cfg["evaluation"], cfg["tokens"]
+    n_null = int(ec["n_null"] if n_null is None else n_null)
+    folds = int(ec.get("residual_folds", 5) if folds is None else folds)
+    d = _student_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cfg, device)
+    res = d["y"] - d["t"]
+    spec, _ = remove_shared(res, shared)
+    var_shared = float(1.0 - spec.var(0).sum() / max(res.var(0).sum(), 1e-12))
+    fold = _trial_folds(d["trial"], d["n_trials"], folds)
+    pred = _cv_ridge(d["x"], spec, fold)
+    base = np.zeros_like(spec)
+    for f in np.unique(fold):
+        held = fold == f
+        base[held] = spec[~held].mean(0) if (~held).any() else 0.0
+    e_base = ((base - spec) ** 2).mean(0)
+    skill = lambda q: 1.0 - ((q - spec) ** 2).mean(0) / np.maximum(e_base, 1e-12)
+    sk = skill(pred)
+    shifts = null_shifts(len(spec), tc["window"], tc["hop"])
+    rng = np.random.default_rng(ec["seed"])
+    null = np.asarray([skill(np.roll(pred, int(rng.choice(shifts)), axis=0)) for _ in range(n_null)]) \
+        if len(shifts) and n_null else np.zeros((0, spec.shape[1]))
+    p = lambda v, nv: float((1 + (nv >= v).sum()) / (1 + len(nv))) if len(nv) else np.nan
+    r = _r(pred, spec)
+    rows = [{"muscle": m, "skill": float(sk[c]), "r": float(r[c]),
+             "skill_null_mean": float(null[:, c].mean()) if len(null) else np.nan, "p": p(sk[c], null[:, c])}
+            for c, m in enumerate(names)]
+    rows.append({"muscle": "MEAN", "skill": float(sk.mean()), "r": float(np.mean(r)),
+                 "skill_null_mean": float(null.mean()) if len(null) else np.nan, "p": p(sk.mean(), null.mean(1))})
+    return pd.DataFrame(rows).assign(shared=shared, var_shared=var_shared, n_test=len(spec), n_trials=d["n_trials"])
+
+
+def muscle_group_test(df: pd.DataFrame, control_scale: float = 0.0) -> pd.DataFrame:
+    """Per shared component, scale and muscle over participants (mean over seeds first): skill > 0 (Wilcoxon), and
+    skill above the control's. p_holm_muscles corrects p_skill over the muscles (not "MEAN") of one component and scale."""
+    keys = ["shared", "scale", "muscle"]
+    per = df.groupby(keys + ["subject"], as_index=False)[["skill", "r", "var_shared"]].mean()
+    rows = []
+    for (shared, scale, muscle), d in per.groupby(keys):
+        d = d.set_index("subject")
+        c = per[(per.shared == shared) & (per.muscle == muscle) & (per.scale == control_scale)].set_index("subject").skill
+        gain = (d.skill - c.reindex(d.index)).dropna() if scale != control_scale else pd.Series(dtype=float)
+        rows.append({"shared": shared, "scale": scale, "muscle": muscle, "n_subjects": len(d),
+                     "mean_skill": d.skill.mean(), "sem_skill": d.skill.sem(), "mean_r": d.r.mean(),
+                     "mean_var_shared": d.var_shared.mean(), "p_skill": wilcoxon_p(d.skill.values),
+                     "mean_skill_gain": gain.mean() if len(gain) else np.nan,
+                     "p_skill_gain": wilcoxon_p(gain.values) if len(gain) else np.nan})
+    out = pd.DataFrame(rows)
+    out["p_holm_muscles"] = np.nan
+    for _, idx in out[out.muscle != "MEAN"].groupby(["shared", "scale"]).groups.items():
+        out.loc[idx, "p_holm_muscles"] = holm(out.loc[idx, "p_skill"])
+    return out
+
+
 def residual_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cfg, device, names,
                          n_null=None, folds=None) -> pd.DataFrame:
     """How much of the residual of a timing model (y - y_timing) does the student explain? One row per task phase.
@@ -165,30 +296,11 @@ def residual_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cf
     ec, tc = cfg["evaluation"], cfg["tokens"]
     n_null = int(ec["n_null"] if n_null is None else n_null)
     folds = int(ec.get("residual_folds", 5) if folds is None else folds)
-    kw = dict(window=tc["window"], hop=tc["hop"], use_amp=bool(cfg["training"]["use_amp"]), clip=cfg["eeg"]["clip"])
-    e, x, y, t, lab, trial = [], [], [], [], [], []
-    n_trials = 0
-    for tok, tu, lifts in zip(test_tokens, timing_u, lifts_by_series):
-        out = predict_eeg_outputs(model, tok, norm, device, **kw)
-        n = len(out["E"])
-        if len(tu) != n:
-            raise ValueError(f"timing prediction of series {tok.get('series')} has {len(tu)} tokens, the series {n}")
-        e.append(out["E"]); x.append(out["fin"]); t.append(np.asarray(tu, np.float64))
-        y.append(to_model_domain(np.asarray(tok["emg"], np.float32), norm["emg_scale"]).astype(np.float64))
-        lab.append(segment_labels(lifts, n, FS_TOK))
-        ids = np.full(n, n_trials)
-        for k, (a, b, _) in enumerate(trial_bounds(lifts, n)):
-            ids[a:b] = n_trials + k
-        n_trials = int(ids.max()) + 1
-        trial.append(ids)
-    e, x, y, t, lab, trial = (np.concatenate(v) for v in (e, x, y, t, lab, trial))
+    d = _student_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cfg, device)
+    e, x, y, t, lab, n_trials = d["E"], d["x"], d["y"], d["t"], d["labels"], d["n_trials"]
     res = y - t
-    fold = (trial * min(folds, n_trials)) // max(n_trials, 1)
-    pred = np.zeros_like(res)
-    for f in np.unique(fold):
-        held = fold == f
-        if (~held).sum() >= MIN_TOKENS:
-            pred[held] = _ridge_fit(x[~held], res[~held])(x[held])
+    fold = _trial_folds(d["trial"], n_trials, folds)
+    pred = _cv_ridge(x, res, fold)
     mse = lambda q: ((np.maximum(t + q, 0.0) - y) ** 2).mean(1)
     e_t, e_p = ((t - y) ** 2).mean(1), mse(pred)
     shifts = null_shifts(len(res), tc["window"], tc["hop"])

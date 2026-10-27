@@ -28,6 +28,13 @@ CONFIG_V3["timing"] = {
     "primary": "cue_causal",                        # the timing model of the beyond_timing criterion
     "cache_dir": "results/v3/timing_preds",
 }
+CONFIG_V3["contrast"] = {                           # rows C and F of the paper's table (v3.contrast); no training
+    "checkpoint_dir": "outputs/checkpoints_v2_horizon",   # the causal v2 horizon models, h{h}ms/P{p}, read only
+    "horizons_ms": [0, 200, 500, 1000],
+    "sources": ["eeg", "swap", "bandpower", "peripheral"],
+    "results_dir": "results/v3/contrast",
+}
+CONFIG_V3["muscle"] = {"shared": ["pc1", "mean"]}    # v3.evaluate.muscle_specificity: the shared activation removed
 
 # Artifact controls (configs only): which electrodes and bands carry the student's information?
 CENTRAL = ["C3", "C4", "Cz", "CP1", "CP2", "CP5", "CP6", "FC1", "FC2", "FC5", "FC6"]

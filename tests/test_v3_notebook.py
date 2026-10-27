@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKERS = ["# V3-SETUP", "# V3-CONFIG", "# V3-BUDGET", "# V3-DATA", "# V3-TIMING", "# V3-TRAIN", "# V3-EVAL", "# V3-SWAP",
-           "# V3-RESIDUAL", "# V3-VERDICT"]
+           "# V3-RESIDUAL", "# V3-MUSCLE", "# V3-VERDICT", "# V3-CONTRAST"]
 
 
 def _builder():
@@ -75,6 +75,9 @@ def test_new_cells_write_their_tables():
         "# V3-VERDICT": ("subject_means", "criteria(", "beats_control", "beyond_timing", "survives_swap", "timing_level",
                          "verdict.csv", "swap_and_residual.png", "seed SD"),
         "# V3-BUDGET": ("run_budget", "GPU hours"),
+        "# V3-MUSCLE": ("muscle_specificity", "muscle_group_test", "muscle_specificity.csv", 'CONFIG["muscle"]["shared"]'),
+        "# V3-CONTRAST": ("contrast_participant", "contrast_group_test", "contrast.csv", "contrast_tests.csv",
+                          'CONFIG["contrast"]', "swap control", "contrast.png"),
     }.items():
         cell = _cell(marker)
         for n in needles:
