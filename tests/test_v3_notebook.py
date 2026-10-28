@@ -5,7 +5,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 MARKERS = ["# V3-SETUP", "# V3-CONFIG", "# V3-BUDGET", "# V3-DATA", "# V3-TIMING", "# V3-TRAIN", "# V3-EVAL", "# V3-SWAP",
-           "# V3-RESIDUAL", "# V3-MUSCLE", "# V3-VERDICT", "# V3-CONTRAST"]
+           "# V3-RESIDUAL", "# V3-TEMPLATES", "# V3-VERDICT", "# V3-B-VS-F"]
 
 
 def _builder():
@@ -75,9 +75,10 @@ def test_new_cells_write_their_tables():
         "# V3-VERDICT": ("subject_means", "criteria(", "beats_control", "beyond_timing", "survives_swap", "timing_level",
                          "verdict.csv", "swap_and_residual.png", "seed SD"),
         "# V3-BUDGET": ("run_budget", "GPU hours"),
-        "# V3-MUSCLE": ("muscle_specificity", "muscle_group_test", "muscle_specificity.csv", 'CONFIG["muscle"]["shared"]'),
-        "# V3-CONTRAST": ("contrast_participant", "contrast_group_test", "contrast.csv", "contrast_tests.csv",
-                          'CONFIG["contrast"]', "swap control", "contrast.png"),
+        "# V3-TEMPLATES": ("fit_emg_templates", 'sd["tokens"]["train"]', "student_template_deviation",
+                           "summarise_template_deviation", "template_deviation.csv", 'CONFIG["templates"]'),
+        "# V3-B-VS-F": ("run_b_vs_f", "summarise_b_vs_f", "b_vs_f.csv", "b_vs_f_summary.csv", 'CONFIG["b_vs_f"]',
+                        "eeg_skill", "causal_cue", "swap control", "b_vs_f.png"),
     }.items():
         cell = _cell(marker)
         for n in needles:

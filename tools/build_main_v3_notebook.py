@@ -35,11 +35,11 @@ The verdict per scale: (a) the guide helps and the gain is beyond timing; (b) it
 (d) worse. `phase` and `cue` read the event times from the whole recording, so they are a ceiling; `cue_causal` and
 `events_causal` use past events only.
 
-Two more tables. `V3-MUSCLE`: does the student explain what is specific to each muscle, once the timing model and the
-activation shared by all five muscles are removed? `V3-CONTRAST` (rows C and F of the paper's table, no training): C is the
-causal kinematic stream K of the v2 horizon models (past hand kinematics and force) plus past task cues, F is C plus EEG
-history; delta = skill(F) - skill(C) per participant, phase and horizon (0, 200, 500, 1000 ms), with the cue-aligned
-trial swap and the peripheral channels as negative controls.
+Two more tables. `V3-TEMPLATES`: does the student predict how each test trial deviates from the event-locked average EMG
+(a template fitted on the training series only), per muscle and phase? `V3-B-VS-F` (critical experiment II, no training):
+`B` is the causal kinematic stream `K` of the v2 horizon models (past hand kinematics and force) plus past task events, `F`
+is `B` plus EEG history; `eeg_skill = 1 - MSE(F) / MSE(B)` per participant, phase and horizon (0, 200, 500, 1000 ms), next to
+`K` and `causal_cue` (past LED onsets only), with the cue-aligned trial swap and the peripheral channels as negative controls.
 
 **Run order** (cheap parts first): run every cell with `STAGE = "control"` (timing models, then scale 0 with the first seed for
 all participants, then the swap and residual cells on it). Check the swap and residual tables, then set `STAGE = "all"` and
@@ -60,10 +60,9 @@ from main.dataloader import emg_channel_names, describe_split
 from main.preprocessing_emg_kin import compute_muscle_edge_prior
 from v2 import data as D
 from v3.config import CONFIG_V3, preset_config
-from v3.contrast import contrast_group_test
-from v3.contrast import run_participant as contrast_participant
-from v3.evaluate import (criteria, evaluate_student, muscle_group_test, muscle_specificity, residual_group_test,
-                         residual_over_timing, subject_means)
+from v3.contrast import run_b_vs_f, summarise_b_vs_f
+from v3.evaluate import criteria, evaluate_student, residual_group_test, residual_over_timing, subject_means
+from v3.templates import fit_emg_templates, student_template_deviation, summarise_template_deviation
 from v3.guide import build_heads
 from v3.model import build_student
 from v3.nulls import evaluate_swap, swap_group_test
@@ -237,27 +236,30 @@ if not CONFIG["model"].get("causal", False):
           "For the strictest comparison train the student with model.causal and tokens.causal set to True.")
 """
 
-MUSCLE = """# V3-MUSCLE
-# Muscle specificity: the residual of the primary timing model with the activation shared by all five muscles regressed out
-# (its first principal component, or the muscle mean). Does a ridge from the student's tokens predict what is left, per
-# muscle? Cross-validated over trials, time-shift null; the group test is Holm-corrected over the five muscles.
-mus_parts, primary = [], CONFIG["timing"]["primary"]
+TEMPLATES = """# V3-TEMPLATES
+# Template deviation test (v3.templates): per participant, an event-locked average envelope per muscle is fitted on the
+# TRAINING series (event-warped time between consecutive task events). On the test trials, does a ridge from the student's
+# tokens predict y - template? Cross-validated over trials, time-shift null, per muscle and phase. Controls: the student on
+# cue-aligned swapped EEG (same weight and surface), trailing band power of all channels and of the peripheral channels.
+tcfg_t = CONFIG["templates"]
+templates = {subj: fit_emg_templates(sd["tokens"]["train"], sd["lifts"]["train"], sd["norm"], tcfg_t["n_bins"],
+                                     tcfg_t["post_s"], tcfg_t["post_bin_s"]) for subj, sd in subject_data.items()}
+tpl_parts = []
 for (subj, scale, seed), run in runs.items():
     sd = subject_data[subj]
-    fitted = timing[(subj, primary, 0)]
-    for shared in CONFIG["muscle"]["shared"]:
-        df = muscle_specificity(run["student"], sd["tokens"]["test"], [t["u"] for t in fitted["test"]], sd["lifts"]["test"],
-                                sd["norm"], run["cfg"], device, sd["names"], shared=shared)
-        mus_parts.append(df.assign(subject=subj, scale=scale, seed=seed, timing=primary))
-muscle_all = pd.concat(mus_parts, ignore_index=True)
-muscle_all.to_csv(RESULTS / "muscle_specificity.csv", index=False)
-muscle_tests = muscle_group_test(muscle_all)
-muscle_tests.to_csv(RESULTS / "muscle_tests.csv", index=False)
-print("mean skill over participants (rows: shared component and scale):")
-print(muscle_tests.pivot_table(index=["shared", "scale"], columns="muscle", values="mean_skill").round(4).to_string())
-print("Holm p over the five muscles:")
-print(muscle_tests.pivot_table(index=["shared", "scale"], columns="muscle", values="p_holm_muscles").round(3).to_string())
-print("share of the timing residual that the shared activation removed:", round(float(muscle_all.var_shared.mean()), 3))
+    df = student_template_deviation(run["student"], sd["tokens"]["test"], sd["lifts"]["test"], templates[subj], sd["norm"],
+                                    run["cfg"], device, sd["names"], sources=tcfg_t["sources"])
+    tpl_parts.append(df.assign(subject=subj, scale=scale, seed=seed))
+template_all = pd.concat(tpl_parts, ignore_index=True)
+template_all.to_csv(RESULTS / "template_deviation.csv", index=False)
+template_tests = summarise_template_deviation(template_all)
+template_tests.to_csv(RESULTS / "template_deviation_summary.csv", index=False)
+show = template_tests[(template_tests.segment == "all")]
+print("mean skill over participants, all tokens (rows: scale and source):")
+print(show.pivot_table(index=["scale", "source"], columns="muscle", values="skill_mean").round(4).to_string())
+print("Holm p (muscles of the 'all' rows):")
+print(show.pivot_table(index=["scale", "source"], columns="muscle", values="p_skill_holm").round(3).to_string())
+print("share of the test envelope's variance explained by the template:", round(float(template_all.var_template.mean()), 3))
 """
 
 VERDICT = """# V3-VERDICT
@@ -292,46 +294,49 @@ for i, scale in enumerate(scales, start=1):
 fig.tight_layout(); fig.savefig(RESULTS / "swap_and_residual.png", dpi=130); plt.show()
 """
 
-CONTRAST = """# V3-CONTRAST
-# Rows C and F of the paper's table (v3.contrast; no training, it reads the causal v2 horizon models):
-#   C = K (past hand kinematics and force) + past task cues;  F = C + EEG history;  delta = skill(F) - skill(C).
-# Null: the EEG term of F shifted in time. Controls: EEG of a cue-aligned swapped trial, band power of all channels and of
-# the peripheral channels only. Finished participants and horizons are read back from RESULTS / "contrast".
-cc = CONFIG["contrast"]
-(RESULTS / "contrast").mkdir(exist_ok=True)
-con_parts = []
-for h in cc["horizons_ms"]:
+B_VS_F = """# V3-B-VS-F
+# Critical experiment II (v3.contrast; no training, it reads the causal v2 horizon models), all causal:
+#   causal_cue = past LED onsets;  K = past hand kinematics and force;  B = K + past task events;  F = B + EEG history.
+# Primary: eeg_skill = 1 - MSE(F) / MSE(B), null = the EEG term of F shifted in time. Controls: EEG of a cue-aligned swapped
+# trial (same weight and surface), band power of all channels and of the peripheral channels only.
+# Finished participants and horizons are read back from RESULTS / "b_vs_f_runs".
+bcfg = CONFIG["b_vs_f"]
+(RESULTS / "b_vs_f_runs").mkdir(exist_ok=True)
+bf_parts = []
+for h in bcfg["horizons_ms"]:
     for p_id in subject_list:
-        ck = Path(cc["checkpoint_dir"]) / f"h{h}ms" / f"P{p_id}" / "best.pt"
-        done = RESULTS / "contrast" / f"h{h}ms_P{p_id}.csv"
+        ck = Path(bcfg["checkpoint_dir"]) / f"h{h}ms" / f"P{p_id}" / "best.pt"
+        done = RESULTS / "b_vs_f_runs" / f"h{h}ms_P{p_id}.csv"
         if done.exists():
-            con_parts.append(pd.read_csv(done)); continue
+            bf_parts.append(pd.read_csv(done)); continue
         if not ck.is_file():
             print(f"P{p_id} h={h} ms: no horizon checkpoint at {ck}, skipped"); continue
         t0 = time.time()
-        df = contrast_participant(p_id, h, cc["checkpoint_dir"], n_null=CONFIG["evaluation"]["n_null"], sources=cc["sources"])
-        df.to_csv(RESULTS / "contrast" / f"h{h}ms_P{p_id}.csv", index=False)
-        con_parts.append(df)
-        print(f"P{p_id} h={h} ms: delta (all) {df[(df.segment == 'all') & (df.source == 'eeg')].delta.iloc[0]:+.4f}, "
+        df = run_b_vs_f(p_id, h, bcfg["checkpoint_dir"], n_null=CONFIG["evaluation"]["n_null"], sources=bcfg["sources"])
+        df.to_csv(RESULTS / "b_vs_f_runs" / f"h{h}ms_P{p_id}.csv", index=False)
+        bf_parts.append(df)
+        print(f"P{p_id} h={h} ms: eeg_skill (all) {df[(df.segment == 'all') & (df.source == 'eeg')].eeg_skill.iloc[0]:+.4f}, "
               f"{(time.time() - t0) / 60:.1f} min")
-contrast_all = pd.concat(con_parts, ignore_index=True)
-contrast_all.to_csv(RESULTS / "contrast.csv", index=False)
-contrast_tests = contrast_group_test(contrast_all)
-contrast_tests.to_csv(RESULTS / "contrast_tests.csv", index=False)
-allrows = contrast_tests[contrast_tests.segment == "all"]
-print("mean skill(C) and delta = skill(F) - skill(C) over participants, all tokens (rows: EEG source, columns: horizon in ms):")
-print(allrows.pivot_table(index="source", columns="horizon_ms", values=["mean_skill_C", "mean_delta"]).round(4).to_string())
-print("Holm p of delta > 0 (over phases and horizons; the 'all' rows over horizons), per phase:")
-print(contrast_tests.pivot_table(index=["source", "segment"], columns="horizon_ms", values="p_delta_holm").round(3).to_string())
-print("A real EEG gain needs delta > 0 for 'eeg' AND above the swap control (p_gap): the swap keeps the task timing.")
+b_vs_f = pd.concat(bf_parts, ignore_index=True)
+b_vs_f.to_csv(RESULTS / "b_vs_f.csv", index=False)
+b_vs_f_summary = summarise_b_vs_f(b_vs_f)
+b_vs_f_summary.to_csv(RESULTS / "b_vs_f_summary.csv", index=False)
+allrows = b_vs_f_summary[b_vs_f_summary.segment == "all"]
+print("all tokens, mean over participants (rows: EEG source, columns: horizon in ms):")
+print(allrows.pivot_table(index="source", columns="horizon_ms",
+                          values=["eeg_skill_mean", "vaf_gain_mean", "mse_B_mean", "mse_K_mean", "mse_causal_cue_mean"]).round(4).to_string())
+print("Holm p of eeg_skill > 0 over the phases of one horizon:")
+print(b_vs_f_summary.pivot_table(index=["source", "segment"], columns="horizon_ms", values="p_eeg_skill_holm_phases").round(3).to_string())
+print("Holm p of eeg_skill > 0 over the horizons of one phase:")
+print(b_vs_f_summary.pivot_table(index=["source", "segment"], columns="horizon_ms", values="p_eeg_skill_holm_horizons").round(3).to_string())
+print("A real EEG gain needs eeg_skill > 0 for 'eeg' AND above the swap control (p_gap): the swap keeps the task timing.")
 fig, ax = plt.subplots(figsize=(6, 4))
 for src, d in allrows.groupby("source"):
-    ax.errorbar(d.horizon_ms, d.mean_delta, yerr=d.sem_delta, marker="o", capsize=3, label=src)
-ax.axhline(0, color="gray", lw=1); ax.set_xlabel("horizon (ms)"); ax.set_ylabel("skill(F) - skill(C)")
-ax.set_title("EEG history over causal motion + cues"); ax.legend(fontsize=8)
-fig.tight_layout(); fig.savefig(RESULTS / "contrast.png", dpi=130); plt.show()
+    ax.errorbar(d.horizon_ms, d.eeg_skill_mean, yerr=d.eeg_skill_sem, marker="o", capsize=3, label=src)
+ax.axhline(0, color="gray", lw=1); ax.set_xlabel("horizon (ms)"); ax.set_ylabel("eeg_skill = 1 - MSE(F) / MSE(B)")
+ax.set_title("EEG history over causal motion + task events"); ax.legend(fontsize=8)
+fig.tight_layout(); fig.savefig(RESULTS / "b_vs_f.png", dpi=130); plt.show()
 """
-
 
 def _cell(kind, src):
     lines = src.rstrip("\n").split("\n")
@@ -342,7 +347,7 @@ def _cell(kind, src):
 
 
 def build() -> dict:
-    code = (SETUP, CONFIG, BUDGET, DATA, TIMING, TRAIN, EVAL, SWAP, RESIDUAL, MUSCLE, VERDICT, CONTRAST)
+    code = (SETUP, CONFIG, BUDGET, DATA, TIMING, TRAIN, EVAL, SWAP, RESIDUAL, TEMPLATES, VERDICT, B_VS_F)
     cells = [_cell("markdown", TITLE)] + [_cell("code", s) for s in code]
     return {"cells": cells,
             "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},

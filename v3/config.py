@@ -28,13 +28,18 @@ CONFIG_V3["timing"] = {
     "primary": "cue_causal",                        # the timing model of the beyond_timing criterion
     "cache_dir": "results/v3/timing_preds",
 }
-CONFIG_V3["contrast"] = {                           # rows C and F of the paper's table (v3.contrast); no training
+CONFIG_V3["b_vs_f"] = {                             # B (K + past events) vs F (B + EEG history), v3.contrast; no training
     "checkpoint_dir": "outputs/checkpoints_v2_horizon",   # the causal v2 horizon models, h{h}ms/P{p}, read only
     "horizons_ms": [0, 200, 500, 1000],
     "sources": ["eeg", "swap", "bandpower", "peripheral"],
-    "results_dir": "results/v3/contrast",
+    "results_dir": "results/v3",                    # b_vs_f.csv, b_vs_f_summary.csv and b_vs_f_runs/
 }
-CONFIG_V3["muscle"] = {"shared": ["pc1", "mean"]}    # v3.evaluate.muscle_specificity: the shared activation removed
+CONFIG_V3["templates"] = {                          # template deviation test, v3.templates
+    "n_bins": 20,                                   # warped-time bins between two consecutive task events
+    "post_s": 3.0, "post_bin_s": 0.1,               # led-free tail after hand_stop: 0.1 s bins up to 3 s, then rest
+    "sources": ["student", "swap", "bandpower", "peripheral"],
+    "swap_match_condition": True,                   # swap donors with the same weight and surface
+}
 
 # Artifact controls (configs only): which electrodes and bands carry the student's information?
 CENTRAL = ["C3", "C4", "Cz", "CP1", "CP2", "CP5", "CP6", "FC1", "FC2", "FC5", "FC6"]
