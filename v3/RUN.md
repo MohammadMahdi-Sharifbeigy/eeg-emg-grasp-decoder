@@ -3,6 +3,10 @@
 One analysis, nine numbered steps. The notebook `main_v3.ipynb` and the command line run the same functions
 (`v3/run.py`), so they cannot drift apart. Every step prints one header line and the files it wrote.
 
+The notebook is the full report: one section per step with what the step does and what to look for, and one cell that
+runs it and shows its tables and figures (`v3/plots.py`). Each cell re-reads its step's saved tables, so it also works
+after a kernel restart or when the step ran from the command line.
+
 ## The question and the conditions
 
 Does EEG history improve the prediction of the EMG envelope beyond what past movement and past task events already

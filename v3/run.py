@@ -20,6 +20,7 @@ import copy
 import time
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 
 from .config import CONFIG_V3, preset_config
@@ -438,6 +439,32 @@ def step_verdict(ctx: Context) -> dict:
                 f"{v.F_not_peripheral}, Eguided beats E0 {v.Eguided_beats_E0} -> {v.interpretation}")
     _footer(ctx, t0)
     return {"verdict": verdict}
+
+
+def load_table(ctx: Context, step: str, filename: str):
+    """A table a step saved (None when the step has not written it yet), so a notebook cell works after a restart."""
+    path = ctx.folder(step) / filename
+    return pd.read_csv(path) if path.exists() else None
+
+
+def load_histories(ctx: Context) -> pd.DataFrame:
+    """Training history of every E0 and Eguided run found on disk: one row per run and epoch."""
+    import json
+    rows = []
+    for p in ctx.participants:
+        for seed in ctx.seeds:
+            for scale in [0.0] + ctx.guided_scales:
+                f = student_dir(ctx.checkpoints, scale, seed, f"P{p}") / "history.json"
+                if not f.exists():
+                    continue
+                h = json.loads(f.read_text(encoding="utf-8"))
+                n = len(h.get("val_e", []))
+                rows.append(pd.DataFrame({"subject": f"P{p}", "condition": condition_of(scale), "scale": scale,
+                                          "seed": seed, "epoch": np.arange(1, n + 1), "val_e": h["val_e"],
+                                          "w": h.get("w", [np.nan] * n), "grad_share": h.get("grad_share", [np.nan] * n),
+                                          "best_epoch": h.get("best_epoch", 0)}))
+    cols = ["subject", "condition", "scale", "seed", "epoch", "val_e", "w", "grad_share", "best_epoch"]
+    return pd.concat(rows, ignore_index=True) if rows else pd.DataFrame(columns=cols)
 
 
 STEP_FUNCTIONS = {"setup": step_setup, "data": step_data, "timing_baselines": step_timing_baselines,
