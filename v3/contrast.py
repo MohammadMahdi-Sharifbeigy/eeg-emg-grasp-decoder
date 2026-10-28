@@ -21,6 +21,8 @@ Metrics per participant, horizon, phase and EEG source (score_b_vs_f):
 
 EEG sources of F (the real one and G-style negative controls):
   eeg         the EEG tokens of the trained causal model (the primary F)
+  phase_swap  the same, with the phase-matched swap (v3.nulls.phase_matched_swap): the donor of the same weight and
+              surface is time-warped so all its task events land on the recipient's; the primary trial-specific control
   swap        the same tokens computed from cue-aligned swapped EEG (v3.nulls.swap_series, donors with the same weight
               and surface by default); validation and test series are each swapped among their own trials and the ridge
               is fitted on the swapped EEG: same task timing, EEG of another trial
@@ -51,10 +53,10 @@ from v2.train import load_best
 
 from .config import CONFIG_V3, PERIPHERAL
 from .evaluate import holm
-from .nulls import swap_series
+from .nulls import phase_matched_swap, swap_series
 from .timing import causal_features
 
-SOURCES = ("eeg", "swap", "bandpower", "peripheral")
+SOURCES = ("eeg", "swap", "phase_swap", "bandpower", "peripheral")
 COLUMNS = ["segment", "n_fit", "n_test", "eeg_skill", "eeg_skill_null_mean", "p", "vaf_gain", "ccc_B", "ccc_F",
            "mse_B", "mse_F", "mse_K", "mse_causal_cue"]
 METRICS = ["eeg_skill", "vaf_gain", "ccc_B", "ccc_F", "mse_B", "mse_F", "mse_K", "mse_causal_cue"]
@@ -177,7 +179,9 @@ def eeg_sources(model, toks_val, toks_test, lifts_val, lifts_test, norm, cfg, de
         else:
             swapped = []
             for toks, lifts in ((toks_val, lifts_val), (toks_test, lifts_test)):
-                alt, _ = swap_series([t["eeg"] for t in toks], lifts, rng, match_condition=match_condition)
+                raw = [t["eeg"] for t in toks]
+                alt = (phase_matched_swap(raw, lifts, rng)[0] if s == "phase_swap"
+                       else swap_series(raw, lifts, rng, match_condition=match_condition)[0])
                 swapped.append(_features(model, toks, norm, cfg, device, eeg=alt)["tokens"])
             out[s] = tuple(swapped)
     return out

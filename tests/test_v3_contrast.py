@@ -163,6 +163,7 @@ def test_score_b_vs_f_glue(monkeypatch):
     assert list(df.columns) == ["subject", "horizon_ms", "source"] + C.COLUMNS and set(df.source) == set(C.SOURCES)
     a = df[df.segment == "all"].set_index("source")
     assert a.loc["eeg", "eeg_skill"] > 0.5 and a.loc["swap", "eeg_skill"] < 0.05     # the swap loses the trial's EEG
+    assert a.loc["phase_swap", "eeg_skill"] < 0.05                                      # so does the phase-matched swap
     assert a.mse_causal_cue.notna().all() and (a.mse_B == a.mse_B.iloc[0]).all()       # B does not depend on the source
     assert (df.subject == "P3").all() and (df.horizon_ms == 500).all()
 

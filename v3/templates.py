@@ -43,10 +43,10 @@ from .config import CONFIG_V3, PERIPHERAL
 from .contrast import channel_columns
 from .evaluate import _cv_ridge, _trial_folds, holm
 from .infer import normalise_eeg, predict_eeg_outputs
-from .nulls import swap_series, trial_bounds
+from .nulls import phase_matched_swap, swap_series, trial_bounds
 
 FS_TOK = FS_IN / Q
-SOURCES = ("student", "swap", "bandpower", "peripheral")
+SOURCES = ("student", "swap", "phase_swap", "bandpower", "peripheral")
 COLUMNS = ["segment", "muscle", "n_test", "skill", "r", "skill_null_mean", "p"]
 TC = CONFIG_V3["templates"]
 
@@ -211,8 +211,10 @@ def student_template_deviation(model, test_tokens, test_lifts, templates: dict, 
     for s in sources:
         if s == "student":
             feats[s] = np.concatenate([predict_eeg_outputs(model, t, norm, device, **kw)["fin"] for t in test_tokens])
-        elif s == "swap":
-            alt, _ = swap_series(eeg_z, test_lifts, rng, match_condition=match_condition, clip=cfg["eeg"]["clip"])
+        elif s in ("swap", "phase_swap"):
+            clip = cfg["eeg"]["clip"]
+            alt = (phase_matched_swap(eeg_z, test_lifts, rng, clip)[0] if s == "phase_swap"
+                   else swap_series(eeg_z, test_lifts, rng, match_condition=match_condition, clip=clip)[0])
             feats[s] = np.concatenate([predict_eeg_outputs(model, t, norm, device, eeg=a, **kw)["fin"]
                                        for t, a in zip(test_tokens, alt)])
         elif s == "bandpower":

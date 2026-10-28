@@ -114,6 +114,8 @@ def test_student_predicts_deviations_and_the_swap_does_not():
     assert df[(df.source == "student") & (df.segment == "hold")].skill.gt(0.5).all()
     sw = df[(df.source == "swap") & (df.segment == "all")].set_index("muscle")
     assert (sw.skill < st.skill - 0.4).all()
+    ps = df[(df.source == "phase_swap") & (df.segment == "all")].set_index("muscle")
+    assert (ps.skill < st.skill - 0.4).all()
     assert df.var_template.iloc[0] > 0.5 and df.n_trials.iloc[0] == 18
 
 
