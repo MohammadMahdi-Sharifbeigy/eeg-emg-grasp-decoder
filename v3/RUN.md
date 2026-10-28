@@ -28,7 +28,7 @@ The primary result is `eeg_skill = 1 - MSE(F) / MSE(B)`.
 | # | step | trains? | what it does | output folder |
 |---|---|---|---|---|
 | 0 | `setup` | no | config, participants, seeds, scales, preset | |
-| 1 | `data` | no | 50 Hz tokens, task events, train / validation / test split | |
+| 1 | `data` | no | 50 Hz tokens, task events, train / validation / test split; cached per participant (slow only the first time) | `results/v3/step1_data/cache/` |
 | 2 | `timing_baselines` | no | `causal_cue`, `events_causal` (0, 200, 500, 1000 ms), `phase`, `cue` | `results/v3/step2_timing_baselines/` |
 | 3 | `b_vs_f` | no | K, B, F at every horizon from `outputs/checkpoints_v2_horizon`, the EEG controls, onset timing | `results/v3/step3_b_vs_f/` |
 | 4 | `budget` | no | GPU hours of steps 5 and 6, on random data | |
@@ -60,7 +60,8 @@ With a preset (`--preset central`, `peripheral`, `eye_regressed` or `no_gamma`) 
    env/Scripts/python.exe -m v3.run --step evaluate_students,verdict
    ```
 
-To see what a command would do without running or writing anything, add `--dry-run`. Other options: `--participants 1-4`,
+To see what a command would do without running or writing anything, add `--dry-run`. Step 1 rebuilds its cache by
+itself when the token settings or the v2 cache files change; `--rebuild-data` forces it. Other options: `--participants 1-4`,
 `--seeds 0`, `--scales 0.0,0.1`.
 
 ## What the main columns mean

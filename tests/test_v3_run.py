@@ -134,3 +134,42 @@ def test_b_vs_f_cache_without_a_source_is_recomputed_and_bad_runs_are_skipped(tm
     f.unlink()
     assert R.step_b_vs_f(ctx) == {} and any("skipped (a swap needs" in l for l in lines)
 
+
+
+def _fake_participant(n=900):
+    r = np.random.default_rng(0)
+
+    def series(sid):
+        return {"series": sid, "kin": r.normal(size=(n, 24)).astype(np.float32), "hist": np.zeros((n, 8), np.float32),
+                "eeg": r.normal(size=(n, 32, 4)).astype(np.float32), "emg": np.abs(r.normal(size=(n, 5))).astype(np.float32),
+                "hold_id": np.zeros(n, np.int64), "n_samples": n * 10, "lifts": []}
+    from v2.data import fit_norm
+    tok = {"train": [series(1), series(3)], "val": [series(9)], "test": [series(2)]}
+    return {"tokens": tok, "norm": fit_norm(tok["train"]), "names": MUSCLES, "muscle_prior": None}
+
+
+def test_step_1_data_is_cached_and_rebuilt_only_when_its_inputs_change(tmp_path, monkeypatch):
+    calls = []
+    monkeypatch.setattr(R, "_build_participant", lambda ctx, p: calls.append(p) or _fake_participant())
+    cache_dir = tmp_path / R.CONFIG_V3["data"]["cache_dir"]
+    cache_dir.mkdir(parents=True)
+    (cache_dir / "P1_train_S1.npz").write_bytes(b"x")
+    make = lambda **kw: Context(root=tmp_path, participants="1", log=(lines := []).append, **kw)
+    ctx = make()
+    R.step_data(ctx)
+    assert calls == [1] and R.data_cache_path(ctx, 1).exists() and set(ctx.data["P1"]["split"]) == {"train", "val", "test"}
+    ctx2 = make()
+    R.step_data(ctx2)                                                # a new session: read from the cache
+    assert calls == [1] and len(ctx2.data["P1"]["train_ds"]) > 0
+    ctx3 = make()
+    ctx3.cfg["tokens"]["stride"] = 50                                # the tokens depend on it: rebuilt
+    R.step_data(ctx3)
+    assert calls == [1, 1]
+    (cache_dir / "P1_train_S1.npz").write_bytes(b"changed v2 cache")    # the v2 cache changed: rebuilt
+    R.step_data(make())
+    assert calls == [1, 1, 1]
+    R.step_data(make(rebuild_data=True))                             # forced
+    assert calls == [1, 1, 1, 1]
+    R.data_cache_path(ctx, 1).write_bytes(b"broken")                 # unreadable: rebuilt, not a crash
+    R.step_data(make())
+    assert calls == [1, 1, 1, 1, 1] and not list(R.data_cache_path(ctx, 1).parent.glob("*.tmp"))

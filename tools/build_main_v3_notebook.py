@@ -105,8 +105,11 @@ display(condition_table()[["condition", "inputs", "role", "uses_eeg", "trained",
 SECTIONS = {
     "data": ("""Loads, for every participant, the cached 500 Hz series of v2, turns them into 50 Hz tokens (EEG band power in 4
 bands x 32 electrodes, kinematics, EMG envelope) and reads the task events of every lift (LED on, hand start, first touch,
-lift-off, replace, release, hand stop). The split is v2's: 6 training series, 1 validation series, 2 test series. Nothing
-is trained or saved.
+lift-off, replace, release, hand stop). The split is v2's: 6 training series, 1 validation series, 2 test series.
+
+The first run takes several minutes (band power and decimation of every series). The result is cached per participant
+in `results/v3/step1_data/cache/P{p}.pkl`, so the next session loads in seconds. The cache is rebuilt by itself when the
+token settings or the v2 cache files change; `run.Context(..., rebuild_data=True)` forces a rebuild.
 
 **Look for:** every participant has 2 test series and a few dozen test lifts; a participant with no lifts cannot be
 used by the swaps or the template test.""",

@@ -1,7 +1,8 @@
 """The whole v3 analysis as numbered steps, shared by main_v3.ipynb and the command line.
 
   step 0  setup               config, participants, seeds, scales, preset, folders
-  step 1  data                tokens, task events and splits of every participant (no training)
+  step 1  data                tokens, task events and splits of every participant (no training), cached per
+                              participant in step1_data/cache/ and rebuilt only when the config or v2 cache changes
   step 2  timing_baselines    causal_cue, events_causal (4 horizons), phase and cue (no training)
   step 3  b_vs_f              K, B, F at 0, 200, 500, 1000 ms from the v2 horizon checkpoints, with the EEG controls
                               and onset timing (no training): the primary result
@@ -39,6 +40,7 @@ STEPS = [
 ]
 STEP_NAMES = [s[0] for s in STEPS]
 OUTPUTS = {
+    "data": ["cache/P{p}.pkl"],
     "timing_baselines": ["timing_baselines.csv", "cache/"],
     "b_vs_f": ["b_vs_f.csv", "b_vs_f_summary.csv", "onset.csv", "onset_summary.csv", "b_vs_f.png", "runs/"],
     "train_E0": ["outputs/checkpoints_v3/E0/s{seed}/P{p}/"],
@@ -55,10 +57,10 @@ class Context:
     """Everything the steps share: config, selections, folders, the loaded data and what the steps produced."""
 
     def __init__(self, participants="all", seeds=None, scales=None, preset=None, dry_run=False, device=None,
-                 root=".", log=print, v2_standard=V2_STANDARD, phase_metrics=PHASE_METRICS):
+                 root=".", log=print, v2_standard=V2_STANDARD, phase_metrics=PHASE_METRICS, rebuild_data=False):
         from eeg_controls.common import parse_subjects
         self.cfg = copy.deepcopy(CONFIG_V3) if preset is None else preset_config(preset)
-        self.preset, self.dry_run, self.log = preset, bool(dry_run), log
+        self.preset, self.dry_run, self.log, self.rebuild_data = preset, bool(dry_run), log, bool(rebuild_data)
         self.participants = parse_subjects(participants)
         self.seeds = list(self.cfg["training"]["seeds"] if seeds is None else seeds)
         all_scales = self.cfg["guide"]["scales"] if scales is None else scales
@@ -157,22 +159,74 @@ def step_data(ctx: Context) -> dict:
     return out
 
 
-def _load_data(ctx: Context) -> dict:
+DATA_CACHE_BLOCKS = ("data", "tokens", "eeg", "history")       # the config blocks the tokens depend on
+
+
+def _build_participant(ctx: Context, p: int) -> dict:
+    """The slow part of step 1 for one participant: tokens (band power, decimation), task events, norm, prior, names."""
     from eeg_controls.common import lifts
     from main.dataloader import emg_channel_names
     from main.preprocessing_emg_kin import compute_muscle_edge_prior
     from v2 import data as D
+    cfg = ctx.cfg
+    tok = {s: [D.build_tokens(r, cfg) for r in D.load_split(ctx.root / cfg["data"]["cache_dir"], p, s)]
+           for s in ("train", "val", "test")}
+    for s in tok:
+        for t in tok[s]:
+            t["lifts"] = lifts(p, t["series"], t["n_samples"])
+    return {"tokens": tok, "norm": D.fit_norm(tok["train"]), "names": emg_channel_names(p),
+            "muscle_prior": compute_muscle_edge_prior([t["emg_full"] for t in tok["train"]])}
+
+
+def _data_key(ctx: Context, p: int) -> str:
+    """What the cached data depends on: the token config and the size and time of the participant's v2 cache files."""
+    import json
+    files = sorted((ctx.root / ctx.cfg["data"]["cache_dir"]).glob(f"P{int(p)}_*.npz"))
+    stats = [(f.name, f.stat().st_size, int(f.stat().st_mtime)) for f in files]
+    return json.dumps({"config": {b: ctx.cfg.get(b) for b in DATA_CACHE_BLOCKS}, "files": stats}, sort_keys=True,
+                      default=str)
+
+
+def data_cache_path(ctx: Context, p: int) -> Path:
+    return ctx.folder("data") / "cache" / f"P{int(p)}.pkl"
+
+
+def _participant_data(ctx: Context, p: int) -> dict:
+    """_build_participant, read from results/v3/step1_data/cache/P{p}.pkl when its key still matches, else rebuilt
+    and saved. The key (config blocks and the v2 cache files' size and time) changes when anything the tokens depend on
+    changes, so a stale cache is never used. Context(rebuild_data=True) forces a rebuild."""
+    import pickle
+    path, key = data_cache_path(ctx, p), _data_key(ctx, p)
+    if path.exists() and not ctx.rebuild_data:
+        try:
+            with open(path, "rb") as f:
+                cached = pickle.load(f)
+            if cached.get("key") == key:
+                ctx.log(f"    P{p}: loaded from the cache {path}")
+                return cached["data"]
+            ctx.log(f"    P{p}: the cache is out of date (config or v2 cache files changed): rebuilding")
+        except Exception as err:                                     # a broken or partly written file
+            ctx.log(f"    P{p}: the cache could not be read ({err}): rebuilding")
+    t0 = time.time()
+    data = _build_participant(ctx, p)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(".tmp")
+    with open(tmp, "wb") as f:
+        pickle.dump({"key": key, "data": data}, f, protocol=pickle.HIGHEST_PROTOCOL)
+    tmp.replace(path)                                                # never leave a half-written cache behind
+    ctx.written.append(path)
+    ctx.log(f"    P{p}: built in {(time.time() - t0) / 60:.1f} min and cached")
+    return data
+
+
+def _load_data(ctx: Context) -> dict:
+    from v2 import data as D
     cfg, out = ctx.cfg, {}
     for p in ctx.participants:
-        tok = {s: [D.build_tokens(r, cfg) for r in D.load_split(ctx.root / cfg["data"]["cache_dir"], p, s)]
-               for s in ("train", "val", "test")}
-        for s in tok:
-            for t in tok[s]:
-                t["lifts"] = lifts(p, t["series"], t["n_samples"])
-        norm, tc = D.fit_norm(tok["train"]), cfg["tokens"]
+        d = _participant_data(ctx, p)
+        tok, norm, tc = d["tokens"], d["norm"], cfg["tokens"]
         out[f"P{p}"] = dict(
-            p_id=p, tokens=tok, norm=norm, names=emg_channel_names(p),
-            muscle_prior=compute_muscle_edge_prior([t["emg_full"] for t in tok["train"]]),
+            p_id=p, tokens=tok, norm=norm, names=d["names"], muscle_prior=d["muscle_prior"],
             split={s: [t["series"] for t in tok[s]] for s in tok}, lifts={s: [t["lifts"] for t in tok[s]] for s in tok},
             train_ds=D.TokenWindows(tok["train"], norm, tc["window"], tc["stride"], random_offset=True,
                                     seed=cfg["training"]["seed"]),
@@ -489,8 +543,9 @@ def main(argv=None) -> dict:
     ap.add_argument("--scales", default=None, help="comma separated guide scales, default config guide.scales")
     ap.add_argument("--preset", default=None)
     ap.add_argument("--dry-run", action="store_true", help="print the steps and their outputs, run and write nothing")
+    ap.add_argument("--rebuild-data", action="store_true", help="rebuild the step 1 data cache even when it is current")
     a = ap.parse_args(argv)
-    ctx = Context(participants=a.participants, preset=a.preset, dry_run=a.dry_run,
+    ctx = Context(participants=a.participants, preset=a.preset, dry_run=a.dry_run, rebuild_data=a.rebuild_data,
                   seeds=None if a.seeds is None else [int(s) for s in a.seeds.split(",")],
                   scales=None if a.scales is None else [float(s) for s in a.scales.split(",")])
     return run_steps(ctx, "all" if a.step == "all" else a.step.split(","))

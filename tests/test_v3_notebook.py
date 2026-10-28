@@ -23,11 +23,11 @@ def _code(nb):
     return ["".join(c["source"]) for c in nb["cells"] if c["cell_type"] == "code"]
 
 
-def test_committed_notebook_has_the_generators_cells_and_no_outputs():
+def test_committed_notebook_has_the_generators_cells():
+    """The notebook is run and saved with outputs, so only the cells' kind and text are compared."""
     nb = json.loads((ROOT / "main_v3.ipynb").read_text(encoding="utf-8"))
     cells = lambda book: [(c["cell_type"], "".join(c["source"])) for c in book["cells"]]
     assert cells(nb) == cells(_builder().build())
-    assert all(c.get("outputs", []) == [] and c.get("execution_count") is None for c in nb["cells"] if c["cell_type"] == "code")
 
 
 def test_one_cell_per_step_in_order_and_compiling():
