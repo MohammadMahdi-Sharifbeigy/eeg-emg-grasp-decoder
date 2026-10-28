@@ -54,6 +54,7 @@ from v2.train import load_best
 
 from .config import CONFIG_V3, PERIPHERAL
 from .evaluate import holm
+from .metrics import token_mse
 from .nulls import phase_matched_swap, swap_series
 from .onset import onset_error
 from .timing import causal_features
@@ -120,7 +121,7 @@ def b_vs_f_scores(eeg_val, ev_val, res_val, eeg_test, ev_test, res_test, lab_tes
     k_test, y_test = np.asarray(k_test, np.float64), np.asarray(y_test, np.float64)
     p = b_vs_f_predictions(eeg_val, ev_val, res_val, eeg_test, ev_test, k_test, cue_val, y_val, cue_test)
     pred_b, pred_f, corr_f, term, pred_cue = p["B"], p["F"], p["F_correction"], p["F_eeg_term"], p.get("causal_cue")
-    err = lambda pred: ((pred - y_test) ** 2).mean(1)                        # per token, mean over muscles
+    err = lambda pred: token_mse(pred, y_test)
     e_k, e_b, e_f = err(k_test), err(pred_b), err(pred_f)
     e_cue = err(pred_cue) if pred_cue is not None else np.full(len(y_test), np.nan)
     shifts = null_shifts(len(res_test), window, hop)

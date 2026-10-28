@@ -21,6 +21,7 @@ from v2.evaluate import _r
 from v2.tokens import Q
 
 from .infer import normalise_eeg, predict_eeg_series
+from .metrics import mse
 
 
 def trial_bounds(lift_list, n_tok: int) -> list[tuple[int, int, int]]:
@@ -220,8 +221,8 @@ def _swap_draws(model, test_tokens, lifts_by_series, norm, cfg, device, make_swa
     for _ in range(n_draws):
         alt = make_swap(eeg_z, lifts_by_series, rng, clip)
         pred = np.concatenate([predict_eeg_series(model, t, norm, device, eeg=a, **kw) for t, a in zip(test_tokens, alt)])
-        r.append(_r(pred, target)); m.append(((pred - target) ** 2).mean(0))
-    return {"r_true": _r(true, target), "mse_true": ((true - target) ** 2).mean(0), "r": np.asarray(r),
+        r.append(_r(pred, target)); m.append(mse(pred, target))
+    return {"r_true": _r(true, target), "mse_true": mse(true, target), "r": np.asarray(r),
             "mse": np.asarray(m), "n_draws": n_draws}
 
 

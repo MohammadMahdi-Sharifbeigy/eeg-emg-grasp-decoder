@@ -7,8 +7,15 @@ def _arrays(*xs):
 
 
 def mse(pred, y) -> np.ndarray:
+    """Mean squared error per muscle (over time)."""
     pred, y = _arrays(pred, y)
     return ((pred - y) ** 2).mean(0)
+
+
+def token_mse(pred, y) -> np.ndarray:
+    """Squared error per time point, averaged over muscles: the unit that phase masks and time-shift nulls average."""
+    pred, y = _arrays(pred, y)
+    return ((pred - y) ** 2).mean(1)
 
 
 def vaf(pred, y) -> np.ndarray:

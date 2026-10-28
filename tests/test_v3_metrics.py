@@ -30,3 +30,9 @@ def test_exact_reference_gives_nan_not_inf():
     y = np.ones((10, 2))
     s = skill(y + 1, y, y)
     assert np.isnan(s).all()
+
+
+def test_token_mse_is_per_time_point():
+    from v3.metrics import token_mse
+    y, good, _ = _data()
+    assert token_mse(good, y).shape == (500,) and np.allclose(token_mse(good, y).mean(), mse(good, y).mean())

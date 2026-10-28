@@ -1,7 +1,8 @@
-"""Evaluation of the EEG-only student, and the criteria a paper can rest on.
+"""Evaluation of the EEG-only students (E0, Eguided): metrics, nulls, residual over timing, and student criteria.
 
-The question is not "does the guide raise r" but "does any EEG model explain EMG beyond the task clock?". Matching
-a model that knows only the task event times is the null result, not the goal. The criteria (`criteria`):
+The paper's verdict is v3.verdict (B vs F primary, Eguided vs E0 secondary). The student-level criteria below
+(`criteria`) came first and stay as a detailed table of the students. Matching a model that knows only the task event
+times is the null result, not the goal. The student criteria:
   beats_control   the guided student beats the scale-0 control (seed-averaged, Wilcoxon over participants, Holm)
   beyond_timing   the student explains part of the residual of a causal timing model (residual_over_timing)
   survives_swap   the student loses accuracy when its EEG comes from another, cue-aligned trial (v3.nulls), and
@@ -23,6 +24,7 @@ from v2.evaluate import _r, block_shuffle, block_swap, standard_metrics, swap_p
 from v2.tokens import FS_IN, Q, to_samples
 
 from .infer import normalise_eeg, predict_eeg_outputs, predict_eeg_series
+from .metrics import token_mse
 from .nulls import trial_bounds
 
 FS_TOK = FS_IN / Q
@@ -212,8 +214,8 @@ def residual_over_timing(model, test_tokens, timing_u, lifts_by_series, norm, cf
     res = y - t
     fold = _trial_folds(d["trial"], n_trials, folds)
     pred = _cv_ridge(x, res, fold)
-    mse = lambda q: ((np.maximum(t + q, 0.0) - y) ** 2).mean(1)
-    e_t, e_p = ((t - y) ** 2).mean(1), mse(pred)
+    mse = lambda q: token_mse(np.maximum(t + q, 0.0), y)
+    e_t, e_p = token_mse(t, y), mse(pred)
     shifts = null_shifts(len(res), tc["window"], tc["hop"])
     rng = np.random.default_rng(ec["seed"])
     e_null = [mse(np.roll(pred, int(rng.choice(shifts)), axis=0)) for _ in range(n_null)] if len(shifts) else []
