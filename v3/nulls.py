@@ -99,22 +99,11 @@ def swap_series(eeg_by_series, lifts_by_series, rng, match_condition: bool = Fal
 
 def evaluate_swap(model, test_tokens, lifts_by_series, norm, cfg, device, names) -> pd.DataFrame:
     """Per muscle: r_true, r_swap (mean over draws, 500 Hz scoring as v3.evaluate), r_swap_sd and delta."""
-    ec = cfg["evaluation"]
-    n_draws, clip = int(ec.get("n_swap", 10)), cfg["eeg"]["clip"]
-    kw = dict(window=cfg["tokens"]["window"], hop=cfg["tokens"]["hop"], use_amp=bool(cfg["training"]["use_amp"]),
-              clip=clip)
-    target = np.concatenate([t["emg_full"] for t in test_tokens])
-    r_true = _r(np.concatenate([predict_eeg_series(model, t, norm, device, **kw) for t in test_tokens]), target)
-    eeg_z = [normalise_eeg(t, norm, clip) for t in test_tokens]
-    rng = np.random.default_rng(ec["seed"])
-    draws = []
-    for _ in range(n_draws):
-        alt, _ = swap_series(eeg_z, lifts_by_series, rng, bool(ec.get("swap_match_condition", False)), clip)
-        pred = [predict_eeg_series(model, t, norm, device, eeg=a, **kw) for t, a in zip(test_tokens, alt)]
-        draws.append(_r(np.concatenate(pred), target))
-    draws = np.asarray(draws)
-    return pd.DataFrame({"muscle": list(names), "r_true": r_true, "r_swap": draws.mean(0), "r_swap_sd": draws.std(0),
-                         "delta": r_true - draws.mean(0), "n_draws": n_draws})
+    match = bool(cfg["evaluation"].get("swap_match_condition", False))
+    d = _swap_draws(model, test_tokens, lifts_by_series, norm, cfg, device,
+                    lambda e, l, rng, clip: swap_series(e, l, rng, match, clip)[0])
+    return pd.DataFrame({"muscle": list(names), "r_true": d["r_true"], "r_swap": d["r"].mean(0), "r_swap_sd": d["r"].std(0),
+                         "delta": d["r_true"] - d["r"].mean(0), "n_draws": d["n_draws"]})
 
 
 def swap_group_test(swap: pd.DataFrame, control_scale: float = 0.0) -> pd.DataFrame:
@@ -130,3 +119,116 @@ def swap_group_test(swap: pd.DataFrame, control_scale: float = 0.0) -> pd.DataFr
                      "mean_delta_gain": gain.mean() if len(gain) else np.nan,
                      "p_delta_gain": wilcoxon_p(gain.values) if len(gain) else np.nan})
     return pd.DataFrame(rows)
+
+
+# ---- phase-matched within-condition swap -------------------------------------------------------------------------
+# The cue-aligned swap above lines up only the LED onset; every later event of the donor falls wherever that trial
+# had it. Here the donor's EEG is time-warped piecewise-linearly so that every task event the two trials share lands on
+# the recipient's event, and the donor comes from a trial of the same weight and surface. Task cues, task phase and
+# the broad waveform statistics stay; only the trial-specific EEG changes. Values are taken from real donor tokens
+# (nearest token, no interpolation of EEG values); outside the first and last shared event time runs at its own speed,
+# and past the donor trial's ends its end values are held, as in the cue-aligned swap. Warping stretches or squeezes
+# the donor's waveform between events, so even a model that reads only the task phase loses a little under this swap
+# (about 0.08 in r for a 0.16 s wide event-locked bump in the tests): judge delta against the control's delta, not 0.
+
+ANCHOR_EVENTS = ("led_on", "hand_start", "first_touch", "lift_off", "replace", "release", "hand_stop")
+
+
+def event_anchors(lift: dict, a: int, b: int) -> dict:
+    """{event: token inside the trial [a, b)} for the lift's events in task order; None, out-of-range and out-of-order
+    events (not later than the previous kept one) are dropped."""
+    out, last = {}, -1
+    for ev in ANCHOR_EVENTS:
+        s = lift.get(ev)
+        if s is None:
+            continue
+        t = int(s) // Q - a
+        if 0 <= t < b - a and t > last:
+            out[ev], last = t, t
+    return out
+
+
+def _warped(src: np.ndarray, src_anchors: dict, length: int, anchors: dict) -> tuple[np.ndarray, int]:
+    """`length` tokens of `src`, its shared events moved onto `anchors`; returns the array and the number shared."""
+    shared = [ev for ev in ANCHOR_EVENTS if ev in anchors and ev in src_anchors]
+    r = np.array([anchors[ev] for ev in shared], dtype=float)
+    d = np.array([src_anchors[ev] for ev in shared], dtype=float)
+    keep = np.concatenate([[True], (np.diff(r) > 0) & (np.diff(d) > 0)]) if len(shared) else np.zeros(0, bool)
+    r, d = r[keep], d[keep]
+    k = np.arange(length, dtype=float)
+    if not len(r):
+        pos = k
+    else:
+        pos = np.interp(k, r, d)
+        pos[k < r[0]] = d[0] + (k[k < r[0]] - r[0])                  # before the first shared event: own speed
+        pos[k > r[-1]] = d[-1] + (k[k > r[-1]] - r[-1])              # after the last one: own speed
+    idx = np.clip(np.rint(pos).astype(int), 0, len(src) - 1)         # past the donor's ends: its end values held
+    return src[idx], int(keep.sum())
+
+
+def _donors_with_fallback(conditions, rng) -> tuple[np.ndarray, list]:
+    """A derangement inside each (weight, surface) group; a trial alone in its group takes a donor of the same weight,
+    else any other trial. Returns the donors and the match level of every trial."""
+    n = len(conditions)
+    if n < 2:
+        raise ValueError(f"a swap needs at least 2 trials, got {n}")
+    donors = derangement(n, rng, conditions)
+    level = ["same_condition"] * n
+    counts = {c: conditions.count(c) for c in set(conditions)}
+    for i, c in enumerate(conditions):
+        if counts[c] > 1:
+            continue
+        same_w = [j for j in range(n) if j != i and conditions[j][0] == c[0]]
+        pool = same_w or [j for j in range(n) if j != i]
+        donors[i] = int(rng.choice(pool))
+        level[i] = "same_weight" if same_w else "any"
+    return donors, level
+
+
+def phase_matched_swap(eeg_by_series, lifts_by_series, rng, clip=None):
+    """Every trial gets the time-warped EEG of another trial of the same condition; returns (arrays, donor table)."""
+    trials = []
+    for s, (eeg, lifts) in enumerate(zip(eeg_by_series, lifts_by_series)):
+        led_lift = {int(l["led_on"]) // Q: l for l in lifts if l.get("led_on") is not None}
+        for a, b, led in trial_bounds(lifts, len(eeg)):
+            lift = led_lift.get(led, {})
+            trials.append({"series": s, "a": a, "b": b, "anchors": event_anchors(lift, a, b),
+                           "condition": (lift.get("CurW"), lift.get("CurS"))})
+    donors, level = _donors_with_fallback([t["condition"] for t in trials], rng)
+    out = [np.array(e, copy=True) for e in eeg_by_series]
+    rows = []
+    for i, (t, j) in enumerate(zip(trials, donors)):
+        d = trials[j]
+        src = np.asarray(eeg_by_series[d["series"]])[d["a"]:d["b"]]
+        x, n_shared = _warped(src, d["anchors"], t["b"] - t["a"], t["anchors"])
+        out[t["series"]][t["a"]:t["b"]] = np.clip(x, -clip, clip) if clip is not None else x
+        rows.append({"recipient": i, "donor": int(j), "match_level": level[i], "n_shared_anchors": n_shared})
+    return out, pd.DataFrame(rows)
+
+
+def _swap_draws(model, test_tokens, lifts_by_series, norm, cfg, device, make_swap) -> dict:
+    """r and MSE (500 Hz, original units) of the true EEG and of every swap draw; make_swap(eeg_z, lifts, rng, clip)."""
+    ec = cfg["evaluation"]
+    n_draws, clip = int(ec.get("n_swap", 10)), cfg["eeg"]["clip"]
+    kw = dict(window=cfg["tokens"]["window"], hop=cfg["tokens"]["hop"], use_amp=bool(cfg["training"]["use_amp"]),
+              clip=clip)
+    target = np.concatenate([t["emg_full"] for t in test_tokens])
+    true = np.concatenate([predict_eeg_series(model, t, norm, device, **kw) for t in test_tokens])
+    eeg_z = [normalise_eeg(t, norm, clip) for t in test_tokens]
+    rng = np.random.default_rng(ec["seed"])
+    r, m = [], []
+    for _ in range(n_draws):
+        alt = make_swap(eeg_z, lifts_by_series, rng, clip)
+        pred = np.concatenate([predict_eeg_series(model, t, norm, device, eeg=a, **kw) for t, a in zip(test_tokens, alt)])
+        r.append(_r(pred, target)); m.append(((pred - target) ** 2).mean(0))
+    return {"r_true": _r(true, target), "mse_true": ((true - target) ** 2).mean(0), "r": np.asarray(r),
+            "mse": np.asarray(m), "n_draws": n_draws}
+
+
+def evaluate_phase_matched_swap(model, test_tokens, lifts_by_series, norm, cfg, device, names) -> pd.DataFrame:
+    """Per muscle: r_true, r_swap, r_swap_sd, delta = r_true - r_swap, mse_true, mse_swap under the phase-matched swap."""
+    d = _swap_draws(model, test_tokens, lifts_by_series, norm, cfg, device,
+                    lambda e, l, rng, clip: phase_matched_swap(e, l, rng, clip)[0])
+    return pd.DataFrame({"muscle": list(names), "r_true": d["r_true"], "r_swap": d["r"].mean(0), "r_swap_sd": d["r"].std(0),
+                         "delta": d["r_true"] - d["r"].mean(0), "mse_true": d["mse_true"], "mse_swap": d["mse"].mean(0),
+                         "n_draws": d["n_draws"]})

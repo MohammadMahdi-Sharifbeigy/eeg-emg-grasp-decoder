@@ -125,3 +125,92 @@ def test_swap_group_test():
     g = swap_group_test(pd.DataFrame(rows)).set_index("scale")
     assert g.loc[0.1, "p_delta"] < 0.05 and g.loc[0.1, "mean_delta_gain"] == pytest.approx(0.05)
     assert g.loc[0.1, "p_delta_gain"] < 0.05 and np.isnan(g.loc[0.0, "p_delta_gain"])
+
+
+# ---- phase-matched within-condition swap -------------------------------------------------------------------------
+from v3.nulls import _warped, event_anchors, evaluate_phase_matched_swap, phase_matched_swap
+
+EVENTS_ORDER = ("led_on", "hand_start", "first_touch", "lift_off", "replace", "release", "hand_stop")
+
+
+def _jittered_lifts(n_tok, seed, period=300, first=30, w=(1, 2), s=(1,)):
+    """Lifts whose intervals between events vary from lift to lift (so only a phase-matched swap keeps them aligned)."""
+    r = np.random.default_rng(seed)
+    out = []
+    for k, t0 in enumerate(range(first, n_tok - period + 1, period)):
+        gaps = np.cumsum([0] + list(r.integers(10, 40, size=6)))
+        out.append({"lift": k, "CurW": w[k % len(w)], "CurS": s[k % len(s)],
+                    **{e: int((t0 + g) * Q) for e, g in zip(EVENTS_ORDER, gaps)}})
+    return out
+
+
+def test_event_anchors_drop_missing_and_out_of_order_events():
+    lift = {"led_on": 100 * Q, "hand_start": None, "first_touch": 130 * Q, "lift_off": 120 * Q, "replace": 150 * Q}
+    assert event_anchors(lift, 90, 400) == {"led_on": 10, "first_touch": 40, "replace": 60}
+    assert event_anchors(lift, 90, 140) == {"led_on": 10, "first_touch": 40}
+
+
+def test_warp_moves_every_shared_event_onto_the_recipients():
+    src = np.arange(100.0)[:, None]
+    src_anchors = {"led_on": 10, "first_touch": 30, "lift_off": 70}
+    anchors = {"led_on": 5, "first_touch": 40, "lift_off": 60, "replace": 80}
+    x, n = _warped(src, src_anchors, 90, anchors)
+    assert n == 3 and len(x) == 90
+    for ev in src_anchors:
+        assert x[anchors[ev], 0] == src[src_anchors[ev], 0]
+    assert x[0, 0] == 5.0 and x[-1, 0] == 99.0                      # own speed outside: 10 - 5 = 5 and 70 + (89 - 60) = 99
+    assert np.all(np.diff(x[:, 0]) >= 0)
+
+
+def test_phase_matched_donors_share_the_condition_and_report_fallbacks():
+    lifts = [_jittered_lifts(3000, 0, w=(1, 2, 4))]
+    lifts[0][-1]["CurW"], lifts[0][-1]["CurS"] = 8, 9                 # a condition with a single trial
+    eeg = [np.zeros((3000, 2, 1), np.float32)]
+    _, table = phase_matched_swap(eeg, lifts, np.random.default_rng(0))
+    cond = [(l["CurW"], l["CurS"]) for l in lifts[0]]
+    same = table[table.match_level == "same_condition"]
+    assert all(cond[r] == cond[d] for r, d in zip(same.recipient, same.donor))
+    assert (table.recipient != table.donor).all()
+    assert table.match_level.iloc[-1] == "any" and table.n_shared_anchors.max() == 7
+
+
+class _Stub2(torch.nn.Module):
+    causal = False
+
+    def forward(self, eeg):
+        return {"E": torch.relu(eeg[:, :, 0, :1]).repeat(1, 1, 5).sqrt(), "fin": eeg[:, :, 0, :]}
+
+
+def _lift_off_world(trial_specific: bool, n_tok=3000):
+    r = np.random.default_rng(1)
+    toks, lifts = [], []
+    for s in range(2):
+        l = _jittered_lifts(n_tok, seed=10 + s, w=(1,))
+        drive = np.zeros(n_tok)
+        for a, b, led in trial_bounds(l, n_tok):
+            lift = next(x for x in l if x["led_on"] // Q == led)
+            t = np.arange(a, b) - lift["lift_off"] // Q
+            drive[a:b] = np.exp(-0.5 * (t / 8.0) ** 2) * (r.uniform(0.2, 2.0) if trial_specific else 1.0)
+        target = drive if trial_specific else drive * r.uniform(0.5, 1.5)
+        eeg = np.zeros((n_tok, 32, 4), np.float32)
+        eeg[:, 0, 0] = drive
+        emg = np.repeat(target[:, None], 5, 1).astype(np.float32)
+        toks.append({"series": s, "eeg": eeg, "emg": emg, "emg_full": to_samples(emg, n_tok * Q), "n_samples": n_tok * Q})
+        lifts.append(l)
+    norm = {"eeg_mean": np.zeros((32, 4), np.float32), "eeg_std": np.ones((32, 4), np.float32),
+            "emg_scale": np.ones(5, np.float32)}
+    return toks, lifts, norm
+
+
+def test_phase_matched_swap_keeps_a_lift_off_locked_model_and_the_cue_swap_does_not():
+    toks, lifts, norm = _lift_off_world(trial_specific=False)
+    pm = evaluate_phase_matched_swap(_Stub2(), toks, lifts, norm, _cfg(), torch.device("cpu"), MUSCLES)
+    cue = evaluate_swap(_Stub2(), toks, lifts, norm, _cfg(), torch.device("cpu"), MUSCLES)
+    assert (pm.delta.abs() < 0.1).all() and (cue.delta > pm.delta + 0.3).all()      # warping stretches the bump a little
+    assert {"mse_true", "mse_swap"} <= set(pm.columns)
+
+
+def test_phase_matched_swap_removes_trial_specific_information():
+    toks, lifts, norm = _lift_off_world(trial_specific=True)
+    pm = evaluate_phase_matched_swap(_Stub2(), toks, lifts, norm, _cfg(), torch.device("cpu"), MUSCLES)
+    assert (pm.r_true > 0.99).all() and (pm.delta > 0.15).all() and (pm.mse_swap > pm.mse_true).all()
