@@ -201,3 +201,38 @@ def test_config_has_the_b_vs_f_block():
     cc = CONFIG_V3["b_vs_f"]
     assert cc["horizons_ms"] == [0, 200, 500, 1000] and tuple(cc["sources"]) == C.SOURCES
     assert cc["checkpoint_dir"].endswith("checkpoints_v2_horizon") and cc["results_dir"] == "results/v3"
+
+
+def test_predictions_match_the_scores():
+    df, (xv, evv, rv, yv, xt, evt, rt, lab, kt, yt) = _scores(eeg_weight=1.0)
+    p = C.b_vs_f_predictions(xv, evv, rv, xt, evt, kt, evv[:, :2], yv, evt[:, :2])
+    row = df.set_index("segment").loc["all"]
+    assert ((p["B"] - yt) ** 2).mean() == pytest.approx(row.mse_B) and ((p["F"] - yt) ** 2).mean() == pytest.approx(row.mse_F)
+    assert ((p["causal_cue"] - yt) ** 2).mean() == pytest.approx(row.mse_causal_cue)
+    assert np.allclose(p["F"], np.maximum(kt + p["F_correction"], 0))
+
+
+def test_onset_b_vs_f_glue(monkeypatch):
+    n_tok, h = 1200, 10                                             # a 200 ms horizon
+    lifts = [{"lift": i, "led_on": t * Q, "hand_start": (t + 15) * Q, "CurW": 1, "CurS": 1}
+             for i, t in enumerate(range(60, n_tok - 200, 300))]
+    toks = [{"series": 1, "eeg": np.zeros((n_tok, 32, 4), np.float32), "kin": np.zeros((n_tok, 24), np.float32)}]
+
+    def fake_collect(model, toks_, norm, cfg, device, p=None):
+        y = np.full((n_tok, 5), 0.1)
+        for l in lifts:                                             # target axis = series token + h
+            a = l["led_on"] // Q - h + 25
+            y[a:a + 40] = 1.0
+        return {"K": y.copy(), "y": y, "x": np.zeros((n_tok, 4)), "labels": np.full(n_tok, "other", object),
+                "lifts": [lifts], "n_tok": [n_tok]}
+
+    monkeypatch.setattr(C, "collect", fake_collect)
+    monkeypatch.setattr(C, "eeg_sources", lambda *a, **k: {"eeg": (np.random.default_rng(0).normal(size=(n_tok, 4)),
+                                                                     np.random.default_rng(1).normal(size=(n_tok, 4)))})
+    cfg = copy.deepcopy(CONFIG_V3)
+    cfg["tokens"]["horizon"] = h
+    sd = {"tokens": {"val": toks, "test": toks}, "norm": _norm(), "names": ["AD", "BR", "ED", "FD", "FDI"]}
+    df = C.onset_b_vs_f(None, sd, cfg, torch.device("cpu"), 2, 200)
+    assert set(df.condition) == {"K", "B", "F", "causal_cue"} and set(df.muscle) == set(sd["names"])
+    k = df[df.condition == "K"]
+    assert np.allclose(k.onset_true_s, 0.5, atol=0.03) and np.allclose(k.error_ms, 0.0)   # K is the target here

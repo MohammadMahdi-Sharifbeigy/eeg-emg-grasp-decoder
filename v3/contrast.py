@@ -49,14 +49,18 @@ from v2.electrodes import channel_names
 from v2.evaluate import standard_metrics
 from v2.model import build_model
 from v2.residual import _apply, eeg_features, fit_ridge
+from v2.tokens import FS_IN, Q
 from v2.train import load_best
 
 from .config import CONFIG_V3, PERIPHERAL
 from .evaluate import holm
 from .nulls import phase_matched_swap, swap_series
+from .onset import onset_error
 from .timing import causal_features
 
 SOURCES = ("eeg", "swap", "phase_swap", "bandpower", "peripheral")
+EVENT_KEYS = ("led_on", "hand_start", "first_touch", "both_touch", "lift_off", "replace", "release", "hand_stop",
+              "led_off")
 COLUMNS = ["segment", "n_fit", "n_test", "eeg_skill", "eeg_skill_null_mean", "p", "vaf_gain", "ccc_B", "ccc_F",
            "mse_B", "mse_F", "mse_K", "mse_causal_cue"]
 METRICS = ["eeg_skill", "vaf_gain", "ccc_B", "ccc_F", "mse_B", "mse_F", "mse_K", "mse_causal_cue"]
@@ -84,6 +88,23 @@ def _fit_terms(x, y, n_eeg: int):
     return predict
 
 
+def b_vs_f_predictions(eeg_val, ev_val, res_val, eeg_test, ev_test, k_test, cue_val=None, y_val=None,
+                       cue_test=None) -> dict:
+    """The test predictions of B, F (and causal_cue) in the model domain at the token rate, fitted on validation.
+
+    Keys: B, F, K, F_correction (F's ridge output), F_eeg_term (its EEG part), and causal_cue when cue_val is given.
+    """
+    res_val, k_test = np.asarray(res_val, np.float64), np.asarray(k_test, np.float64)
+    eeg_val, eeg_test = np.asarray(eeg_val, np.float64), np.asarray(eeg_test, np.float64)
+    corr_f, term = _fit_terms(np.concatenate([eeg_val, ev_val], 1), res_val, eeg_val.shape[1])(
+        np.concatenate([eeg_test, ev_test], 1))
+    out = {"B": np.maximum(k_test + _ridge_fit(ev_val, res_val)(ev_test), 0.0), "F": np.maximum(k_test + corr_f, 0.0),
+           "K": k_test, "F_correction": corr_f, "F_eeg_term": term}
+    if cue_val is not None:
+        out["causal_cue"] = np.maximum(_ridge_fit(cue_val, np.asarray(y_val, np.float64))(cue_test), 0.0)
+    return out
+
+
 def b_vs_f_scores(eeg_val, ev_val, res_val, eeg_test, ev_test, res_test, lab_test, k_test, y_test, n_null: int,
                   seed: int, cue_val=None, y_val=None, cue_test=None, window: int = CONFIG_V3["tokens"]["window"],
                   hop: int = CONFIG_V3["tokens"]["hop"]) -> pd.DataFrame:
@@ -97,14 +118,8 @@ def b_vs_f_scores(eeg_val, ev_val, res_val, eeg_test, ev_test, res_test, lab_tes
     lab_test = np.asarray(lab_test, object)
     res_val, res_test = np.asarray(res_val, np.float64), np.asarray(res_test, np.float64)
     k_test, y_test = np.asarray(k_test, np.float64), np.asarray(y_test, np.float64)
-    eeg_val, eeg_test = np.asarray(eeg_val, np.float64), np.asarray(eeg_test, np.float64)
-    pred_b = np.maximum(k_test + _ridge_fit(ev_val, res_val)(ev_test), 0.0)
-    corr_f, term = _fit_terms(np.concatenate([eeg_val, ev_val], 1), res_val, eeg_val.shape[1])(
-        np.concatenate([eeg_test, ev_test], 1))
-    pred_f = np.maximum(k_test + corr_f, 0.0)
-    pred_cue = None
-    if cue_val is not None:
-        pred_cue = np.maximum(_ridge_fit(cue_val, np.asarray(y_val, np.float64))(cue_test), 0.0)
+    p = b_vs_f_predictions(eeg_val, ev_val, res_val, eeg_test, ev_test, k_test, cue_val, y_val, cue_test)
+    pred_b, pred_f, corr_f, term, pred_cue = p["B"], p["F"], p["F_correction"], p["F_eeg_term"], p.get("causal_cue")
     err = lambda pred: ((pred - y_test) ** 2).mean(1)                        # per token, mean over muscles
     e_k, e_b, e_f = err(k_test), err(pred_b), err(pred_f)
     e_cue = err(pred_cue) if pred_cue is not None else np.full(len(y_test), np.nan)
@@ -303,3 +318,42 @@ def main(argv=None):
 
 if __name__ == "__main__":
     main()
+
+
+def onset_b_vs_f(model, sd, cfg, device, participant: int, horizon_ms: int) -> pd.DataFrame:
+    """Onset timing error (v3.onset) of K, B, F and causal_cue on the test series of one horizon model, EEG source "eeg".
+
+    Envelopes in original units (s_c * u ** 2) at the token rate; event times are shifted by the horizon so they index
+    the target axis. Columns: subject, horizon_ms, condition, lift, muscle, onset_true_s, onset_pred_s, error_ms.
+    """
+    p = int(participant)
+    v = collect(model, sd["tokens"]["val"], sd["norm"], cfg, device, p)
+    t = collect(model, sd["tokens"]["test"], sd["norm"], cfg, device, p)
+    feats = eeg_sources(model, sd["tokens"]["val"], sd["tokens"]["test"], v["lifts"], t["lifts"], sd["norm"], cfg,
+                        device, ("eeg",))["eeg"]
+    pred = b_vs_f_predictions(feats[0], event_features(v), v["y"] - v["K"], feats[1], event_features(t), t["K"],
+                              _cue_features(v), v["y"], _cue_features(t))
+    scale = np.asarray(sd["norm"]["emg_scale"], np.float64)
+    lin = lambda u: scale * np.asarray(u, np.float64) ** 2
+    h = int(cfg["tokens"].get("horizon", 0))
+    names = sd.get("names", list(range(t["y"].shape[1])))
+    rows, start = [], 0
+    for lifts, n in zip(t["lifts"], t["n_tok"]):
+        shifted = [{k: (v_ - h * Q if k in EVENT_KEYS and v_ is not None else v_) for k, v_ in l.items()} for l in lifts]
+        sl = slice(start, start + n)
+        for cond in ("K", "B", "F", "causal_cue"):
+            e = onset_error(lin(pred[cond][sl]), lin(t["y"][sl]), shifted, fs=FS_IN / Q, names=names)
+            rows.append(e.assign(condition=cond))
+        start += n
+    df = pd.concat(rows, ignore_index=True).assign(subject=f"P{p}", horizon_ms=int(horizon_ms))
+    return df[["subject", "horizon_ms", "condition", "lift", "muscle", "onset_true_s", "onset_pred_s", "error_ms"]]
+
+
+def run_b_vs_f_onset(participant: int, horizon_ms: int, ckpt_root) -> pd.DataFrame:
+    """onset_b_vs_f from the causal horizon checkpoint ckpt_root/h{h}ms/P{p}."""
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    cfg = horizon_config(horizon_ms)
+    sd = subject_data(int(participant), cfg)
+    model = build_model(cfg, sd["prior"]).to(device)
+    load_best(model, Path(ckpt_root) / f"h{int(horizon_ms)}ms" / f"P{int(participant)}", device)
+    return onset_b_vs_f(model, sd, cfg, device, participant, horizon_ms)

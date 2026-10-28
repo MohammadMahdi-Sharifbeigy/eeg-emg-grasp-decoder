@@ -5,7 +5,7 @@ while switching muscles on at the wrong time. Rule (fixed before any result was 
   baseline  median of the envelope in [hand_start - 1 s, hand_start) (led_on when hand_start is missing)
   peak      maximum in [led_on, led_on + 3 s)
   onset     first sample in that search window where the envelope reaches baseline + 20 % of (peak - baseline)
-A lift without an LED onset is skipped; a muscle that never rises above its baseline in a lift gets NaN, never 0.
+A lift without an LED onset inside the envelope is skipped; a muscle that never rises above its baseline in a lift gets NaN, never 0.
 The same rule is applied to the prediction (its own baseline and peak) and to the target.
 Event times are 500 Hz samples of the series (eeg_controls.common.lifts); `fs` is the rate of the envelope.
 """
@@ -29,6 +29,8 @@ def onset_times(env, lifts, fs: float = 500.0, frac: float = FRAC, baseline_s=BA
         if lift.get("led_on") is None:
             continue
         led = int(round(lift["led_on"] * scale))
+        if not 0 <= led < n:                                         # outside this envelope (e.g. after a horizon shift)
+            continue
         anchor = lift.get("hand_start")
         anchor = led if anchor is None else int(round(anchor * scale))
         b0, b1 = max(anchor + int(round(baseline_s[0] * fs)), 0), max(anchor + int(round(baseline_s[1] * fs)), 0)
