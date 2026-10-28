@@ -109,3 +109,28 @@ def test_verdict_step_reads_the_saved_tables(tmp_path, monkeypatch):
     assert (ctx.folder("verdict") / "verdict.csv").exists() and (ctx.folder("verdict") / "eguided_vs_e0.csv").exists()
     assert bool(out.Eguided_beats_E0.iloc[0]) and out.onset_abs_ms_B.iloc[0] == 50.0
     assert any("->" in l for l in lines)
+
+
+def test_b_vs_f_cache_without_a_source_is_recomputed_and_bad_runs_are_skipped(tmp_path, monkeypatch):
+    from v3.contrast import has_sources
+    calls = []
+    monkeypatch.setattr(R, "_horizon_scores", lambda *a: calls.append(a[0]) or _fake_scores(*a))
+    ctx = Context(root=tmp_path, participants="1", log=(lines := []).append)
+    ctx.cfg["b_vs_f"]["horizons_ms"] = [0]
+    d = tmp_path / ctx.cfg["b_vs_f"]["checkpoint_dir"] / "h0ms" / "P1"
+    d.mkdir(parents=True)
+    (d / "best.pt").write_bytes(b"x")
+    R.step_b_vs_f(ctx)
+    f = ctx.folder("b_vs_f") / "runs" / "h0ms_P1.csv"
+    old = pd.read_csv(f)
+    old[old.source != "phase_swap"].to_csv(f, index=False)           # a run saved before phase_swap existed
+    assert not has_sources(pd.read_csv(f), ctx.cfg["b_vs_f"]["sources"])
+    R.step_b_vs_f(ctx)
+    assert calls == [1, 1] and has_sources(pd.read_csv(f), ctx.cfg["b_vs_f"]["sources"])
+
+    def too_few_trials(*a):
+        raise ValueError("a swap needs at least 2 trials, got 1")
+    monkeypatch.setattr(R, "_horizon_scores", too_few_trials)
+    f.unlink()
+    assert R.step_b_vs_f(ctx) == {} and any("skipped (a swap needs" in l for l in lines)
+

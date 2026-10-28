@@ -32,7 +32,7 @@ CONFIG_V3["b_vs_f"] = {                             # B (K + past events) vs F (
     "checkpoint_dir": "outputs/checkpoints_v2_horizon",   # the causal v2 horizon models, h{h}ms/P{p}, read only
     "horizons_ms": [0, 200, 500, 1000],
     "sources": ["eeg", "swap", "phase_swap", "bandpower", "peripheral"],
-    "results_dir": "results/v3",                    # b_vs_f.csv, b_vs_f_summary.csv and b_vs_f_runs/
+    "results_dir": "results/v3",                    # tables go to its step3_b_vs_f/ folder
 }
 CONFIG_V3["templates"] = {                          # template deviation test, v3.templates
     "n_bins": 20,                                   # warped-time bins between two consecutive task events

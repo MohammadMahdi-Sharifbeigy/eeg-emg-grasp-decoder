@@ -29,9 +29,10 @@ EEG sources of F (the real one and G-style negative controls):
   bandpower   trailing 1 s band power of all channels (v2.residual.eeg_features, no learned weights)
   peripheral  the same band power on the `peripheral` preset channels only; compare it with `bandpower`
 
+Prefer `python -m v3.run --step b_vs_f`, which also writes the onset table. Both write into results/v3/step3_b_vs_f/.
 Run from the repository root (no training; it reads the horizon checkpoints):
     env/Scripts/python.exe -m v3.contrast --participants all --horizons-ms 0,200,500,1000 \
-        --checkpoints outputs/checkpoints_v2_horizon --out results/v3
+        --checkpoints outputs/checkpoints_v2_horizon
 """
 import argparse
 from pathlib import Path
@@ -245,6 +246,11 @@ def run_b_vs_f(participant: int, horizon_ms: int, ckpt_root, n_null: int = 99, s
                         match_condition=match_condition)
 
 
+def has_sources(df: pd.DataFrame, sources) -> bool:
+    """A cached run is reusable only if it holds every requested EEG source (a run saved before a source existed is not)."""
+    return "source" in df and set(sources) <= set(df.source.unique())
+
+
 def summarise_b_vs_f(df: pd.DataFrame, primary: str = "eeg") -> pd.DataFrame:
     """Per horizon, phase and EEG source over participants.
 
@@ -284,19 +290,19 @@ def main(argv=None):
     ap.add_argument("--participants", default="all")
     ap.add_argument("--horizons-ms", default=",".join(str(h) for h in cc["horizons_ms"]))
     ap.add_argument("--checkpoints", default=str(ROOT / cc["checkpoint_dir"]))
-    ap.add_argument("--out", default=str(ROOT / cc["results_dir"]))
+    ap.add_argument("--out", default=str(ROOT / cc["results_dir"] / "step3_b_vs_f"))      # the folder of v3.run step 3
     ap.add_argument("--sources", default=",".join(cc["sources"]))
     ap.add_argument("--n-null", type=int, default=int(CONFIG_V3["evaluation"]["n_null"]))
     ap.add_argument("--any-condition-swap", action="store_true", help="swap donors from any weight and surface")
     ap.add_argument("--overwrite", action="store_true")
     a = ap.parse_args(argv)
     out, sources = Path(a.out), tuple(s.strip() for s in a.sources.split(","))
-    (out / "b_vs_f_runs").mkdir(parents=True, exist_ok=True)
+    (out / "runs").mkdir(parents=True, exist_ok=True)
     tables = []
     for h in (int(x) for x in a.horizons_ms.split(",")):
         for p in parse_subjects(a.participants):
-            f = out / "b_vs_f_runs" / f"h{h}ms_P{p}.csv"
-            if f.exists() and not a.overwrite:
+            f = out / "runs" / f"h{h}ms_P{p}.csv"
+            if f.exists() and not a.overwrite and has_sources(pd.read_csv(f), sources):
                 df = pd.read_csv(f)
             else:
                 df = run_b_vs_f(p, h, a.checkpoints, n_null=a.n_null, sources=sources,

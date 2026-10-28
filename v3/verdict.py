@@ -4,7 +4,8 @@ Primary question, per horizon: does F (K + past events + EEG) beat B (K + past e
   F_beats_B         eeg_skill = 1 - MSE(F) / MSE(B) above 0 over all tokens, Holm over the horizons, p < 0.05
   F_survives_swap   F's skill with the real EEG is above F's skill with phase-matched swapped EEG (gap > 0, Holm over
                     horizons), and the swapped EEG alone gives no significant skill: the gain is trial-specific
-  F_not_peripheral  F from peripheral-channel band power does not beat F from all-channel band power
+  F_not_peripheral  F from peripheral-channel band power does not do the job of all-channel band power: its skill
+                    is not significant (Holm over horizons) or it is below the all-channel skill; unknown (NaN) fails
 A positive claim needs all three. F_beats_B without the other two reads "task-locked or artifact-related".
 Secondary question: does the kinematic guide help the EEG-only student (Eguided against E0, seed-averaged, Holm over
 the guided scales)? The interpretation matrix of the proposal combines the two:
@@ -38,10 +39,10 @@ TASK_LOCKED = "F beats B, but the gain is task-locked or artifact-related (it fa
 def eguided_vs_e0(means: pd.DataFrame, control_scale: float = 0.0) -> pd.DataFrame:
     """Per guided scale: E0 and Eguided mean r (v3.evaluate.subject_means, seed-averaged), the gain, its one-sided
     Wilcoxon p over participants, Holm over the guided scales, and Eguided_beats_E0."""
-    e0 = means[means.scale == control_scale].set_index("subject").E_guided_r
+    e0 = means[means.scale == control_scale].set_index("subject").student_r
     rows = []
     for scale in sorted(s for s in means.scale.unique() if s != control_scale):
-        cur = means[means.scale == scale].set_index("subject").E_guided_r
+        cur = means[means.scale == scale].set_index("subject").student_r
         d = (cur - e0.reindex(cur.index)).dropna()
         rows.append({"scale": scale, "n_subjects": len(d), "E0_r": e0.mean(), "Eguided_r": cur.mean(),
                      "gain_r": d.mean(), "p_gain": wilcoxon_p(d.values)})
@@ -82,7 +83,9 @@ def proposal_verdict(b_vs_f_summary: pd.DataFrame, student: pd.DataFrame = None,
         beats = get(f, "eeg_skill_mean") > 0 and get(f, "p_eeg_skill_holm_horizons") < ALPHA
         survives = (get(ps, "gap_mean") > 0 and get(ps, "p_gap_holm_horizons") < ALPHA
                     and not get(ps, "p_eeg_skill_holm_horizons") < ALPHA)
-        not_peripheral = bool(per.size and bp.size and not get(per, "eeg_skill_mean") > get(bp, "eeg_skill_mean"))
+        per_skill, bp_skill = get(per, "eeg_skill_mean"), get(bp, "eeg_skill_mean")
+        not_peripheral = bool(np.isfinite(per_skill) and np.isfinite(bp_skill)
+                              and (not get(per, "p_eeg_skill_holm_horizons") < ALPHA or per_skill < bp_skill))
         neural = bool(beats and survives and not_peripheral)
         if beats and not neural:
             text = TASK_LOCKED

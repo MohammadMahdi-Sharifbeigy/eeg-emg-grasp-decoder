@@ -129,20 +129,33 @@ def cache_path(cache_dir, participant: int, variant: str, horizon_ms: float) -> 
     return Path(cache_dir) / f"P{int(participant)}_{variant}_h{int(round(horizon_ms))}ms.npz"
 
 
+def _cache_key(splits: dict, variant: str, horizon_ms: float) -> str:
+    """Everything a fit depends on: the series of every split, their lengths, the variant, horizon and basis."""
+    sid = lambda s: -1 if s.get("series") is None else int(s["series"])
+    parts = [f"{k}:" + ",".join(f"{sid(s)}/{len(s['emg'])}" for s in splits[k]) for k in ("train", "val", "test")]
+    return "|".join(parts + [variant, f"{float(horizon_ms):g}", f"lags {LAGS[0]:g}-{LAGS[-1]:g} step "
+                             f"{LAGS[1] - LAGS[0]:g} width {WIDTH:g}", f"alphas {len(ALPHAS)}"])
+
+
 def cached_timing(cache_dir, participant: int, splits: dict, variant: str, horizon_ms: float = 0.0) -> dict:
-    """fit_timing, read from or written to cache_dir (one .npz per participant, variant and horizon)."""
+    """fit_timing, read from or written to cache_dir (one .npz per participant, variant and horizon).
+
+    A cached file is used only when its key (_cache_key: series, lengths, variant, horizon, basis) matches; otherwise
+    the model is fitted again and the file replaced.
+    """
     path = cache_path(cache_dir, participant, variant, horizon_ms)
     series = [-1 if s.get("series") is None else int(s["series"]) for s in splits["test"]]
+    key = _cache_key(splits, variant, horizon_ms)
     if path.exists():
         with np.load(path, allow_pickle=False) as d:
-            if list(d["series"]) == series:
+            if "key" in d and str(d["key"]) == key:
                 test = [{"series": sid, "u": d[f"u_{i}"], "y_tok": d[f"y_tok_{i}"], "y_500": d[f"y_500_{i}"]}
                         for i, sid in enumerate(series)]
                 return {"variant": variant, "horizon_ms": float(horizon_ms), "alpha": float(d["alpha"]),
                         "scale": d["scale"], "test": test}
     fitted = fit_timing(splits, variant, horizon_ms)
     path.parent.mkdir(parents=True, exist_ok=True)
-    arrays = {"series": np.asarray(series), "alpha": fitted["alpha"], "scale": fitted["scale"]}
+    arrays = {"series": np.asarray(series), "alpha": fitted["alpha"], "scale": fitted["scale"], "key": np.asarray(key)}
     for i, t in enumerate(fitted["test"]):
         arrays.update({f"u_{i}": t["u"], f"y_tok_{i}": t["y_tok"], f"y_500_{i}": t["y_500"]})
     np.savez(path, **arrays)

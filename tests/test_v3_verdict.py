@@ -8,7 +8,7 @@ SUBJECTS = [f"P{i}" for i in range(1, 13)]
 
 
 def _summary(eeg=(0.05, 0.001), swap_gap=(0.04, 0.001), swap_skill_p=0.5, bandpower=0.01, peripheral=0.001,
-             horizons=(0, 500)):
+             peripheral_p=0.5, horizons=(0, 500)):
     rows = []
     for h in horizons:
         common = dict(horizon_ms=h, segment="all", n_subjects=12, eeg_skill_sem=0.01, vaf_gain_mean=1.0, ccc_B_mean=0.8,
@@ -19,7 +19,7 @@ def _summary(eeg=(0.05, 0.001), swap_gap=(0.04, 0.001), swap_skill_p=0.5, bandpo
                       gap_mean=swap_gap[0], p_gap_holm_horizons=swap_gap[1]),
                  dict(common, source="bandpower", eeg_skill_mean=bandpower, p_eeg_skill_holm_horizons=0.2,
                       gap_mean=0.0, p_gap_holm_horizons=0.5),
-                 dict(common, source="peripheral", eeg_skill_mean=peripheral, p_eeg_skill_holm_horizons=0.5,
+                 dict(common, source="peripheral", eeg_skill_mean=peripheral, p_eeg_skill_holm_horizons=peripheral_p,
                       gap_mean=0.0, p_gap_holm_horizons=0.5)]
         rows.append(dict(common, source="eeg", segment="hold", eeg_skill_mean=0.5, p_eeg_skill_holm_horizons=0.001))
     return pd.DataFrame(rows)
@@ -27,8 +27,8 @@ def _summary(eeg=(0.05, 0.001), swap_gap=(0.04, 0.001), swap_skill_p=0.5, bandpo
 
 def _means(gain):
     j = np.linspace(-0.01, 0.01, 12)
-    rows = [dict(subject=s, scale=0.0, E_guided_r=0.6 + j[i]) for i, s in enumerate(SUBJECTS)]
-    rows += [dict(subject=s, scale=0.1, E_guided_r=0.6 + j[i] + gain + 0.001 * i) for i, s in enumerate(SUBJECTS)]
+    rows = [dict(subject=s, scale=0.0, student_r=0.6 + j[i]) for i, s in enumerate(SUBJECTS)]
+    rows += [dict(subject=s, scale=0.1, student_r=0.6 + j[i] + gain + 0.001 * i) for i, s in enumerate(SUBJECTS)]
     return pd.DataFrame(rows)
 
 
@@ -45,7 +45,9 @@ def test_eguided_vs_e0():
     ({"eeg": (0.0, 0.4)}, -0.05, INTERPRETATION[(False, False)]),
     ({"swap_gap": (0.0, 0.6)}, 0.05, TASK_LOCKED),
     ({"swap_skill_p": 0.001}, 0.05, TASK_LOCKED),
-    ({"peripheral": 0.05}, 0.05, TASK_LOCKED),
+    ({"peripheral": 0.05, "peripheral_p": 0.001}, 0.05, TASK_LOCKED),
+    ({"peripheral": 0.05, "peripheral_p": 0.5}, 0.05, INTERPRETATION[(True, True)]),     # above, but not significant
+    ({"peripheral": float("nan")}, 0.05, TASK_LOCKED),                                     # unknown fails
 ])
 def test_interpretation_matrix(summary_kw, gain, expected):
     v = proposal_verdict(_summary(**summary_kw), eguided_vs_e0(_means(gain)))

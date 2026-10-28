@@ -110,3 +110,16 @@ def test_cache_roundtrip(tmp_path):
     b = cached_timing(tmp_path, 3, sp, "cue_causal", 200)
     assert b["alpha"] == a["alpha"]
     assert all(np.allclose(x["u"], y["u"]) and np.allclose(x["y_500"], y["y_500"]) for x, y in zip(a["test"], b["test"]))
+
+
+def test_cache_is_refitted_when_the_training_series_change(tmp_path, monkeypatch):
+    import v3.timing as T
+    sp = _splits()
+    cached_timing(tmp_path, 3, sp, "cue_causal")
+    calls = []
+    real = T.fit_timing
+    monkeypatch.setattr(T, "fit_timing", lambda *a, **k: calls.append(1) or real(*a, **k))
+    cached_timing(tmp_path, 3, sp, "cue_causal")
+    assert calls == []                                               # same data: read from the cache
+    cached_timing(tmp_path, 3, dict(sp, train=sp["train"][:2]), "cue_causal")
+    assert calls == [1]                                              # other training series: fitted again

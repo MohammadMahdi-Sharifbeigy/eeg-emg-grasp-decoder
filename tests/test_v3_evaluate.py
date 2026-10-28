@@ -52,9 +52,9 @@ def _world(tmp_path, guided_mean):
 def test_subject_means_columns_and_values(tmp_path):
     v3, a, b = _world(tmp_path, 0.77)
     m = subject_means(v3, a, b)
-    assert len(m) == 24 and {"subject", "scale", "E_guided_r", "E_saved_r", "K_r", "phase_r", "cue_r"} <= set(m.columns)
+    assert len(m) == 24 and {"subject", "scale", "student_r", "E_saved_r", "K_r", "phase_r", "cue_r"} <= set(m.columns)
     row = m[(m.subject == "P1") & (m.scale == 0.1)].iloc[0]
-    assert row.E_guided_r == pytest.approx(0.77 - 0.005) and row.K_r == pytest.approx(0.87)
+    assert row.student_r == pytest.approx(0.77 - 0.005) and row.K_r == pytest.approx(0.87)
     assert row.cue_r == pytest.approx(0.58) and row.E_saved_vaf == pytest.approx((0.645 - 0.01) * 100)
 
 
@@ -74,7 +74,7 @@ def test_wilcoxon_p_matches_scipy(tmp_path):
     g = group_tests(m).set_index("scale").loc[0.1]
     sub = m[m.scale == 0.1].set_index("subject")
     ctrl = m[m.scale == 0.0].set_index("subject")
-    expected = wilcoxon(sub.E_guided_r.values, ctrl.E_guided_r.loc[sub.index].values, alternative="greater").pvalue
+    expected = wilcoxon(sub.student_r.values, ctrl.student_r.loc[sub.index].values, alternative="greater").pvalue
     assert g.p_vs_control == pytest.approx(expected)
 
 

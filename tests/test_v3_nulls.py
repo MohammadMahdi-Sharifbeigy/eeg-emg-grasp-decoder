@@ -214,3 +214,11 @@ def test_phase_matched_swap_removes_trial_specific_information():
     toks, lifts, norm = _lift_off_world(trial_specific=True)
     pm = evaluate_phase_matched_swap(_Stub2(), toks, lifts, norm, _cfg(), torch.device("cpu"), MUSCLES)
     assert (pm.r_true > 0.99).all() and (pm.delta > 0.15).all() and (pm.mse_swap > pm.mse_true).all()
+
+
+def test_unknown_conditions_are_never_pooled():
+    lifts = [_jittered_lifts(3000, 0)]
+    for l in lifts[0]:
+        l["CurW"] = None
+    _, table = phase_matched_swap([np.zeros((3000, 2, 1), np.float32)], lifts, np.random.default_rng(0))
+    assert (table.match_level == "any").all()

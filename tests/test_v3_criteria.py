@@ -133,7 +133,7 @@ def test_subject_means_averages_seeds_and_uses_500_hz(tmp_path):
     std = _std({(0.0, 0): 0.60 + j, (0.0, 1): 0.62 + j, (0.0, 2): 0.64 + j})
     m = subject_means(std, a, b)
     row = m[m.subject == "P1"].iloc[0]
-    assert row.E_guided_r == pytest.approx(0.62 - 0.01) and row.E_guided_r_seed_sd == pytest.approx(0.02)
+    assert row.student_r == pytest.approx(0.62 - 0.01) and row.student_r_seed_sd == pytest.approx(0.02)
     assert row.n_seeds == 3 and row.phase_r == pytest.approx(0.81)
 
 

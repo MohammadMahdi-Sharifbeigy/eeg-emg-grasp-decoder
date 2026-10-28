@@ -34,6 +34,12 @@ def trial_bounds(lift_list, n_tok: int) -> list[tuple[int, int, int]]:
     return list(zip(starts, ends, leds))
 
 
+def _condition(lift: dict, i: int) -> tuple:
+    """(weight, surface) of a lift; a lift with an unknown one gets a label of its own, so it is never pooled."""
+    w, s = lift.get("CurW"), lift.get("CurS")
+    return (w, s) if w is not None and s is not None else (f"unknown {i}", None)
+
+
 def derangement(n: int, rng, groups=None) -> np.ndarray:
     """donor[i] != i for every i: a rotation of a random order (inside each group when `groups` is given).
 
@@ -90,7 +96,7 @@ def swap_series(eeg_by_series, lifts_by_series, rng, match_condition: bool = Fal
         for a, b, led in trial_bounds(lifts, len(eeg)):
             trials.append(eeg[a:b]); leds.append(led - a); where.append((s, a, b))
             lift = led_lift.get(led, {})
-            cond.append((lift.get("CurW"), lift.get("CurS")))
+            cond.append(_condition(lift, len(cond)))
     swapped, donors = cue_aligned_swap(trials, leds, rng, cond if match_condition else None, clip, return_donors=True)
     out = [np.array(e, copy=True) for e in eeg_by_series]
     for (s, a, b), x in zip(where, swapped):
@@ -194,7 +200,7 @@ def phase_matched_swap(eeg_by_series, lifts_by_series, rng, clip=None):
         for a, b, led in trial_bounds(lifts, len(eeg)):
             lift = led_lift.get(led, {})
             trials.append({"series": s, "a": a, "b": b, "anchors": event_anchors(lift, a, b),
-                           "condition": (lift.get("CurW"), lift.get("CurS"))})
+                           "condition": _condition(lift, len(trials))})
     donors, level = _donors_with_fallback([t["condition"] for t in trials], rng)
     out = [np.array(e, copy=True) for e in eeg_by_series]
     rows = []

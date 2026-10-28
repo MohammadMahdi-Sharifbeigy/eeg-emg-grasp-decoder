@@ -86,11 +86,12 @@ def _mean_r_vaf(df: pd.DataFrame, by) -> pd.DataFrame:
 
 
 def subject_means(v3_standard: pd.DataFrame, v2_standard_csv, phase_csv) -> pd.DataFrame:
-    """One row per (subject, scale): mean over muscles of r and vaf for E_guided, and the references.
+    """One row per (subject, scale): condition (E0 at scale 0, else Eguided), mean over muscles of r and vaf of the
+    student (student_r, student_vaf), and the references.
 
     v3_standard: columns muscle, r, vaf, subject, scale, and optionally seed and rate (only rate 500 is used, the
-    scoring of the references). With seeds, E_guided_* is the mean over seeds of the per-seed muscle means and
-    E_guided_*_seed_sd their standard deviation (NaN for one seed). v2_standard_csv: results/v2/standard.csv
+    scoring of the references). With seeds, student_* is the mean over seeds of the per-seed muscle means and
+    student_*_seed_sd their standard deviation (NaN for one seed). v2_standard_csv: results/v2/standard.csv
     (column `output`). phase_csv: eeg_controls/results/phase/phase_metrics.csv (column `variant`).
     """
     std = v3_standard
@@ -100,9 +101,10 @@ def subject_means(v3_standard: pd.DataFrame, v2_standard_csv, phase_csv) -> pd.D
         std = std.assign(seed=0)
     per_seed = _mean_r_vaf(std, ["subject", "scale", "seed"])
     g = per_seed.groupby(["subject", "scale"])
-    out = g[["r", "vaf"]].mean().rename(columns={"r": "E_guided_r", "vaf": "E_guided_vaf"})
-    sd = g[["r", "vaf"]].std(ddof=1).rename(columns={"r": "E_guided_r_seed_sd", "vaf": "E_guided_vaf_seed_sd"})
+    out = g[["r", "vaf"]].mean().rename(columns={"r": "student_r", "vaf": "student_vaf"})
+    sd = g[["r", "vaf"]].std(ddof=1).rename(columns={"r": "student_r_seed_sd", "vaf": "student_vaf_seed_sd"})
     out = out.join(sd).join(g.size().rename("n_seeds")).reset_index()
+    out.insert(2, "condition", np.where(out.scale == 0.0, "E0", "Eguided"))
     v2 = pd.read_csv(v2_standard_csv)
     ph = pd.read_csv(phase_csv)
     for label, df, col, key in (("E_saved", v2, "output", "E"), ("K", v2, "output", "K"),
@@ -123,7 +125,7 @@ def group_tests(means: pd.DataFrame, control_scale: float = 0.0, close_margin: f
     for scale in sorted(s for s in means.scale.unique() if s != control_scale):
         cur = means[means.scale == scale].set_index("subject")
         subj = cur.index.intersection(ctrl.index)
-        g, c, e = cur.loc[subj, "E_guided_r"], ctrl.loc[subj, "E_guided_r"], cur.loc[subj, "E_saved_r"]
+        g, c, e = cur.loc[subj, "student_r"], ctrl.loc[subj, "student_r"], cur.loc[subj, "E_saved_r"]
         p_ctrl = float(wilcoxon(g.values, c.values, alternative="greater").pvalue)
         p_saved = float(wilcoxon(g.values, e.values, alternative="greater").pvalue)
         mean_g, phase = float(g.mean()), float(cur.loc[subj, "phase_r"].mean())
@@ -266,16 +268,16 @@ def criteria(means: pd.DataFrame, swap_tests: pd.DataFrame, residual_tests: pd.D
     timing_level (mean r within close_margin of the phase model) is information only: matching a model that knows
     only the task clock is the null result, not the goal.
     """
-    ctrl = means[means.scale == control_scale].set_index("subject").E_guided_r
+    ctrl = means[means.scale == control_scale].set_index("subject").student_r
     res = residual_tests[(residual_tests.timing == primary) & (residual_tests.segment == "all")].set_index("scale")
     sw = swap_tests.set_index("scale")
     get = lambda df, col, scale: float(df[col].get(scale, np.nan)) if col in df else np.nan
     rows = []
     for scale in sorted(s for s in means.scale.unique() if s != control_scale):
         cur = means[means.scale == scale].set_index("subject")
-        d = (cur.E_guided_r - ctrl.reindex(cur.index)).dropna()
-        rows.append({"scale": scale, "n_subjects": len(d), "mean_r": cur.E_guided_r.mean(),
-                     "mean_r_seed_sd": cur["E_guided_r_seed_sd"].mean() if "E_guided_r_seed_sd" in cur else np.nan,
+        d = (cur.student_r - ctrl.reindex(cur.index)).dropna()
+        rows.append({"scale": scale, "n_subjects": len(d), "mean_r": cur.student_r.mean(),
+                     "mean_r_seed_sd": cur["student_r_seed_sd"].mean() if "student_r_seed_sd" in cur else np.nan,
                      "mean_control_r": ctrl.mean(), "mean_gain_r": d.mean(),
                      "p_gain": wilcoxon_p(d.values), "p_worse": wilcoxon_p(d.values, "less"),
                      "mean_phase_r": cur.phase_r.mean(), "mean_K_r": cur.K_r.mean(),

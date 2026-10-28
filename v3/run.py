@@ -150,11 +150,18 @@ def step_setup(ctx: Context) -> dict:
 def step_data(ctx: Context) -> dict:
     if not _header(ctx, "data"):
         return {}
+    t0 = time.time()
+    out = _load_data(ctx)
+    _footer(ctx, t0)
+    return out
+
+
+def _load_data(ctx: Context) -> dict:
     from eeg_controls.common import lifts
     from main.dataloader import emg_channel_names
     from main.preprocessing_emg_kin import compute_muscle_edge_prior
     from v2 import data as D
-    t0, cfg, out = time.time(), ctx.cfg, {}
+    cfg, out = ctx.cfg, {}
     for p in ctx.participants:
         tok = {s: [D.build_tokens(r, cfg) for r in D.load_split(ctx.root / cfg["data"]["cache_dir"], p, s)]
                for s in ("train", "val", "test")}
@@ -172,13 +179,14 @@ def step_data(ctx: Context) -> dict:
         ctx.log(f"    P{p}: {len(tok['train'])} train, {len(tok['val'])} validation, {len(tok['test'])} test series, "
                 f"test lifts {[len(l) for l in out[f'P{p}']['lifts']['test']]}")
     ctx.data = out
-    _footer(ctx, t0)
     return out
 
 
 def _need_data(ctx: Context):
+    """The data of step 1, loaded once per Context (a later step loads it quietly when step 1 was not run here)."""
     if ctx.data is None:
-        step_data(ctx)
+        ctx.log("    loading the data of step 1")
+        _load_data(ctx)
 
 
 def step_timing_baselines(ctx: Context) -> dict:
@@ -222,7 +230,7 @@ def step_b_vs_f(ctx: Context) -> dict:
         return {}
     import matplotlib.pyplot as plt
     from .onset import onset_summary
-    from .contrast import summarise_b_vs_f
+    from .contrast import has_sources, summarise_b_vs_f
     t0, bc = time.time(), ctx.cfg["b_vs_f"]
     ckpt, runs = ctx.root / bc["checkpoint_dir"], ctx.folder("b_vs_f") / "runs"
     runs.mkdir(parents=True, exist_ok=True)
@@ -230,17 +238,23 @@ def step_b_vs_f(ctx: Context) -> dict:
     for h in bc["horizons_ms"]:
         for p in ctx.participants:
             f_s, f_o = runs / f"h{h}ms_P{p}.csv", runs / f"onset_h{h}ms_P{p}.csv"
-            if f_s.exists() and f_o.exists():
+            if f_s.exists() and f_o.exists() and has_sources(pd.read_csv(f_s), bc["sources"]):
                 s, o = pd.read_csv(f_s), pd.read_csv(f_o)
             elif not (ckpt / f"h{h}ms" / f"P{p}" / "best.pt").exists():
                 ctx.log(f"    P{p} h={h} ms: no horizon checkpoint at {ckpt / f'h{h}ms' / f'P{p}'}, skipped")
                 continue
             else:
-                s, o = _horizon_scores(p, h, ckpt, int(ctx.cfg["evaluation"]["n_null"]), tuple(bc["sources"]))
+                try:
+                    s, o = _horizon_scores(p, h, ckpt, int(ctx.cfg["evaluation"]["n_null"]), tuple(bc["sources"]))
+                except ValueError as err:                       # e.g. fewer than 2 trials for a swap
+                    ctx.log(f"    P{p} h={h} ms: skipped ({err})")
+                    continue
                 s.to_csv(f_s, index=False); o.to_csv(f_o, index=False)
             scores.append(s); onsets.append(o)
-            a = s[(s.segment == "all") & (s.source == "eeg")].iloc[0]
-            ctx.log(f"    P{p} h={h} ms: eeg_skill {a.eeg_skill:+.4f} (p {a.p:.3f}), VAF gain {a.vaf_gain:+.2f}")
+            a = s[(s.segment == "all") & (s.source == "eeg")]
+            if len(a):
+                a = a.iloc[0]
+                ctx.log(f"    P{p} h={h} ms: eeg_skill {a.eeg_skill:+.4f} (p {a.p:.3f}), VAF gain {a.vaf_gain:+.2f}")
     if not scores:
         ctx.log("    no horizon checkpoint found: nothing to summarise")
         return {}
@@ -275,6 +289,7 @@ def step_budget(ctx: Context) -> dict:
             f"{b['max_epochs']} epochs per run (guided runs last at least {b['min_epochs_guided']} epochs)")
     if ctx.device.type == "cpu":
         ctx.log("    measured on the CPU: CPU hours, not a GPU estimate")
+    ctx.log("    not included: step 7, which runs many full inference passes per student (nulls, swaps, templates)")
     _footer(ctx, t0)
     return b
 
@@ -367,9 +382,11 @@ def step_evaluate_students(ctx: Context) -> dict:
         for tok, lf in zip(test, lifts_t):
             pred = predict_eeg_series(model, tok, sd["norm"], dev, **kw)
             tables["onset"].append(onset_error(pred, tok["emg_full"], lf, 500.0, names=names).assign(**tag))
-        tables["swap"].append(evaluate_swap(model, test, lifts_t, sd["norm"], cfg, dev, names).assign(**tag))
-        tables["phase_swap"].append(evaluate_phase_matched_swap(model, test, lifts_t, sd["norm"], cfg, dev, names)
-                                    .assign(**tag))
+        for key, fn in (("swap", evaluate_swap), ("phase_swap", evaluate_phase_matched_swap)):
+            try:
+                tables[key].append(fn(model, test, lifts_t, sd["norm"], cfg, dev, names).assign(**tag))
+            except ValueError as err:                           # fewer than 2 test trials: no swap possible
+                ctx.log(f"    {subj} {cond} scale {scale} seed {seed}: no {key} ({err})")
         for variant in ctx.cfg["timing"]["variants"]:
             fitted = ctx.timing.get((subj, variant, 0)) or cached_timing(
                 ctx.folder("timing_baselines") / "cache", sd["p_id"], sd["tokens"], variant, 0)
@@ -382,7 +399,7 @@ def step_evaluate_students(ctx: Context) -> dict:
             model, test, lifts_t, templates[subj], sd["norm"], cfg, dev, names).assign(**tag))
         ctx.log(f"    {subj} {cond} scale {scale} seed {seed}: mean r "
                 f"{res['standard'][res['standard'].rate == 500].r.mean():.3f}")
-    out = {k: pd.concat(v, ignore_index=True) for k, v in tables.items()}
+    out = {k: pd.concat(v, ignore_index=True) for k, v in tables.items() if v}
     for k, v in out.items():
         ctx.save(v, "evaluate_students", f"{k}.csv")
     ctx.save(summarise_template_deviation(out["template_deviation"]), "evaluate_students",
