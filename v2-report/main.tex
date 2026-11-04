@@ -20,14 +20,16 @@
 \input{styles}
 \newcommand{\fig}[3]{\begin{figure}[htbp]\centering\includegraphics[width=#2\textwidth,height=0.8\textheight,keepaspectratio]{figures/#1}\caption{#3}\label{fig:#1}\end{figure}}
 
-\title{گزارش مدل \lr{KG-GT v2}:\\ پیش‌بینی پوش \lr{EMG} از سینماتیک و \lr{EEG} با تفسیرپذیری در همه‌ی لایه‌ها}
+\title{گزارش مدل‌های \lr{KG-GT v2} و \lr{v3}:\ پیش‌بینی پوش \lr{EMG} از سینماتیک و \lr{EEG}، و آنچه \lr{EEG} فراتر از زمان‌بندی اضافه می‌کند}
 \author{تیم ۶، مدرسه‌ی بین‌رشته‌ای علوم اعصاب محاسباتی}
-\date{مهر ۱۴۰۵}
+\date{آبان ۱۴۰۵}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
+\textbf{تازه در این نسخه (\lr{v3}، فصل‌های~\ref{sec:overview}، \ref{sec:v3} و~\ref{sec:v3-results}).} پیشنهاد تیم (آزمایش بحرانی دوم) پرسش را به یک مقایسه‌ی منصفانه تبدیل کرد: مدل \lr{B} از حرکت و نیروی گذشته به‌علاوه‌ی رخدادهای گذشته‌ی تکلیف، در برابر مدل \lr{F} که همان \lr{B} به‌علاوه‌ی تاریخچه‌ی \lr{EEG} است، در چهار افق پیش‌بینی (۰ تا ۱۰۰۰ میلی‌ثانیه). در هیچ افقی \lr{F} از \lr{B} بهتر نیست: \lr{F} کمی بدتر است و $p$ پس از \lr{Holm} در همه‌ی افق‌ها \lr{۱٫۰۰} است. \lr{EEG} یک \lr{trial} دیگر با همان زمان‌بندی هم همان نتیجه را می‌دهد و در هیچ فاز تکلیفی اثر معناداری دیده نمی‌شود. یک مدل فقط‌\lr{EEG} که با جریان سینماتیک به‌عنوان معلم آموزش دید (\lr{Eguided}) در \lr{validation} با مدل بدون راهنما (\lr{E0}) برابر است. ارزیابی این دو روی سری‌های آزمون هنوز در حال اجراست. فصل اول این گزارش کل مسیر را خلاصه می‌کند.
+
 این گزارش دو مدل را مقایسه می‌کند که فعالیت پنج عضله‌ی دست و بازو (پوش \lr{EMG}) را در داده‌ی \lr{WAY-EEG-GAL} پیش‌بینی می‌کنند. در این داده ۱۲ نفر بارها جسمی را گرفته و بلند کرده‌اند.
 
 مدل پایه (\lr{KG-GT}، دفترچه‌ی \lr{main\_1stage} در شاخه‌ی \lr{KG-GT-CUDA}) یک \lr{Transformer} روی \lr{EEG} و یک \lr{muscle graph} دارد که سینماتیک دست آن را هدایت می‌کند، و فقط یک خروجی می‌دهد. روی سری‌های آزمون به \lr{VAF} \lr{۷۲٫۲} درصد و همبستگی \lr{۰٫۸۵۱} رسید. اما آزمون‌های حذف ورودی نشان دادند تقریباً همه‌ی این دقت از سینماتیک می‌آید، و با یک خروجی نمی‌توان سهم \lr{EEG} را جدا کرد.
@@ -42,6 +44,7 @@
 \tableofcontents
 \newpage
 
+\input{sections/00_overview}
 \input{sections/01_baseline}
 \input{sections/02_v2}
 \input{sections/03_results}
@@ -52,5 +55,7 @@
 \input{sections/06_residual}
 \input{sections/06b_eeg_controls}
 \input{sections/07_conclusion}
+\input{sections/08_v3}
+\input{sections/09_v3_results}
 
 \end{document}
