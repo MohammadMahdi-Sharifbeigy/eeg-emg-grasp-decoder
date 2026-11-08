@@ -151,7 +151,7 @@
     \foreach \a/\b in {v1/v2,v2/ctl,ctl/v3,v3/pe} \draw[arr] (\a) -- (\b);
     \node[bad,text width=22mm,below=6mm of v1] (q1) {kinematics give\\all the accuracy};
     \node[bad,text width=24mm,below=6mm of v2] (q2) {EEG gate stays\\below 0.04};
-    \node[bad,text width=24mm,below=6mm of ctl] (q3) {E mostly knows\\\emph{when}, not \emph{how much}};
+    \node[bad,text width=24mm,below=6mm of ctl] (q3) {E knows only\\noisy task timing};
     \node[bad,text width=26mm,below=6mm of v3] (q4) {E keeps 90\% with\\another trial's EEG};
     \node[bad,text width=22mm,below=6mm of pe] (q5) {no claim apart\\from movement};
     \foreach \a/\b in {v1/q1,v2/q2,ctl/q3,v3/q4,pe/q5} \draw[arr,dashed] (\a) -- (\b);
@@ -717,7 +717,7 @@
       \item Causal v2 (predict 0--1000 ms ahead): F$-$K $+0.55$ VAF at 500 ms, only in the reach phase.
     \end{itemize}
     \begin{tcolorbox}[notebox,title={Reading}]
-      EEG in this data mostly knows \emph{when} the movement happens, not \emph{how strongly} each muscle works.
+      What EEG knows about the muscles is contained in the task timing, and it knows even that less precisely than the event times themselves; it adds nothing beyond timing.
     \end{tcolorbox}
   \end{columns}
   \Verify{\scriptsize The phase model sees the future event times, so it is a ceiling, not a fair competitor. Is a causal timing baseline (past events only) the right reference instead?}
